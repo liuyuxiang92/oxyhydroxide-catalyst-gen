@@ -1,0 +1,71 @@
+# oxyhydroxide-catalyst-gen
+
+Clean, minimal repo for constrained **ABCDEOOH** composition generation using an offline DQN-style regressor.
+
+This repo intentionally drops the legacy notebooks and upstream history.
+
+## What it does
+
+- Builds an **offline dataset** of random episodes from a constrained environment (5 distinct cations + discrete fractions summing to 1).
+- Computes **Monte-Carlo returns** as targets.
+- Trains a neural regressor to predict $Q(s,a)$.
+- Generates new candidates by choosing actions that maximize predicted $Q$.
+
+Optional:
+- Evaluate terminal compositions using a DeepMD ensemble predictor and use an uncertainty-aware objective.
+- Apply a primary-phase screening filter (NiFeCo / NiFe / CoFe / Ni-only / Co-only).
+
+## Quickstart
+
+Create an environment with the dependencies in `requirements.txt`, then run:
+
+```bash
+python scripts/run_ABCDEOOH_experiment.py \
+  --out runs/demo \
+  --reward-mode none \
+  --num-random-eps 200 \
+  --dqn-epochs 5 \
+  --num-gen-eps 50
+```
+
+Outputs:
+- `runs/demo/random_dataset.npz`
+- `runs/demo/generated.csv`
+- `runs/demo/qnet.pt`
+
+## DeepMD reward (optional)
+
+DeepMD mode requires extra dependencies (not needed for `--reward-mode none`):
+
+```bash
+pip install ase deepmd-kit
+```
+
+Run with an ensemble (repeat `--dp-model`):
+
+```bash
+python scripts/run_ABCDEOOH_experiment.py \
+  --out runs/dp \
+  --reward-mode dp \
+  --dp-poscar PATH/TO/POSCAR \
+  --dp-model PATH/TO/model_1.ckpt.pt --dp-model PATH/TO/model_2.ckpt.pt \
+  --dp-objective mean_minus_kstd --dp-k 1.0 \
+  --dp-uncertainty total
+```
+
+Notes:
+- `--dp-objective mean_minus_kstd`: smaller objective = better, reward = `-objective`.
+- `--dp-uncertainty`: how uncertainty is aggregated (`models`, `configs`, or `total`).
+
+## Primary-phase filter
+
+Use `--primary-phase-filter {none,buffer,generated,both}`.
+
+- `buffer`: only keep constraint-valid random episodes in the offline dataset.
+- `generated`: only write constraint-valid generated candidates.
+- `both`: apply to both phases.
+
+## Data/models folders
+
+This clean repo keeps `data/` and `rf_models/` directories for any future datasets/models you want to track.
+It does not require the old forked `.npz` datasets to run the ABCDEOOH pipeline.

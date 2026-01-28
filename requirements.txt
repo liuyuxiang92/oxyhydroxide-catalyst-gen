@@ -1,0 +1,12 @@
+numpy
+scikit-learn
+torch
+tqdm
+joblib
+pymatgen
+matminer
+pandas
+
+# Optional for DeepMD mode:
+# ase
+# deepmd-kit

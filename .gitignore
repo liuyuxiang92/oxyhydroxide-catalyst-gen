@@ -1,0 +1,8 @@
+runs/
+__pycache__/
+*.pyc
+.DS_Store
+.ipynb_checkpoints/
+
+# Note: we intentionally do NOT ignore *.npz/*.joblib globally.
+# Those may be legitimate tracked datasets/models in this clean repo.
