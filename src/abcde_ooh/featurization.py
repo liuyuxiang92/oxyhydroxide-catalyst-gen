@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Sequence
 
+import warnings
+
 import numpy as np
 
 try:
@@ -9,14 +11,20 @@ try:
     import matminer.featurizers.composition as cf
     from pymatgen.core.composition import Composition
 
-    feature_calculators = MultipleFeaturizer(
-        [
-            cf.element.Stoichiometry(),
-            cf.composite.ElementProperty.from_preset("magpie"),
-            cf.orbital.ValenceOrbital(props=["avg"]),
-            cf.ion.IonProperty(fast=True),
-        ]
-    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*PymatgenData\(impute_nan=False\).*",
+            category=UserWarning,
+        )
+        feature_calculators = MultipleFeaturizer(
+            [
+                cf.element.Stoichiometry(),
+                cf.composite.ElementProperty.from_preset("magpie"),
+                cf.orbital.ValenceOrbital(props=["avg"]),
+                cf.ion.IonProperty(fast=True),
+            ]
+        )
     _NUM_FEATURES = len(feature_calculators.feature_labels())
 except Exception:  # pragma: no cover
     # Allow a minimal install to run the pipeline (useful for smoke tests / CI).

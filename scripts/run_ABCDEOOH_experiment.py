@@ -27,6 +27,7 @@ import csv
 import json
 import random
 import sys
+import warnings
 from typing import List, Sequence, Tuple
 
 import joblib
@@ -35,6 +36,15 @@ import torch
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
+
+# Matminer can emit a verbose warning like:
+#   "PymatgenData(impute_nan=False): ..."
+# which tends to spam logs and corrupt tqdm rendering on HPC.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*PymatgenData\(impute_nan=False\).*",
+    category=UserWarning,
+)
 
 # Allow running without installing the package.
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
