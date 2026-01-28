@@ -296,7 +296,8 @@ def main() -> None:
                 mean = entry["mean"]
                 std = entry["std"]
             else:
-                mean, std = dp_predictor.predict_overpotential(comp, uncertainty=args.dp_uncertainty)
+                pred = dp_predictor.predict_overpotential(comp, uncertainty=args.dp_uncertainty)
+                mean, std = pred[0], pred[1]
                 dp_cache[key] = {"mean": float(mean), "std": float(std)}
 
             obj = objective_from_mean_std(float(mean), float(std), mode=args.dp_objective, k=args.dp_k)

@@ -376,7 +376,7 @@ class DeepMDOverpotentialPredictor:
 
         if return_per_model:
             return ensemble_mean, ensemble_std, details
-        return ensemble_mean, ensemble_std, None
+        return ensemble_mean, ensemble_std
 
 
 def objective_from_mean_std(mean: float, std: float, mode: str, k: float) -> float:
