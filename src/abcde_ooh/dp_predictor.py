@@ -314,8 +314,15 @@ class DeepMDOverpotentialPredictor:
         comp: Dict[str, float],
         *,
         uncertainty: str = "models",
+        std_mode: Optional[str] = None,
         return_per_model: bool = False,
     ):
+        # Backward-compat alias: older code used `std_mode`.
+        if std_mode is not None:
+            if uncertainty != "models" and std_mode != uncertainty:
+                raise ValueError("Provide only one of `uncertainty` or `std_mode` (they disagree).")
+            uncertainty = std_mode
+
         fracs = {el: float(fr) for el, fr in comp.items()}
         metal_elem = self._infer_metal_elem_from_slab(self.base_slab)
 

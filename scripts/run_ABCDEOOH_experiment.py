@@ -103,7 +103,7 @@ def train_q(
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = torch.nn.MSELoss()
 
-    for _ in tqdm(range(epochs), desc="Q epochs"):
+    for _ in tqdm(range(epochs), desc="Q epochs", disable=not sys.stdout.isatty()):
         for s_mat, s_step, a_elem, a_comp, y in loader:
             s_mat = s_mat.to(device)
             s_step = s_step.to(device)
@@ -296,7 +296,7 @@ def main() -> None:
                 mean = entry["mean"]
                 std = entry["std"]
             else:
-                mean, std = dp_predictor.predict_overpotential(comp, std_mode=args.dp_uncertainty)
+                mean, std = dp_predictor.predict_overpotential(comp, uncertainty=args.dp_uncertainty)
                 dp_cache[key] = {"mean": float(mean), "std": float(std)}
 
             obj = objective_from_mean_std(float(mean), float(std), mode=args.dp_objective, k=args.dp_k)
@@ -328,7 +328,13 @@ def main() -> None:
 
         current_phase = "random"
 
-        for _ in tqdm(range(max_attempts), desc="Random episodes"):
+        pbar = tqdm(
+            total=target_accepted,
+            desc="Random episodes (accepted)",
+            disable=not sys.stdout.isatty(),
+        )
+
+        while accepted < target_accepted and attempted < max_attempts:
             attempted += 1
             env.initialize()
 
@@ -348,8 +354,19 @@ def main() -> None:
             all_targets.extend(q_targets)
             accepted += 1
 
-            if accepted >= target_accepted:
-                break
+            pbar.update(1)
+            if sys.stdout.isatty():
+                if attempted % 2000 == 0:
+                    rate = (accepted / attempted) if attempted else 0.0
+                    pbar.set_postfix(attempts=attempted, rate=f"{rate:.3f}")
+
+        pbar.close()
+
+        rate = (accepted / attempted) if attempted else 0.0
+        print(
+            f"[INFO] Random episodes: accepted {accepted}/{target_accepted} after {attempted} attempts (rate={rate:.4f}).",
+            flush=True,
+        )
 
         if accepted < target_accepted:
             print(
@@ -410,7 +427,13 @@ def main() -> None:
     accepted = 0
     attempted = 0
 
-    for _ in tqdm(range(max_gen_attempts), desc="Generate"):
+    pbar = tqdm(
+        total=target_gen,
+        desc="Generate (accepted)",
+        disable=not sys.stdout.isatty(),
+    )
+
+    while accepted < target_gen and attempted < max_gen_attempts:
         attempted += 1
         env.initialize()
 
@@ -446,8 +469,20 @@ def main() -> None:
             }
         )
         accepted += 1
-        if accepted >= target_gen:
-            break
+
+        pbar.update(1)
+        if sys.stdout.isatty():
+            if attempted % 2000 == 0:
+                rate = (accepted / attempted) if attempted else 0.0
+                pbar.set_postfix(attempts=attempted, rate=f"{rate:.3f}")
+
+    pbar.close()
+
+    rate = (accepted / attempted) if attempted else 0.0
+    print(
+        f"[INFO] Generated candidates: accepted {accepted}/{target_gen} after {attempted} attempts (rate={rate:.4f}).",
+        flush=True,
+    )
 
     if accepted < target_gen:
         print(f"[WARN] Only accepted {accepted}/{target_gen} generated candidates after {attempted} attempts.")
