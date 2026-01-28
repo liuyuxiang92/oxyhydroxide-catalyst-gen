@@ -27,6 +27,7 @@ import csv
 import json
 import random
 import sys
+import time
 import warnings
 from typing import List, Sequence, Tuple
 
@@ -42,8 +43,10 @@ from tqdm import tqdm
 # which tends to spam logs and corrupt tqdm rendering on HPC.
 warnings.filterwarnings(
     "ignore",
-    message=r".*PymatgenData\(impute_nan=False\).*",
+    message=r"^PymatgenData\(impute_nan=False\):.*",
     category=UserWarning,
+    module=r"matminer\.utils\.data",
+    append=False,
 )
 
 # Allow running without installing the package.
@@ -65,6 +68,17 @@ def set_seed(seed: int) -> None:
 
 def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
+
+
+def _format_hms(seconds: float) -> str:
+    if seconds != seconds or seconds == float("inf"):
+        return "?"
+    seconds = max(0.0, float(seconds))
+    s = int(round(seconds))
+    h = s // 3600
+    m = (s % 3600) // 60
+    sec = s % 60
+    return f"{h:02d}:{m:02d}:{sec:02d}"
 
 
 def predict_sinter_temperature(rf_model: object, formula: str) -> float:
@@ -231,6 +245,14 @@ def main() -> None:
         choices=["models", "configs", "total"],
     )
 
+    # Logging/progress
+    parser.add_argument(
+        "--log-progress-every-secs",
+        type=int,
+        default=600,
+        help="For non-interactive runs (e.g. nohup), print a progress line every N seconds. Set 0 to disable.",
+    )
+
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -336,6 +358,8 @@ def main() -> None:
 
         accepted = 0
         attempted = 0
+        t0 = time.monotonic()
+        last_log_t = t0
 
         current_phase = "random"
 
@@ -370,6 +394,21 @@ def main() -> None:
                 if attempted % 2000 == 0:
                     rate = (accepted / attempted) if attempted else 0.0
                     pbar.set_postfix(attempts=attempted, rate=f"{rate:.3f}")
+            else:
+                if args.log_progress_every_secs and (time.monotonic() - last_log_t) >= args.log_progress_every_secs:
+                    elapsed = time.monotonic() - t0
+                    acc_rate = (accepted / elapsed) if elapsed > 0 else 0.0
+                    remaining = max(0, target_accepted - accepted)
+                    eta = (remaining / acc_rate) if acc_rate > 0 else float("inf")
+                    print(
+                        "[PROGRESS] Random episodes: "
+                        f"accepted {accepted}/{target_accepted} "
+                        f"attempted {attempted} "
+                        f"elapsed {_format_hms(elapsed)} "
+                        f"eta {_format_hms(eta)}",
+                        flush=True,
+                    )
+                    last_log_t = time.monotonic()
 
         pbar.close()
 
@@ -437,6 +476,8 @@ def main() -> None:
 
     accepted = 0
     attempted = 0
+    t0 = time.monotonic()
+    last_log_t = t0
 
     pbar = tqdm(
         total=target_gen,
@@ -486,6 +527,21 @@ def main() -> None:
             if attempted % 2000 == 0:
                 rate = (accepted / attempted) if attempted else 0.0
                 pbar.set_postfix(attempts=attempted, rate=f"{rate:.3f}")
+        else:
+            if args.log_progress_every_secs and (time.monotonic() - last_log_t) >= args.log_progress_every_secs:
+                elapsed = time.monotonic() - t0
+                acc_rate = (accepted / elapsed) if elapsed > 0 else 0.0
+                remaining = max(0, target_gen - accepted)
+                eta = (remaining / acc_rate) if acc_rate > 0 else float("inf")
+                print(
+                    "[PROGRESS] Generate: "
+                    f"accepted {accepted}/{target_gen} "
+                    f"attempted {attempted} "
+                    f"elapsed {_format_hms(elapsed)} "
+                    f"eta {_format_hms(eta)}",
+                    flush=True,
+                )
+                last_log_t = time.monotonic()
 
     pbar.close()
 
