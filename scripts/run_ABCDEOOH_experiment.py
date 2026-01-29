@@ -606,15 +606,10 @@ def main() -> None:
 
         reward = float(env.path[-1].reward) if env.path else 0.0
 
-        row = {
-            "formula": env.terminal_formula,
-            "primary_phase": label or "none",
-            "reward": reward,
-        }
-
+        dp_mean = ""
+        dp_std = ""
+        dp_mean_minus_std = ""
         if args.reward_mode == "dp":
-            from abcde_ooh.dp_predictor import objective_from_mean_std
-
             key = tuple(sorted((k, float(v)) for k, v in comp.items()))
             if key in dp_cache:
                 entry = dp_cache[key]
@@ -625,22 +620,19 @@ def main() -> None:
                 pred = dp_predictor.predict_overpotential(comp, uncertainty=args.dp_uncertainty)
                 mean, std = float(pred[0]), float(pred[1])
                 dp_cache[key] = {"mean": mean, "std": std}
+            dp_mean = mean
+            dp_std = std
+            dp_mean_minus_std = mean - std
 
-            # Keep "mean/std/mean-std" style columns for readability.
-            row.update(
-                {
-                    "dp_mean": mean,
-                    "dp_std": std,
-                    "dp_mean_minus_std": mean - std,
-                    "dp_mean_minus_kstd": mean - float(args.dp_k) * std,
-                    "dp_mean_plus_kstd": mean + float(args.dp_k) * std,
-                    "dp_objective": float(
-                        objective_from_mean_std(mean, std, mode=args.dp_objective, k=float(args.dp_k))
-                    ),
-                }
-            )
-
-        row.update({k: float(v) for k, v in sorted(comp.items())})
+        row = {
+            "formula": env.terminal_formula,
+            "reward": reward,
+            "dp_mean": dp_mean,
+            "dp_std": dp_std,
+            "dp_mean_minus_std": dp_mean_minus_std,
+            "primary_ok": bool(ok),
+            "primary_label": label or "",
+        }
 
         rows.append(row)
         accepted += 1
@@ -662,24 +654,15 @@ def main() -> None:
         print(f"[WARN] Only accepted {accepted}/{target_gen} generated candidates after {attempted} attempts.")
 
     out_csv = os.path.join(args.out, "generated.csv")
-    preferred = ["formula", "primary_phase", "reward"]
-    if args.reward_mode == "dp":
-        preferred += [
-            "dp_mean",
-            "dp_std",
-            "dp_mean_minus_std",
-            "dp_mean_minus_kstd",
-            "dp_mean_plus_kstd",
-            "dp_objective",
-        ]
-
-    # Put known columns first, then everything else (e.g., element fractions).
-    all_keys = []
-    for r in rows:
-        for k in r.keys():
-            if k not in all_keys:
-                all_keys.append(k)
-    keys = [k for k in preferred if k in all_keys] + [k for k in all_keys if k not in preferred]
+    keys = [
+        "formula",
+        "reward",
+        "dp_mean",
+        "dp_std",
+        "dp_mean_minus_std",
+        "primary_ok",
+        "primary_label",
+    ]
 
     with open(out_csv, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=keys)
