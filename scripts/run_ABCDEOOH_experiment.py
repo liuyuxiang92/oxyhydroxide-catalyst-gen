@@ -69,18 +69,6 @@ def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
-def predict_sinter_temperature(rf_model: object, formula: str) -> float:
-    try:
-        from pymatgen.core.composition import Composition
-
-        chemical = Composition(formula)
-        features = feature_calculators.featurize(chemical)
-        features = np.asarray(features, dtype=float).reshape(1, -1)
-        return float(rf_model.predict(features)[0])
-    except Exception:
-        return 1000.0
-
-
 def extract_mc_q_targets(episode, gamma: float):
     inputs = []
     q_targets: List[float] = []
@@ -191,9 +179,8 @@ def main() -> None:
         "--reward-mode",
         type=str,
         default="none",
-        choices=["none", "sinter-rf", "dp"],
+        choices=["none", "dp"],
     )
-    parser.add_argument("--rf-model", type=str, default="")
 
     parser.add_argument(
         "--primary-phase-filter",
@@ -240,12 +227,6 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    rf_model = None
-    if args.reward_mode == "sinter-rf":
-        if not args.rf_model:
-            raise SystemExit("--reward-mode sinter-rf requires --rf-model")
-        rf_model = joblib.load(args.rf_model)
-
     dp_predictor = None
     dp_cache = {}
     if args.reward_mode == "dp":
@@ -267,9 +248,6 @@ def main() -> None:
     def reward_fn(formula: str) -> float:
         if args.reward_mode == "none":
             return 0.0
-        if args.reward_mode == "sinter-rf":
-            assert rf_model is not None
-            return -predict_sinter_temperature(rf_model, formula)
         if args.reward_mode == "dp":
             raise RuntimeError("DP reward is bound via env-aware closure")
         raise RuntimeError("Unknown reward mode")
