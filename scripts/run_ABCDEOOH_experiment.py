@@ -27,7 +27,6 @@ import csv
 import json
 import random
 import sys
-import time
 import warnings
 from typing import List, Sequence, Tuple
 
@@ -68,17 +67,6 @@ def set_seed(seed: int) -> None:
 
 def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
-
-
-def _format_hms(seconds: float) -> str:
-    if seconds != seconds or seconds == float("inf"):
-        return "?"
-    seconds = max(0.0, float(seconds))
-    s = int(round(seconds))
-    h = s // 3600
-    m = (s % 3600) // 60
-    sec = s % 60
-    return f"{h:02d}:{m:02d}:{sec:02d}"
 
 
 def predict_sinter_temperature(rf_model: object, formula: str) -> float:
@@ -127,7 +115,7 @@ def train_q(
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = torch.nn.MSELoss()
 
-    for _ in tqdm(range(epochs), desc="Q epochs", disable=not sys.stdout.isatty()):
+    for _ in tqdm(range(epochs), desc="Q epochs"):
         for s_mat, s_step, a_elem, a_comp, y in loader:
             s_mat = s_mat.to(device)
             s_step = s_step.to(device)
@@ -245,14 +233,6 @@ def main() -> None:
         choices=["models", "configs", "total"],
     )
 
-    # Logging/progress
-    parser.add_argument(
-        "--log-progress-every-secs",
-        type=int,
-        default=600,
-        help="For non-interactive runs (e.g. nohup), print a progress line every N seconds. Set 0 to disable.",
-    )
-
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -358,15 +338,13 @@ def main() -> None:
 
         accepted = 0
         attempted = 0
-        t0 = time.monotonic()
-        last_log_t = t0
+        rejected = 0
 
         current_phase = "random"
 
         pbar = tqdm(
             total=target_accepted,
             desc="Random episodes (accepted)",
-            disable=not sys.stdout.isatty(),
         )
 
         while accepted < target_accepted and attempted < max_attempts:
@@ -382,6 +360,11 @@ def main() -> None:
             if need_buffer_filter:
                 ok, _label = check_primary_phase(comp)
                 if not ok:
+                    rejected += 1
+                    if rejected <= 20 or rejected % 2000 == 0:
+                        tqdm.write(
+                            f"[REJECT] buffer filter: attempt={attempted} rejected={rejected} comp={comp}"
+                        )
                     continue
 
             inputs, q_targets = extract_mc_q_targets(env.path, gamma=args.gamma)
@@ -390,25 +373,9 @@ def main() -> None:
             accepted += 1
 
             pbar.update(1)
-            if sys.stdout.isatty():
-                if attempted % 2000 == 0:
-                    rate = (accepted / attempted) if attempted else 0.0
-                    pbar.set_postfix(attempts=attempted, rate=f"{rate:.3f}")
-            else:
-                if args.log_progress_every_secs and (time.monotonic() - last_log_t) >= args.log_progress_every_secs:
-                    elapsed = time.monotonic() - t0
-                    acc_rate = (accepted / elapsed) if elapsed > 0 else 0.0
-                    remaining = max(0, target_accepted - accepted)
-                    eta = (remaining / acc_rate) if acc_rate > 0 else float("inf")
-                    print(
-                        "[PROGRESS] Random episodes: "
-                        f"accepted {accepted}/{target_accepted} "
-                        f"attempted {attempted} "
-                        f"elapsed {_format_hms(elapsed)} "
-                        f"eta {_format_hms(eta)}",
-                        flush=True,
-                    )
-                    last_log_t = time.monotonic()
+            if attempted % 2000 == 0:
+                rate = (accepted / attempted) if attempted else 0.0
+                pbar.set_postfix(attempts=attempted, rejected=rejected, rate=f"{rate:.3f}")
 
         pbar.close()
 
@@ -476,13 +443,11 @@ def main() -> None:
 
     accepted = 0
     attempted = 0
-    t0 = time.monotonic()
-    last_log_t = t0
+    rejected = 0
 
     pbar = tqdm(
         total=target_gen,
         desc="Generate (accepted)",
-        disable=not sys.stdout.isatty(),
     )
 
     while accepted < target_gen and attempted < max_gen_attempts:
@@ -511,37 +476,58 @@ def main() -> None:
         comp = env.terminal_cation_fractions()
         ok, label = check_primary_phase(comp)
         if need_generated_filter and not ok:
+            rejected += 1
+            if rejected <= 20 or rejected % 2000 == 0:
+                tqdm.write(
+                    f"[REJECT] generated filter: attempt={attempted} rejected={rejected} comp={comp}"
+                )
             continue
 
-        rows.append(
-            {
-                "formula": env.terminal_formula,
-                "primary_phase": label or "none",
-                **{k: float(v) for k, v in sorted(comp.items())},
-            }
-        )
+        reward = float(env.path[-1].reward) if env.path else 0.0
+
+        row = {
+            "formula": env.terminal_formula,
+            "primary_phase": label or "none",
+            "reward": reward,
+        }
+
+        if args.reward_mode == "dp":
+            from abcde_ooh.dp_predictor import objective_from_mean_std
+
+            key = tuple(sorted((k, float(v)) for k, v in comp.items()))
+            if key in dp_cache:
+                entry = dp_cache[key]
+                mean = float(entry["mean"])
+                std = float(entry["std"])
+            else:
+                assert dp_predictor is not None
+                pred = dp_predictor.predict_overpotential(comp, uncertainty=args.dp_uncertainty)
+                mean, std = float(pred[0]), float(pred[1])
+                dp_cache[key] = {"mean": mean, "std": std}
+
+            # Keep "mean/std/mean-std" style columns for readability.
+            row.update(
+                {
+                    "dp_mean": mean,
+                    "dp_std": std,
+                    "dp_mean_minus_std": mean - std,
+                    "dp_mean_minus_kstd": mean - float(args.dp_k) * std,
+                    "dp_mean_plus_kstd": mean + float(args.dp_k) * std,
+                    "dp_objective": float(
+                        objective_from_mean_std(mean, std, mode=args.dp_objective, k=float(args.dp_k))
+                    ),
+                }
+            )
+
+        row.update({k: float(v) for k, v in sorted(comp.items())})
+
+        rows.append(row)
         accepted += 1
 
         pbar.update(1)
-        if sys.stdout.isatty():
-            if attempted % 2000 == 0:
-                rate = (accepted / attempted) if attempted else 0.0
-                pbar.set_postfix(attempts=attempted, rate=f"{rate:.3f}")
-        else:
-            if args.log_progress_every_secs and (time.monotonic() - last_log_t) >= args.log_progress_every_secs:
-                elapsed = time.monotonic() - t0
-                acc_rate = (accepted / elapsed) if elapsed > 0 else 0.0
-                remaining = max(0, target_gen - accepted)
-                eta = (remaining / acc_rate) if acc_rate > 0 else float("inf")
-                print(
-                    "[PROGRESS] Generate: "
-                    f"accepted {accepted}/{target_gen} "
-                    f"attempted {attempted} "
-                    f"elapsed {_format_hms(elapsed)} "
-                    f"eta {_format_hms(eta)}",
-                    flush=True,
-                )
-                last_log_t = time.monotonic()
+        if attempted % 2000 == 0:
+            rate = (accepted / attempted) if attempted else 0.0
+            pbar.set_postfix(attempts=attempted, rejected=rejected, rate=f"{rate:.3f}")
 
     pbar.close()
 
@@ -555,11 +541,24 @@ def main() -> None:
         print(f"[WARN] Only accepted {accepted}/{target_gen} generated candidates after {attempted} attempts.")
 
     out_csv = os.path.join(args.out, "generated.csv")
-    keys = []
+    preferred = ["formula", "primary_phase", "reward"]
+    if args.reward_mode == "dp":
+        preferred += [
+            "dp_mean",
+            "dp_std",
+            "dp_mean_minus_std",
+            "dp_mean_minus_kstd",
+            "dp_mean_plus_kstd",
+            "dp_objective",
+        ]
+
+    # Put known columns first, then everything else (e.g., element fractions).
+    all_keys = []
     for r in rows:
         for k in r.keys():
-            if k not in keys:
-                keys.append(k)
+            if k not in all_keys:
+                all_keys.append(k)
+    keys = [k for k in preferred if k in all_keys] + [k for k in all_keys if k not in preferred]
 
     with open(out_csv, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=keys)
