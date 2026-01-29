@@ -331,7 +331,7 @@ def main() -> None:
     else:
         need_buffer_filter = args.primary_phase_filter in {"buffer", "both"}
         target_accepted = int(args.num_random_eps)
-        max_attempts = int(args.max_random_attempts or (target_accepted * 200))
+        max_attempts = int(args.max_random_attempts) if args.max_random_attempts is not None else None
 
         all_inputs = []
         all_targets = []
@@ -347,7 +347,7 @@ def main() -> None:
             desc="Random episodes (accepted)",
         )
 
-        while accepted < target_accepted and attempted < max_attempts:
+        while accepted < target_accepted and (max_attempts is None or attempted < max_attempts):
             attempted += 1
             env.initialize()
 
@@ -385,7 +385,7 @@ def main() -> None:
             flush=True,
         )
 
-        if accepted < target_accepted:
+        if max_attempts is not None and accepted < target_accepted:
             print(
                 f"[WARN] Only accepted {accepted}/{target_accepted} random episodes after {attempted} attempts.",
                 flush=True,
@@ -437,7 +437,7 @@ def main() -> None:
     rows = []
     need_generated_filter = args.primary_phase_filter in {"generated", "both"}
     target_gen = int(args.num_gen_eps)
-    max_gen_attempts = int(args.max_gen_attempts or (target_gen * 200))
+    max_gen_attempts = int(args.max_gen_attempts) if args.max_gen_attempts is not None else None
 
     current_phase = "generate"
 
@@ -450,7 +450,7 @@ def main() -> None:
         desc="Generate (accepted)",
     )
 
-    while accepted < target_gen and attempted < max_gen_attempts:
+    while accepted < target_gen and (max_gen_attempts is None or attempted < max_gen_attempts):
         attempted += 1
         env.initialize()
 
@@ -537,7 +537,7 @@ def main() -> None:
         flush=True,
     )
 
-    if accepted < target_gen:
+    if max_gen_attempts is not None and accepted < target_gen:
         print(f"[WARN] Only accepted {accepted}/{target_gen} generated candidates after {attempted} attempts.")
 
     out_csv = os.path.join(args.out, "generated.csv")
