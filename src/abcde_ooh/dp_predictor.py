@@ -137,6 +137,7 @@ class DeepMDOverpotentialPredictor:
         self,
         *,
         frames: Sequence["Atoms"],
+        masks: Optional[Sequence[Sequence[int]]] = None,
         comp: Dict[str, float],
         config_idx: int,
         base_seed: int,
@@ -176,11 +177,20 @@ class DeepMDOverpotentialPredictor:
             comp_key = comp_key[:120]
 
         modes = ["O", "OH", "OOH"]
-        for mode, fr in zip(modes, frames):
+        for i, (mode, fr) in enumerate(zip(modes, frames)):
             name = f"dp_{comp_key}_seed{base_seed}_cfg{config_idx:03d}_{mode}.vasp"
             path = os.path.join(debug_dir, name)
             # ASE will write in VASP5 POSCAR format when format='vasp'.
-            self._ase_write(path, _dump_sorted_by_species(fr), format="vasp")
+            fr_to_write = fr
+            if masks is not None:
+                # Drop masked atoms for debugging so O*/OH*/OOH* POSCARs differ by stoichiometry.
+                # This does NOT affect DP evaluation (which still uses masking).
+                drop = sorted(set(int(j) for j in masks[i]), reverse=True)
+                if drop:
+                    keep = [k for k in range(len(fr)) if k not in set(drop)]
+                    fr_to_write = fr[keep]
+
+            self._ase_write(path, _dump_sorted_by_species(fr_to_write), format="vasp")
 
     def _infer_metal_elem_from_slab(self, exclude: set = {"H", "O"}) -> str:
         syms = self.base_slab.get_chemical_symbols()
@@ -425,12 +435,13 @@ class DeepMDOverpotentialPredictor:
                         anchor_elems=set(anchor_elems),
                         rng=rng,
                     )
-                    fr_re, _new_mask = self._reorder_slab_then_adsorbates(fr, masked)
+                    fr_re, new_mask = self._reorder_slab_then_adsorbates(fr, masked)
                     frames_raw.append(fr_re)
-                    masks_raw.append(masked)
+                    masks_raw.append(new_mask)
 
                 self._maybe_dump_frames(
                     frames=frames_raw,
+                    masks=masks_raw,
                     comp=fracs,
                     config_idx=cfg_idx,
                     base_seed=base_seed,
