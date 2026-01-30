@@ -719,6 +719,17 @@ def main() -> None:
     if max_gen_attempts is not None and accepted < target_gen:
         print(f"[WARN] Only accepted {accepted}/{target_gen} generated candidates after {attempted} attempts.")
 
+    # For DP reward mode, sort candidates by increasing (mean - std), best first.
+    if args.reward_mode == "dp":
+        def _sort_key(r: dict) -> float:
+            v = r.get("dp_mean_minus_std", "")
+            try:
+                return float(v)
+            except Exception:
+                return float("inf")
+
+        rows.sort(key=_sort_key)
+
     out_csv = os.path.join(args.out, "generated.csv")
     keys = [
         "formula",
