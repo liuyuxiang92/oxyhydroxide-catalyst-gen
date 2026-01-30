@@ -92,6 +92,13 @@ def main() -> None:
     )
     parser.add_argument("--dp-k", type=float, default=1.0)
 
+    parser.add_argument(
+        "--dp-debug-dir",
+        type=str,
+        default=None,
+        help="If set, dump the exact POSCAR frames used for DP evaluation into this directory.",
+    )
+
     parser.add_argument("--out-csv", type=str, default=None)
 
     args = parser.parse_args()
@@ -118,7 +125,11 @@ def main() -> None:
 
     for formula in iter_formulas(args):
         comp = parse_cation_fractions(formula, anion_formula=args.anion_formula)
-        mean, std = predictor.predict_overpotential(comp, uncertainty=args.dp_uncertainty)
+        mean, std = predictor.predict_overpotential(
+            comp,
+            uncertainty=args.dp_uncertainty,
+            debug_dir=args.dp_debug_dir,
+        )
         obj = objective_from_mean_std(float(mean), float(std), mode=args.dp_objective, k=args.dp_k)
         reward = -float(obj)
 

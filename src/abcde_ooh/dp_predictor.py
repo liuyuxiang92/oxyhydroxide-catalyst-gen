@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+import os
 import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -24,6 +25,7 @@ def _lazy_import_ase_deepmd():
     try:
         from ase import Atoms  # type: ignore[import-not-found]  # noqa: F401
         from ase.io import read as ase_read  # type: ignore[import-not-found]  # noqa: F401
+        from ase.io import write as ase_write  # type: ignore[import-not-found]  # noqa: F401
         from ase.data import chemical_symbols as _ASE_CHEMICAL_SYMBOLS  # type: ignore[import-not-found]  # noqa: F401
     except Exception as e:  # pragma: no cover
         raise DPDependencyError(
@@ -39,10 +41,11 @@ def _lazy_import_ase_deepmd():
 
     from ase import Atoms  # type: ignore[import-not-found]
     from ase.io import read as ase_read  # type: ignore[import-not-found]
+    from ase.io import write as ase_write  # type: ignore[import-not-found]
     from ase.data import chemical_symbols as _ASE_CHEMICAL_SYMBOLS  # type: ignore[import-not-found]
     from deepmd.pt.infer.deep_eval import DeepProperty  # type: ignore[import-not-found]
 
-    return Atoms, ase_read, _ASE_CHEMICAL_SYMBOLS, DeepProperty
+    return Atoms, ase_read, ase_write, _ASE_CHEMICAL_SYMBOLS, DeepProperty
 
 
 def stable_species_order(symbols: Sequence[str]) -> List[str]:
@@ -88,6 +91,11 @@ class DPConfig:
     ads_dz: float = 1.0
     seed: int = 123
 
+    # Optional debugging: if set, dump the exact structures (frames) used for DP evaluation.
+    # This writes POSCAR files for the reordered frames (O*, OH*, OOH*), per random alloy config.
+    debug_dir: Optional[str] = None
+    debug_max_configs: Optional[int] = None
+
 
 class DeepMDOverpotentialPredictor:
     """Predict overpotential for alloyed (M)OOH slabs using an ensemble of DeepMD models.
@@ -104,10 +112,11 @@ class DeepMDOverpotentialPredictor:
     """
 
     def __init__(self, cfg: DPConfig):
-        Atoms, ase_read, _ASE_CHEMICAL_SYMBOLS, DeepProperty = _lazy_import_ase_deepmd()
+        Atoms, ase_read, ase_write, _ASE_CHEMICAL_SYMBOLS, DeepProperty = _lazy_import_ase_deepmd()
 
         self._Atoms = Atoms
         self._ase_read = ase_read
+        self._ase_write = ase_write
         self._DeepProperty = DeepProperty
 
         # periodic type map in periodic-table order
@@ -123,6 +132,32 @@ class DeepMDOverpotentialPredictor:
             self._DeepProperty(model_file=f, auto_batch_size=False, head="property")
             for f in cfg.model_files
         ]
+
+    def _maybe_dump_frames(
+        self,
+        *,
+        frames: Sequence["Atoms"],
+        comp: Dict[str, float],
+        config_idx: int,
+        base_seed: int,
+        debug_dir: Optional[str],
+    ) -> None:
+        if not debug_dir:
+            return
+        os.makedirs(debug_dir, exist_ok=True)
+
+        # Make a stable-ish identifier for this composition.
+        comp_key = "_".join(f"{el}{fr:.2f}" for el, fr in sorted(comp.items()))
+        # Avoid overly long filenames on some filesystems.
+        if len(comp_key) > 120:
+            comp_key = comp_key[:120]
+
+        modes = ["O", "OH", "OOH"]
+        for mode, fr in zip(modes, frames):
+            name = f"dp_{comp_key}_seed{base_seed}_cfg{config_idx:03d}_{mode}.vasp"
+            path = os.path.join(debug_dir, name)
+            # ASE will write in VASP5 POSCAR format when format='vasp'.
+            self._ase_write(path, fr, format="vasp")
 
     def _infer_metal_elem_from_slab(self, exclude: set = {"H", "O"}) -> str:
         syms = self.base_slab.get_chemical_symbols()
@@ -316,6 +351,7 @@ class DeepMDOverpotentialPredictor:
         uncertainty: str = "models",
         std_mode: Optional[str] = None,
         return_per_model: bool = False,
+        debug_dir: Optional[str] = None,
     ):
         # Backward-compat alias: older code used `std_mode`.
         if std_mode is not None:
@@ -334,13 +370,45 @@ class DeepMDOverpotentialPredictor:
 
         anchor_elems = list(fracs.keys())
 
-        for _ in range(self.cfg.n_random_configs):
+        effective_debug_dir = debug_dir if debug_dir is not None else self.cfg.debug_dir
+        max_cfg = self.cfg.debug_max_configs
+        n_cfg = self.cfg.n_random_configs
+        if max_cfg is not None:
+            n_cfg = min(n_cfg, int(max_cfg))
+
+        for cfg_idx in range(n_cfg):
             doped = self._do_random_alloying_on_metal_sites(self.base_slab, metal_elem, fracs, rng)
             coords, cells, atom_types = self._build_dp_inputs_for_one_doped_slab(
                 doped,
                 anchor_elems=anchor_elems,
                 rng=rng,
             )
+
+            if effective_debug_dir:
+                # Rebuild the frames (reordered) for writing, matching coords/cells/atom_types.
+                frames_raw = []
+                masks_raw = []
+                for mode in ("O*", "OH*", "OOH*"):
+                    fr, masked = self._add_adsorbates_equalized(
+                        doped,
+                        mode,
+                        height=self.cfg.ads_height,
+                        dz_chain=self.cfg.ads_dz,
+                        anchor_elems=set(anchor_elems),
+                        rng=rng,
+                    )
+                    fr_re, _new_mask = self._reorder_slab_then_adsorbates(fr, masked)
+                    frames_raw.append(fr_re)
+                    masks_raw.append(masked)
+
+                self._maybe_dump_frames(
+                    frames=frames_raw,
+                    comp=fracs,
+                    config_idx=cfg_idx,
+                    base_seed=base_seed,
+                    debug_dir=effective_debug_dir,
+                )
+
             vals = self._eval_models_on_prepared_inputs(coords, cells, atom_types)
             for i, v in enumerate(vals):
                 values_per_model[i].append(v)
