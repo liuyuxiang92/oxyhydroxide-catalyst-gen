@@ -206,9 +206,14 @@ class DeepMDOverpotentialPredictor:
         atoms = base.copy()
         symbols = atoms.get_chemical_symbols()
 
-        metal_idx = [i for i, s in enumerate(symbols) if s == metal_elem]
+        # Replace *all* metal-site atoms, not just the single most frequent element.
+        # This prevents leaving behind any base-slab metal species that would look
+        # like "extra elements" in the generated POSCARs.
+        metal_idx = [i for i, s in enumerate(symbols) if s not in {"H", "O"}]
         if not metal_idx:
-            raise RuntimeError(f"No {metal_elem} atoms found in base POSCAR.")
+            raise RuntimeError(
+                f"No metal-site atoms found in base POSCAR (expected something like {metal_elem})."
+            )
         rng.shuffle(metal_idx)
 
         counts = _choose_counts_from_fractions(len(metal_idx), fracs)
