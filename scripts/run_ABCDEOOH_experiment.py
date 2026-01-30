@@ -224,6 +224,35 @@ def main() -> None:
         help="When --buffer-mode iterative, number of additional on-the-fly episodes to add to the buffer using the learned policy.",
     )
 
+    # Iterative buffer schedule (optional).
+    parser.add_argument(
+        "--iter-num-iters",
+        type=int,
+        default=1,
+        help=(
+            "When --buffer-mode iterative: how many rounds of (collect episodes -> retrain) to run. "
+            "Default 1 matches the current behavior."
+        ),
+    )
+    parser.add_argument(
+        "--iter-online-eps-per-iter",
+        type=int,
+        default=0,
+        help=(
+            "When --buffer-mode iterative: how many accepted online episodes to collect per iteration. "
+            "If 0, it is derived from --num-online-eps / --iter-num-iters."
+        ),
+    )
+    parser.add_argument(
+        "--iter-train-epochs",
+        type=int,
+        default=None,
+        help=(
+            "When --buffer-mode iterative: training epochs per iteration after adding new episodes. "
+            "If unset, defaults to --dqn-epochs."
+        ),
+    )
+
     parser.add_argument("--anion-formula", type=str, default="O2H1")
 
     parser.add_argument(
@@ -455,14 +484,22 @@ def main() -> None:
     train_q(model=qnet, loader=loader, device=device, epochs=args.dqn_epochs, lr=args.lr)
 
     # Option B (iterative): grow the buffer with on-the-fly episodes from the learned policy, then retrain.
+    # This runs for `--iter-num-iters` iterations, collecting episodes and retraining each time.
     if args.buffer_mode == "iterative" and int(args.num_online_eps) > 0:
         need_buffer_filter = args.primary_phase_filter in {"buffer", "both"}
         target_online = int(args.num_online_eps)
         max_attempts = int(args.max_random_attempts) if args.max_random_attempts is not None else None
 
-        accepted = 0
-        attempted = 0
-        rejected = 0
+        iter_num = max(1, int(args.iter_num_iters))
+        iter_train_epochs = int(args.iter_train_epochs) if args.iter_train_epochs is not None else int(args.dqn_epochs)
+        if int(args.iter_online_eps_per_iter) > 0:
+            eps_per_iter = int(args.iter_online_eps_per_iter)
+        else:
+            eps_per_iter = max(1, int(np.ceil(target_online / iter_num)))
+
+        accepted_total = 0
+        attempted_total = 0
+        rejected_total = 0
 
         current_phase = "random"  # treat as buffer phase for DP skip logic
 
@@ -471,50 +508,61 @@ def main() -> None:
             desc="Online episodes (accepted)",
         )
 
-        qnet.eval()
-        all_inputs = []
-        all_targets = []
+        remaining = target_online
+        for it in range(iter_num):
+            if remaining <= 0:
+                break
 
-        while accepted < target_online and (max_attempts is None or attempted < max_attempts):
-            attempted += 1
-            _rollout_policy_episode(
-                env=env,
-                qnet=qnet,
-                scaler=scaler,
-                device=device,
-                stochastic_top_frac=args.stochastic_top_frac,
-            )
+            target_this = min(remaining, eps_per_iter)
 
-            comp = env.terminal_cation_fractions()
-            if need_buffer_filter:
-                ok, _label = check_primary_phase(comp)
-                if not ok:
-                    rejected += 1
-                    if rejected <= 20 or rejected % 2000 == 0:
-                        tqdm.write(
-                            f"[REJECT] buffer filter (online): attempt={attempted} rejected={rejected} comp={comp}"
-                        )
-                    continue
+            qnet.eval()
+            all_inputs = []
+            all_targets = []
 
-            inputs, q_targets = extract_mc_q_targets(env.path, gamma=args.gamma)
-            all_inputs.extend(inputs)
-            all_targets.extend(q_targets)
-            accepted += 1
+            accepted = 0
+            attempted = 0
+            rejected = 0
 
-            pbar.update(1)
-            if attempted % 2000 == 0:
-                rate = (accepted / attempted) if attempted else 0.0
-                pbar.set_postfix(attempts=attempted, rejected=rejected, rate=f"{rate:.3f}")
+            while accepted < target_this and (max_attempts is None or attempted_total < max_attempts):
+                attempted += 1
+                attempted_total += 1
+                _rollout_policy_episode(
+                    env=env,
+                    qnet=qnet,
+                    scaler=scaler,
+                    device=device,
+                    stochastic_top_frac=args.stochastic_top_frac,
+                )
 
-        pbar.close()
+                comp = env.terminal_cation_fractions()
+                if need_buffer_filter:
+                    ok, _label = check_primary_phase(comp)
+                    if not ok:
+                        rejected += 1
+                        rejected_total += 1
+                        continue
 
-        if max_attempts is not None and accepted < target_online:
-            print(
-                f"[WARN] Only accepted {accepted}/{target_online} online episodes after {attempted} attempts.",
-                flush=True,
-            )
+                inputs, q_targets = extract_mc_q_targets(env.path, gamma=args.gamma)
+                all_inputs.extend(inputs)
+                all_targets.extend(q_targets)
+                accepted += 1
+                accepted_total += 1
+                remaining -= 1
 
-        if all_inputs:
+                pbar.update(1)
+                if attempted_total % 2000 == 0:
+                    rate = (accepted_total / attempted_total) if attempted_total else 0.0
+                    pbar.set_postfix(attempts=attempted_total, rejected=rejected_total, rate=f"{rate:.3f}")
+
+            if max_attempts is not None and attempted_total >= max_attempts and accepted < target_this:
+                tqdm.write(
+                    f"[WARN] Stopped online collection early at iter={it + 1}/{iter_num}: "
+                    f"accepted_this={accepted}/{target_this} attempted_total={attempted_total}/{max_attempts}"
+                )
+
+            if not all_inputs:
+                break
+
             s_mat_new = np.asarray([x[0] for x in all_inputs], dtype=float)
             s_step_new = np.asarray([x[1] for x in all_inputs], dtype=float)
             a_elem_new = np.asarray([x[2] for x in all_inputs], dtype=float)
@@ -539,8 +587,9 @@ def main() -> None:
             )
             loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, drop_last=False)
             qnet.train()
-            train_q(model=qnet, loader=loader, device=device, epochs=args.dqn_epochs, lr=args.lr)
+            train_q(model=qnet, loader=loader, device=device, epochs=iter_train_epochs, lr=args.lr)
 
+            # Persist dataset after each iteration so long runs are resumable.
             np.savez_compressed(
                 os.path.join(args.out, "random_dataset.npz"),
                 s_mat=s_mat,
@@ -548,6 +597,23 @@ def main() -> None:
                 a_elem=a_elem,
                 a_comp=a_comp,
                 y=y,
+            )
+
+            tqdm.write(
+                f"[INFO] Iter {it + 1}/{iter_num}: collected={accepted}/{target_this} "
+                f"(attempted={attempted}, rejected={rejected}); retrained_epochs={iter_train_epochs}; "
+                f"buffer_rows={len(y)}"
+            )
+
+            if max_attempts is not None and attempted_total >= max_attempts:
+                break
+
+        pbar.close()
+
+        if max_attempts is not None and accepted_total < target_online:
+            print(
+                f"[WARN] Only accepted {accepted_total}/{target_online} online episodes after {attempted_total} attempts.",
+                flush=True,
             )
 
     torch.save(qnet.state_dict(), os.path.join(args.out, "qnet.pt"))
