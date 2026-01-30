@@ -146,6 +146,29 @@ class DeepMDOverpotentialPredictor:
             return
         os.makedirs(debug_dir, exist_ok=True)
 
+        def _dump_sorted_by_species(atoms: "Atoms") -> "Atoms":
+            # For debugging/readability only: group identical species contiguously so the
+            # POSCAR header does not contain repeated element labels (e.g. "Ni Fe Ni ...").
+            symbols = atoms.get_chemical_symbols()
+
+            def rank(sym: str) -> int:
+                # Keep metals/others first, then O, then H.
+                if sym == "O":
+                    return 1
+                if sym == "H":
+                    return 2
+                return 0
+
+            indices = sorted(
+                range(len(atoms)),
+                key=lambda i: (
+                    rank(symbols[i]),
+                    self._periodic_index.get(symbols[i], 10**9),
+                    i,
+                ),
+            )
+            return atoms[indices]
+
         # Make a stable-ish identifier for this composition.
         comp_key = "_".join(f"{el}{fr:.2f}" for el, fr in sorted(comp.items()))
         # Avoid overly long filenames on some filesystems.
@@ -157,7 +180,7 @@ class DeepMDOverpotentialPredictor:
             name = f"dp_{comp_key}_seed{base_seed}_cfg{config_idx:03d}_{mode}.vasp"
             path = os.path.join(debug_dir, name)
             # ASE will write in VASP5 POSCAR format when format='vasp'.
-            self._ase_write(path, fr, format="vasp")
+            self._ase_write(path, _dump_sorted_by_species(fr), format="vasp")
 
     def _infer_metal_elem_from_slab(self, exclude: set = {"H", "O"}) -> str:
         syms = self.base_slab.get_chemical_symbols()
