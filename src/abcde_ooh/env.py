@@ -152,7 +152,23 @@ class ABCDEOOHEnv:
 
     @property
     def terminal_formula(self) -> str:
-        return f"{self.state}{self.anion_formula}" if self.counter == self.max_steps else ""
+        if self.counter != self.max_steps:
+            return ""
+
+        # Canonicalize cation ordering + formatting so the same composition maps to
+        # a single deterministic formula string (independent of action/order).
+        comp = self.cation_fractions()
+        items: List[Tuple[str, int]] = []
+        for el, frac in comp.items():
+            units = int(round(float(frac) * 20))
+            if units <= 0:
+                continue
+            items.append((el, units))
+
+        # Prefer major cations first for readability; tie-break by symbol.
+        items.sort(key=lambda t: (-t[1], t[0]))
+        state = "".join(f"{el}{_format_fraction(units)}" for el, units in items)
+        return f"{state}{self.anion_formula}"
 
     def cation_fractions(self) -> Dict[str, float]:
         if not self.state:
