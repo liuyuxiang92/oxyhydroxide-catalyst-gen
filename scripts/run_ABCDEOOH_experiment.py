@@ -197,6 +197,27 @@ def main() -> None:
     parser.add_argument("--out", required=True)
     parser.add_argument("--seed", type=int, default=0)
 
+    parser.add_argument(
+        "--only-generate",
+        action="store_true",
+        help=(
+            "Skip buffer building + Q training; load a saved scaler and qnet and only generate candidates. "
+            "Defaults to loading <out>/std_scaler.bin and <out>/qnet.pt."
+        ),
+    )
+    parser.add_argument(
+        "--load-qnet",
+        type=str,
+        default=None,
+        help="Path to saved qnet.pt state_dict (default: <out>/qnet.pt).",
+    )
+    parser.add_argument(
+        "--load-scaler",
+        type=str,
+        default=None,
+        help="Path to saved std_scaler.bin (default: <out>/std_scaler.bin).",
+    )
+
     parser.add_argument("--num-random-eps", type=int, default=5000)
     parser.add_argument("--max-random-attempts", type=int, default=None)
     parser.add_argument("--gamma", type=float, default=0.9)
@@ -375,113 +396,145 @@ def main() -> None:
 
         env.reward_fn = dp_reward_fn
 
-    # 1) Build or load offline random dataset
-    if args.use_saved_random_dataset:
-        ds_path = os.path.join(args.out, "random_dataset.npz")
-        if not os.path.exists(ds_path):
-            raise SystemExit(f"{ds_path} not found")
-        data = np.load(ds_path)
-        s_mat = data["s_mat"]
-        s_step = data["s_step"]
-        a_elem = data["a_elem"]
-        a_comp = data["a_comp"]
-        y = data["y"]
+    scaler_path = args.load_scaler or os.path.join(args.out, "std_scaler.bin")
+    qnet_path = args.load_qnet or os.path.join(args.out, "qnet.pt")
+
+    if args.only_generate:
+        if os.path.exists(scaler_path):
+            scaler = joblib.load(scaler_path)
+        else:
+            # Fallback: fit a scaler from the saved dataset if available.
+            ds_path = os.path.join(args.out, "random_dataset.npz")
+            if not os.path.exists(ds_path):
+                raise SystemExit(
+                    f"--only-generate requires {scaler_path} (or {ds_path} to refit a scaler); neither was found."
+                )
+            data = np.load(ds_path)
+            s_mat = data["s_mat"]
+            scaler = StandardScaler()
+            scaler.fit(s_mat)
+            joblib.dump(scaler, scaler_path, compress=True)
+
+        state_dim = int(getattr(scaler, "n_features_in_", scaler.mean_.shape[0]))
+        qnet = QRegressor(
+            state_dim=state_dim,
+            step_dim=env.max_steps,
+            elem_dim=len(env.cation_set),
+            frac_dim=len(env.fraction_set),
+        ).to(device)
+
+        if not os.path.exists(qnet_path):
+            raise SystemExit(f"--only-generate requires {qnet_path} (use --load-qnet to override)")
+        qnet.load_state_dict(torch.load(qnet_path, map_location=device))
     else:
-        need_buffer_filter = args.primary_phase_filter in {"buffer", "both"}
-        target_accepted = int(args.num_random_eps)
-        max_attempts = int(args.max_random_attempts) if args.max_random_attempts is not None else None
 
-        all_inputs = []
-        all_targets = []
+        # 1) Build or load offline random dataset
+        if args.use_saved_random_dataset:
+            ds_path = os.path.join(args.out, "random_dataset.npz")
+            if not os.path.exists(ds_path):
+                raise SystemExit(f"{ds_path} not found")
+            data = np.load(ds_path)
+            s_mat = data["s_mat"]
+            s_step = data["s_step"]
+            a_elem = data["a_elem"]
+            a_comp = data["a_comp"]
+            y = data["y"]
+        else:
+            need_buffer_filter = args.primary_phase_filter in {"buffer", "both"}
+            target_accepted = int(args.num_random_eps)
+            max_attempts = int(args.max_random_attempts) if args.max_random_attempts is not None else None
 
-        accepted = 0
-        attempted = 0
-        rejected = 0
+            all_inputs = []
+            all_targets = []
 
-        current_phase = "random"
+            accepted = 0
+            attempted = 0
+            rejected = 0
 
-        pbar = tqdm(
-            total=target_accepted,
-            desc="Random episodes (accepted)",
-        )
+            current_phase = "random"
 
-        while accepted < target_accepted and (max_attempts is None or attempted < max_attempts):
-            attempted += 1
-            _rollout_random_episode(env)
+            pbar = tqdm(
+                total=target_accepted,
+                desc="Random episodes (accepted)",
+            )
 
-            comp = env.terminal_cation_fractions()
-            if need_buffer_filter:
-                ok, _label = check_primary_phase(comp)
-                if not ok:
-                    rejected += 1
-                    if rejected <= 20 or rejected % 2000 == 0:
-                        tqdm.write(
-                            f"[REJECT] buffer filter: attempt={attempted} rejected={rejected} comp={comp}"
-                        )
-                    continue
+            while accepted < target_accepted and (max_attempts is None or attempted < max_attempts):
+                attempted += 1
+                _rollout_random_episode(env)
 
-            inputs, q_targets = extract_mc_q_targets(env.path, gamma=args.gamma)
-            all_inputs.extend(inputs)
-            all_targets.extend(q_targets)
-            accepted += 1
+                comp = env.terminal_cation_fractions()
+                if need_buffer_filter:
+                    ok, _label = check_primary_phase(comp)
+                    if not ok:
+                        rejected += 1
+                        if rejected <= 20 or rejected % 2000 == 0:
+                            tqdm.write(
+                                f"[REJECT] buffer filter: attempt={attempted} rejected={rejected} comp={comp}"
+                            )
+                        continue
 
-            pbar.update(1)
-            if attempted % 2000 == 0:
-                rate = (accepted / attempted) if attempted else 0.0
-                pbar.set_postfix(attempts=attempted, rejected=rejected, rate=f"{rate:.3f}")
+                inputs, q_targets = extract_mc_q_targets(env.path, gamma=args.gamma)
+                all_inputs.extend(inputs)
+                all_targets.extend(q_targets)
+                accepted += 1
 
-        pbar.close()
+                pbar.update(1)
+                if attempted % 2000 == 0:
+                    rate = (accepted / attempted) if attempted else 0.0
+                    pbar.set_postfix(attempts=attempted, rejected=rejected, rate=f"{rate:.3f}")
 
-        rate = (accepted / attempted) if attempted else 0.0
-        print(
-            f"[INFO] Random episodes: accepted {accepted}/{target_accepted} after {attempted} attempts (rate={rate:.4f}).",
-            flush=True,
-        )
+            pbar.close()
 
-        if max_attempts is not None and accepted < target_accepted:
+            rate = (accepted / attempted) if attempted else 0.0
             print(
-                f"[WARN] Only accepted {accepted}/{target_accepted} random episodes after {attempted} attempts.",
+                f"[INFO] Random episodes: accepted {accepted}/{target_accepted} after {attempted} attempts (rate={rate:.4f}).",
                 flush=True,
             )
 
-        s_mat = np.asarray([x[0] for x in all_inputs], dtype=float)
-        s_step = np.asarray([x[1] for x in all_inputs], dtype=float)
-        a_elem = np.asarray([x[2] for x in all_inputs], dtype=float)
-        a_comp = np.asarray([x[3] for x in all_inputs], dtype=float)
-        y = np.asarray(all_targets, dtype=float).reshape(-1, 1)
+            if max_attempts is not None and accepted < target_accepted:
+                print(
+                    f"[WARN] Only accepted {accepted}/{target_accepted} random episodes after {attempted} attempts.",
+                    flush=True,
+                )
 
-        np.savez_compressed(
-            os.path.join(args.out, "random_dataset.npz"),
-            s_mat=s_mat,
-            s_step=s_step,
-            a_elem=a_elem,
-            a_comp=a_comp,
-            y=y,
+            s_mat = np.asarray([x[0] for x in all_inputs], dtype=float)
+            s_step = np.asarray([x[1] for x in all_inputs], dtype=float)
+            a_elem = np.asarray([x[2] for x in all_inputs], dtype=float)
+            a_comp = np.asarray([x[3] for x in all_inputs], dtype=float)
+            y = np.asarray(all_targets, dtype=float).reshape(-1, 1)
+
+            np.savez_compressed(
+                os.path.join(args.out, "random_dataset.npz"),
+                s_mat=s_mat,
+                s_step=s_step,
+                a_elem=a_elem,
+                a_comp=a_comp,
+                y=y,
+            )
+
+        # 2) Scale state features
+        scaler = StandardScaler()
+        s_mat_scaled = scaler.fit_transform(s_mat)
+        joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"), compress=True)
+
+        # 3) Train Q regressor
+        ds = TensorDataset(
+            torch.tensor(s_mat_scaled, dtype=torch.float32),
+            torch.tensor(s_step, dtype=torch.float32),
+            torch.tensor(a_elem, dtype=torch.float32),
+            torch.tensor(a_comp, dtype=torch.float32),
+            torch.tensor(y, dtype=torch.float32),
         )
+        loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, drop_last=False)
 
-    # 2) Scale state features
-    scaler = StandardScaler()
-    s_mat_scaled = scaler.fit_transform(s_mat)
-    joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"), compress=True)
+        qnet = QRegressor(
+            state_dim=s_mat_scaled.shape[1],
+            step_dim=s_step.shape[1],
+            elem_dim=a_elem.shape[1],
+            frac_dim=a_comp.shape[1],
+        ).to(device)
 
-    # 3) Train Q regressor
-    ds = TensorDataset(
-        torch.tensor(s_mat_scaled, dtype=torch.float32),
-        torch.tensor(s_step, dtype=torch.float32),
-        torch.tensor(a_elem, dtype=torch.float32),
-        torch.tensor(a_comp, dtype=torch.float32),
-        torch.tensor(y, dtype=torch.float32),
-    )
-    loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, drop_last=False)
-
-    qnet = QRegressor(
-        state_dim=s_mat_scaled.shape[1],
-        step_dim=s_step.shape[1],
-        elem_dim=a_elem.shape[1],
-        frac_dim=a_comp.shape[1],
-    ).to(device)
-
-    train_q(model=qnet, loader=loader, device=device, epochs=args.dqn_epochs, lr=args.lr)
+        train_q(model=qnet, loader=loader, device=device, epochs=args.dqn_epochs, lr=args.lr)
 
     # Option B (iterative): grow the buffer with on-the-fly episodes from the learned policy, then retrain.
     # This runs for `--iter-num-iters` iterations, collecting episodes and retraining each time.
@@ -616,7 +669,7 @@ def main() -> None:
                 flush=True,
             )
 
-    torch.save(qnet.state_dict(), os.path.join(args.out, "qnet.pt"))
+        torch.save(qnet.state_dict(), os.path.join(args.out, "qnet.pt"))
 
     # 4) Generate candidates
     qnet.eval()
