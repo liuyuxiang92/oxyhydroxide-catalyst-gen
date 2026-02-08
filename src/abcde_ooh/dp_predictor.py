@@ -488,6 +488,8 @@ class DeepMDOverpotentialPredictor:
 
 def objective_from_mean_std(mean: float, std: float, mode: str, k: float) -> float:
     """Smaller objective is better."""
+    if mode == "mean":
+        return mean
     if mode == "mean_minus_kstd":
         return mean - k * std
     if mode == "mean_plus_kstd":

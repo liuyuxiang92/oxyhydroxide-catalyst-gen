@@ -311,7 +311,7 @@ def main() -> None:
         "--dp-objective",
         dest="dp_objective",
         default="mean_minus_kstd",
-        choices=["mean_minus_kstd", "mean_plus_kstd"],
+        choices=["mean", "mean_minus_kstd", "mean_plus_kstd"],
     )
     parser.add_argument("--dp-k", type=float, default=1.0)
     parser.add_argument(
