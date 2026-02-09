@@ -170,6 +170,7 @@ def _rollout_policy_episode(
     scaler: StandardScaler,
     device: torch.device,
     stochastic_top_frac: float,
+    online_epsilon: float,
 ) -> None:
     env.initialize()
     for _t in range(env.max_steps):
@@ -181,14 +182,20 @@ def _rollout_policy_episode(
         if env.counter < env.max_steps:
             step_onehot[env.counter] = 1.0
 
-        a = choose_action(
-            model=qnet,
-            device=device,
-            s_material=s_mat,
-            s_step=step_onehot,
-            allowed_actions=allowed,
-            stochastic_top_frac=stochastic_top_frac,
-        )
+        # Online collection policy:
+        # - If online_epsilon > 0: epsilon-greedy (random with prob epsilon, otherwise greedy-best Q)
+        # - Else: use the existing top-k stochastic selection controlled by --stochastic-top-frac
+        if online_epsilon > 0.0 and float(np.random.rand()) < float(online_epsilon):
+            a = random.choice(allowed)
+        else:
+            a = choose_action(
+                model=qnet,
+                device=device,
+                s_material=s_mat,
+                s_step=step_onehot,
+                allowed_actions=allowed,
+                stochastic_top_frac=(0.0 if online_epsilon > 0.0 else stochastic_top_frac),
+            )
         env.step(a)
 
 
@@ -229,6 +236,17 @@ def main() -> None:
     parser.add_argument("--num-gen-eps", type=int, default=500)
     parser.add_argument("--max-gen-attempts", type=int, default=None)
     parser.add_argument("--stochastic-top-frac", type=float, default=0.0)
+
+    parser.add_argument(
+        "--online-epsilon",
+        type=float,
+        default=0.0,
+        help=(
+            "When --buffer-mode iterative: use epsilon-greedy policy for online episode collection. "
+            "With prob epsilon choose a random allowed action, otherwise choose the greedy-best Q action. "
+            "If >0, this overrides --stochastic-top-frac during online collection."
+        ),
+    )
 
     # Replay buffer construction
     parser.add_argument(
@@ -593,6 +611,7 @@ def main() -> None:
                     scaler=scaler,
                     device=device,
                     stochastic_top_frac=args.stochastic_top_frac,
+                    online_epsilon=float(args.online_epsilon),
                 )
 
                 comp = env.terminal_cation_fractions()
