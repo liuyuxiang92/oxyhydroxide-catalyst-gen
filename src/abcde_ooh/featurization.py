@@ -6,25 +6,30 @@ import warnings
 
 import numpy as np
 
+# Matminer may emit a verbose warning from `matminer.utils.data.PymatgenData`
+# about `impute_nan=False`, sometimes repeatedly during featurization.
+# Suppress it to keep stdout/stderr and tqdm output clean.
+warnings.filterwarnings(
+    "ignore",
+    message=r"^PymatgenData\(impute_nan=False\):.*",
+    category=UserWarning,
+    module=r"matminer\.utils\.data",
+    append=False,
+)
+
 try:
     from matminer.featurizers.base import MultipleFeaturizer
     import matminer.featurizers.composition as cf
     from pymatgen.core.composition import Composition
 
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message=r".*PymatgenData\(impute_nan=False\).*",
-            category=UserWarning,
-        )
-        feature_calculators = MultipleFeaturizer(
-            [
-                cf.element.Stoichiometry(),
-                cf.composite.ElementProperty.from_preset("magpie"),
-                cf.orbital.ValenceOrbital(props=["avg"]),
-                cf.ion.IonProperty(fast=True),
-            ]
-        )
+    feature_calculators = MultipleFeaturizer(
+        [
+            cf.element.Stoichiometry(),
+            cf.composite.ElementProperty.from_preset("magpie"),
+            cf.orbital.ValenceOrbital(props=["avg"]),
+            cf.ion.IonProperty(fast=True),
+        ]
+    )
     _NUM_FEATURES = len(feature_calculators.feature_labels())
 except Exception:  # pragma: no cover
     # Allow a minimal install to run the pipeline (useful for smoke tests / CI).
