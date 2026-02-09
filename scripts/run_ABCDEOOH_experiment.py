@@ -248,6 +248,17 @@ def main() -> None:
         ),
     )
 
+    parser.add_argument(
+        "--gen-epsilon",
+        type=float,
+        default=0.0,
+        help=(
+            "During final candidate generation: use epsilon-greedy policy. "
+            "With prob epsilon choose a random allowed action, otherwise choose the greedy-best Q action. "
+            "If >0, this overrides --stochastic-top-frac during generation."
+        ),
+    )
+
     # Replay buffer construction
     parser.add_argument(
         "--buffer-mode",
@@ -733,14 +744,20 @@ def main() -> None:
             if env.counter < env.max_steps:
                 step_onehot[env.counter] = 1.0
 
-            a = choose_action(
-                model=qnet,
-                device=device,
-                s_material=s_mat,
-                s_step=step_onehot,
-                allowed_actions=allowed,
-                stochastic_top_frac=args.stochastic_top_frac,
-            )
+            # Final generation policy:
+            # - If gen_epsilon > 0: epsilon-greedy (random with prob epsilon, otherwise greedy-best Q)
+            # - Else: existing top-k stochastic selection controlled by --stochastic-top-frac
+            if float(args.gen_epsilon) > 0.0 and float(np.random.rand()) < float(args.gen_epsilon):
+                a = random.choice(allowed)
+            else:
+                a = choose_action(
+                    model=qnet,
+                    device=device,
+                    s_material=s_mat,
+                    s_step=step_onehot,
+                    allowed_actions=allowed,
+                    stochastic_top_frac=(0.0 if float(args.gen_epsilon) > 0.0 else args.stochastic_top_frac),
+                )
             env.step(a)
 
         comp = env.terminal_cation_fractions()
