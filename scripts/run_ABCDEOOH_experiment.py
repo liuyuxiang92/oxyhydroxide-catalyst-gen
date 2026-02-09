@@ -366,6 +366,14 @@ def main() -> None:
         assert dp_predictor is not None
         from abcde_ooh.dp_predictor import objective_from_mean_std
 
+        def _comp_key(comp: dict) -> tuple:
+            items = []
+            for el, frac in comp.items():
+                units = int(round(float(frac) * 20))
+                if units > 0:
+                    items.append((str(el), units))
+            return tuple(sorted(items))
+
         def dp_reward_fn(_terminal_formula: str) -> float:
             comp = env.terminal_cation_fractions()
 
@@ -381,7 +389,7 @@ def main() -> None:
                 if not ok:
                     return 0.0
 
-            key = tuple(sorted((k, float(v)) for k, v in comp.items()))
+            key = _comp_key(comp)
             if key in dp_cache:
                 entry = dp_cache[key]
                 mean = entry["mean"]
@@ -684,6 +692,9 @@ def main() -> None:
     accepted = 0
     attempted = 0
     rejected = 0
+    dup_rejected = 0
+
+    seen_comp_keys: set[tuple] = set()
 
     pbar = tqdm(
         total=target_gen,
@@ -714,6 +725,7 @@ def main() -> None:
             env.step(a)
 
         comp = env.terminal_cation_fractions()
+        comp_key = tuple(sorted((str(k), int(round(float(v) * 20))) for k, v in comp.items() if int(round(float(v) * 20)) > 0))
         ok, label = check_primary_phase(comp)
         if need_generated_filter and not ok:
             rejected += 1
@@ -723,13 +735,24 @@ def main() -> None:
                 )
             continue
 
+        # Avoid duplicate compositions in generated.csv. Without this, a greedy policy
+        # will often regenerate the same terminal composition many times.
+        if comp_key in seen_comp_keys:
+            dup_rejected += 1
+            if dup_rejected <= 20 or dup_rejected % 2000 == 0:
+                tqdm.write(
+                    f"[REJECT] duplicate generated: attempt={attempted} dup_rejected={dup_rejected} comp={comp}"
+                )
+            continue
+        seen_comp_keys.add(comp_key)
+
         reward = float(env.path[-1].reward) if env.path else 0.0
 
         dp_mean = ""
         dp_std = ""
         dp_mean_minus_std = ""
         if args.reward_mode == "dp":
-            key = tuple(sorted((k, float(v)) for k, v in comp.items()))
+            key = comp_key
             if key in dp_cache:
                 entry = dp_cache[key]
                 mean = float(entry["mean"])
