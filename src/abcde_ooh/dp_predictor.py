@@ -486,12 +486,21 @@ class DeepMDOverpotentialPredictor:
         return ensemble_mean, ensemble_std
 
 
-def objective_from_mean_std(mean: float, std: float, mode: str, k: float) -> float:
-    """Smaller objective is better."""
+def objective_from_mean_std(
+    mean: float,
+    std: float,
+    mode: str,
+    k: float,
+    exp_ref: float = 230.0,
+    exp_scale: float = 10.0,
+) -> float:
+    """Smaller objective is better (reward = -objective)."""
     if mode == "mean":
         return mean
     if mode == "mean_minus_kstd":
         return mean - k * std
     if mode == "mean_plus_kstd":
         return mean + k * std
+    if mode == "exp_scaled":
+        return -math.exp((exp_ref - (mean - k * std)) / exp_scale)
     raise ValueError(f"Unknown objective mode: {mode}")

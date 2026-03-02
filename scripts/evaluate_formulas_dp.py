@@ -88,9 +88,13 @@ def main() -> None:
         "--dp-objective",
         type=str,
         default="mean_minus_kstd",
-        choices=["mean", "mean_minus_kstd", "mean_plus_kstd"],
+        choices=["mean", "mean_minus_kstd", "mean_plus_kstd", "exp_scaled"],
     )
     parser.add_argument("--dp-k", type=float, default=1.0)
+    parser.add_argument("--dp-exp-ref", type=float, default=230.0,
+        help="Reference overpotential (mV) for exp_scaled objective. Default: 230.")
+    parser.add_argument("--dp-exp-scale", type=float, default=10.0,
+        help="Scale factor in denominator for exp_scaled objective. Default: 10.")
 
     parser.add_argument(
         "--dp-debug-dir",
@@ -130,7 +134,11 @@ def main() -> None:
             uncertainty=args.dp_uncertainty,
             debug_dir=args.dp_debug_dir,
         )
-        obj = objective_from_mean_std(float(mean), float(std), mode=args.dp_objective, k=args.dp_k)
+        obj = objective_from_mean_std(
+            float(mean), float(std),
+            mode=args.dp_objective, k=args.dp_k,
+            exp_ref=args.dp_exp_ref, exp_scale=args.dp_exp_scale,
+        )
         reward = -float(obj)
 
         rows.append(

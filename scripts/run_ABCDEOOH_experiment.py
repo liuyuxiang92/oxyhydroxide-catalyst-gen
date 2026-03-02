@@ -340,9 +340,13 @@ def main() -> None:
         "--dp-objective",
         dest="dp_objective",
         default="mean_minus_kstd",
-        choices=["mean", "mean_minus_kstd", "mean_plus_kstd"],
+        choices=["mean", "mean_minus_kstd", "mean_plus_kstd", "exp_scaled"],
     )
     parser.add_argument("--dp-k", type=float, default=1.0)
+    parser.add_argument("--dp-exp-ref", type=float, default=230.0,
+        help="Reference overpotential (mV) for exp_scaled objective. Default: 230.")
+    parser.add_argument("--dp-exp-scale", type=float, default=10.0,
+        help="Scale factor in denominator for exp_scaled objective. Default: 10.")
     parser.add_argument(
         "--dp-uncertainty",
         dest="dp_uncertainty",
@@ -428,7 +432,11 @@ def main() -> None:
                 mean, std = pred[0], pred[1]
                 dp_cache[key] = {"mean": float(mean), "std": float(std)}
 
-            obj = objective_from_mean_std(float(mean), float(std), mode=args.dp_objective, k=args.dp_k)
+            obj = objective_from_mean_std(
+                float(mean), float(std),
+                mode=args.dp_objective, k=args.dp_k,
+                exp_ref=args.dp_exp_ref, exp_scale=args.dp_exp_scale,
+            )
             return -float(obj)
 
         env.reward_fn = dp_reward_fn
@@ -831,16 +839,19 @@ def main() -> None:
     if max_gen_attempts is not None and accepted < target_gen:
         print(f"[WARN] Only accepted {accepted}/{target_gen} generated candidates after {attempted} attempts.")
 
-    # For DP reward mode, sort candidates by increasing (mean - std), best first.
+    # For DP reward mode, sort candidates best first.
     if args.reward_mode == "dp":
-        def _sort_key(r: dict) -> float:
-            v = r.get("dp_mean_minus_std", "")
-            try:
-                return float(v)
-            except Exception:
-                return float("inf")
+        if args.dp_objective == "exp_scaled":
+            rows.sort(key=lambda r: -float(r["reward"]) if r["reward"] != "" else float("inf"))
+        else:
+            def _sort_key(r: dict) -> float:
+                v = r.get("dp_mean_minus_std", "")
+                try:
+                    return float(v)
+                except Exception:
+                    return float("inf")
 
-        rows.sort(key=_sort_key)
+            rows.sort(key=_sort_key)
 
     out_csv = os.path.join(args.out, "generated.csv")
     keys = [
