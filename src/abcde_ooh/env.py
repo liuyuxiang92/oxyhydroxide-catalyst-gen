@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Sequence, Tuple
 
 import numpy as np
@@ -102,6 +102,7 @@ class EpisodeStep:
     action_elem_onehot: Sequence[float]
     action_comp_onehot: Sequence[float]
     reward: float
+    allowed_actions: List = field(default_factory=list)
 
 
 class ABCDEOOHEnv:
@@ -238,6 +239,7 @@ class ABCDEOOHEnv:
         if (remaining - comp_units) not in self._possible_sums_by_k[steps_left - 1]:
             raise ValueError("Action makes terminal sum impossible")
 
+        current_allowed = self.allowed_actions()
         old_state = self.state
 
         if self.counter == 0:
@@ -263,5 +265,6 @@ class ABCDEOOHEnv:
                 action_elem_onehot=elem_oh,
                 action_comp_onehot=comp_oh,
                 reward=reward,
+                allowed_actions=current_allowed,
             )
         )

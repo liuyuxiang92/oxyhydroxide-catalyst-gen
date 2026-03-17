@@ -55,7 +55,7 @@ sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 from abcde_ooh.env import ABCDEOOHEnv, DEFAULT_CATION_SET, DEFAULT_FRACTIONS  # noqa: E402
 from abcde_ooh.constraints.primary_phase import check_primary_phase  # noqa: E402
 from abcde_ooh.featurization import feature_calculators  # noqa: E402
-from abcde_ooh.model import QRegressor  # noqa: E402
+from abcde_ooh.model import PolicyNet, QRegressor, ValueNet  # noqa: E402
 
 
 def set_seed(seed: int) -> None:
@@ -197,6 +197,305 @@ def _rollout_policy_episode(
                 stochastic_top_frac=(0.0 if online_epsilon > 0.0 else stochastic_top_frac),
             )
         env.step(a)
+
+
+def _fit_scaler_from_warmup(env: ABCDEOOHEnv, n_warmup_eps: int) -> StandardScaler:
+    """Roll out random episodes and fit a StandardScaler on material features."""
+    all_s_mat = []
+    for _ in tqdm(range(n_warmup_eps), desc="PG warmup (scaler fit)"):
+        _rollout_random_episode(env)
+        for step in env.path:
+            all_s_mat.append(np.asarray(step.state_material_features, dtype=float))
+    s_mat = np.asarray(all_s_mat, dtype=float)
+    scaler = StandardScaler()
+    scaler.fit(s_mat)
+    return scaler
+
+
+def _rollout_pg_episode(
+    *,
+    env: ABCDEOOHEnv,
+    policy: torch.nn.Module,
+    scaler: StandardScaler,
+    device: torch.device,
+    pg_epsilon: float,
+) -> None:
+    """Roll out one episode using the policy network (softmax sampling)."""
+    env.initialize()
+    for _t in range(env.max_steps):
+        allowed = env.allowed_actions()
+        s_mat = env.state_featurizer(env.state)
+        s_mat_scaled = scaler.transform(s_mat.reshape(1, -1))[0]
+
+        step_onehot = np.zeros(env.max_steps, dtype=float)
+        if env.counter < env.max_steps:
+            step_onehot[env.counter] = 1.0
+
+        if pg_epsilon > 0.0 and float(np.random.rand()) < pg_epsilon:
+            a = random.choice(allowed)
+        else:
+            n = len(allowed)
+            a_elem_batch = np.asarray([a[0] for a in allowed], dtype=float)
+            a_comp_batch = np.asarray([a[1] for a in allowed], dtype=float)
+            s_mat_batch = np.repeat(s_mat_scaled.reshape(1, -1), n, axis=0)
+            s_step_batch = np.repeat(step_onehot.reshape(1, -1), n, axis=0)
+            with torch.no_grad():
+                logits = policy(
+                    torch.tensor(s_mat_batch, dtype=torch.float32, device=device),
+                    torch.tensor(s_step_batch, dtype=torch.float32, device=device),
+                    torch.tensor(a_elem_batch, dtype=torch.float32, device=device),
+                    torch.tensor(a_comp_batch, dtype=torch.float32, device=device),
+                ).reshape(-1)
+            probs = torch.softmax(logits, dim=0).cpu().numpy()
+            idx = int(np.random.choice(n, p=probs))
+            a = allowed[idx]
+
+        env.step(a)
+
+
+def train_pg(
+    *,
+    policy: torch.nn.Module,
+    value_net,
+    env: ABCDEOOHEnv,
+    scaler: StandardScaler,
+    device: torch.device,
+    n_episodes: int,
+    gamma: float,
+    lr_actor: float,
+    lr_critic: float,
+    entropy_coef: float,
+    pg_epsilon: float,
+    rl_method: str,
+) -> None:
+    """Online REINFORCE or A2C training loop."""
+    policy.train()
+    opt_actor = torch.optim.Adam(policy.parameters(), lr=lr_actor)
+    if value_net is not None:
+        value_net.train()
+        opt_critic = torch.optim.Adam(value_net.parameters(), lr=lr_critic)
+    else:
+        opt_critic = None
+
+    for _ep in tqdm(range(n_episodes), desc=f"{rl_method.upper()} training"):
+        _rollout_pg_episode(
+            env=env,
+            policy=policy,
+            scaler=scaler,
+            device=device,
+            pg_epsilon=pg_epsilon,
+        )
+        path = env.path
+        if not path:
+            continue
+
+        # Compute MC returns backwards
+        G = 0.0
+        returns = []
+        for step in reversed(path):
+            G = float(step.reward) + gamma * G
+            returns.append(G)
+        returns.reverse()
+
+        actor_losses: List[torch.Tensor] = []
+        entropy_terms: List[torch.Tensor] = []
+        critic_losses: List[torch.Tensor] = []
+
+        for step, G_t in zip(path, returns):
+            allowed = step.allowed_actions
+            if not allowed:
+                continue
+
+            s_mat_raw = np.asarray(step.state_material_features, dtype=float)
+            s_mat = scaler.transform(s_mat_raw.reshape(1, -1))[0]
+            s_step = np.asarray(step.state_step_onehot, dtype=float)
+
+            n = len(allowed)
+            a_elem_batch = np.asarray([a[0] for a in allowed], dtype=float)
+            a_comp_batch = np.asarray([a[1] for a in allowed], dtype=float)
+            s_mat_batch = np.repeat(s_mat.reshape(1, -1), n, axis=0)
+            s_step_batch = np.repeat(s_step.reshape(1, -1), n, axis=0)
+
+            s_mat_t = torch.tensor(s_mat_batch, dtype=torch.float32, device=device)
+            s_step_t = torch.tensor(s_step_batch, dtype=torch.float32, device=device)
+            a_elem_t = torch.tensor(a_elem_batch, dtype=torch.float32, device=device)
+            a_comp_t = torch.tensor(a_comp_batch, dtype=torch.float32, device=device)
+
+            logits = policy(s_mat_t, s_step_t, a_elem_t, a_comp_t).reshape(-1)
+            log_probs = torch.log_softmax(logits, dim=0)
+            probs = torch.softmax(logits, dim=0)
+
+            # Find the index of the taken action by matching one-hot vectors
+            taken_elem = np.asarray(step.action_elem_onehot)
+            taken_comp = np.asarray(step.action_comp_onehot)
+            taken_idx = None
+            for i, a in enumerate(allowed):
+                if np.array_equal(np.asarray(a[0]), taken_elem) and np.array_equal(np.asarray(a[1]), taken_comp):
+                    taken_idx = i
+                    break
+            if taken_idx is None:
+                continue
+
+            G_t_tensor = torch.tensor(G_t, dtype=torch.float32, device=device)
+            if value_net is not None:
+                s_mat_single = torch.tensor(s_mat.reshape(1, -1), dtype=torch.float32, device=device)
+                s_step_single = torch.tensor(s_step.reshape(1, -1), dtype=torch.float32, device=device)
+                value = value_net(s_mat_single, s_step_single).reshape(-1)[0]
+                advantage = G_t_tensor - value.detach()
+                critic_losses.append((value - G_t_tensor) ** 2)
+            else:
+                advantage = G_t_tensor
+
+            actor_losses.append(-log_probs[taken_idx] * advantage)
+            entropy_terms.append(-(probs * log_probs).sum())
+
+        if not actor_losses:
+            continue
+
+        actor_loss = torch.stack(actor_losses).mean()
+        entropy_bonus = torch.stack(entropy_terms).mean()
+        total_actor_loss = actor_loss - entropy_coef * entropy_bonus
+
+        opt_actor.zero_grad(set_to_none=True)
+        total_actor_loss.backward()
+        opt_actor.step()
+
+        if opt_critic is not None and critic_losses:
+            critic_loss = torch.stack(critic_losses).mean()
+            opt_critic.zero_grad(set_to_none=True)
+            critic_loss.backward()
+            opt_critic.step()
+
+
+def generate_pg(
+    *,
+    policy: torch.nn.Module,
+    env: ABCDEOOHEnv,
+    scaler: StandardScaler,
+    device: torch.device,
+    n_eps: int,
+    pg_gen_stochastic: bool,
+    reward_mode: str,
+    dp_predictor,
+    dp_cache: dict,
+    dp_uncertainty: str,
+    dp_objective: str,
+    dp_k: float,
+    dp_exp_ref: float,
+    dp_exp_scale: float,
+    primary_phase_filter: str,
+    max_gen_attempts,
+) -> List[dict]:
+    """Generate candidate compositions using a trained PolicyNet."""
+    policy.eval()
+    rows: List[dict] = []
+    need_generated_filter = primary_phase_filter in {"generated", "both"}
+    target_gen = n_eps
+    accepted = 0
+    attempted = 0
+    rejected = 0
+    dup_rejected = 0
+    seen_comp_keys: set = set()
+
+    pbar = tqdm(total=target_gen, desc="PG generate (accepted)")
+    while accepted < target_gen and (max_gen_attempts is None or attempted < max_gen_attempts):
+        attempted += 1
+        env.initialize()
+        for _t in range(env.max_steps):
+            allowed = env.allowed_actions()
+            s_mat = env.state_featurizer(env.state)
+            s_mat_scaled = scaler.transform(s_mat.reshape(1, -1))[0]
+
+            step_onehot = np.zeros(env.max_steps, dtype=float)
+            if env.counter < env.max_steps:
+                step_onehot[env.counter] = 1.0
+
+            n = len(allowed)
+            a_elem_batch = np.asarray([a[0] for a in allowed], dtype=float)
+            a_comp_batch = np.asarray([a[1] for a in allowed], dtype=float)
+            s_mat_batch = np.repeat(s_mat_scaled.reshape(1, -1), n, axis=0)
+            s_step_batch = np.repeat(step_onehot.reshape(1, -1), n, axis=0)
+            with torch.no_grad():
+                logits = policy(
+                    torch.tensor(s_mat_batch, dtype=torch.float32, device=device),
+                    torch.tensor(s_step_batch, dtype=torch.float32, device=device),
+                    torch.tensor(a_elem_batch, dtype=torch.float32, device=device),
+                    torch.tensor(a_comp_batch, dtype=torch.float32, device=device),
+                ).reshape(-1)
+
+            if pg_gen_stochastic:
+                probs = torch.softmax(logits, dim=0).cpu().numpy()
+                idx = int(np.random.choice(n, p=probs))
+            else:
+                idx = int(torch.argmax(logits).item())
+
+            env.step(allowed[idx])
+
+        comp = env.terminal_cation_fractions()
+        comp_key = tuple(
+            sorted(
+                (str(k), int(round(float(v) * 20)))
+                for k, v in comp.items()
+                if int(round(float(v) * 20)) > 0
+            )
+        )
+        ok, label = check_primary_phase(comp)
+        if need_generated_filter and not ok:
+            rejected += 1
+            if rejected <= 20 or rejected % 2000 == 0:
+                tqdm.write(f"[REJECT] PG generated filter: attempt={attempted} rejected={rejected} comp={comp}")
+            continue
+
+        if comp_key in seen_comp_keys:
+            dup_rejected += 1
+            if dup_rejected <= 20 or dup_rejected % 2000 == 0:
+                tqdm.write(f"[REJECT] PG duplicate generated: attempt={attempted} dup_rejected={dup_rejected}")
+            continue
+        seen_comp_keys.add(comp_key)
+
+        reward = float(env.path[-1].reward) if env.path else 0.0
+        dp_mean = ""
+        dp_std = ""
+        dp_mean_minus_std = ""
+        if reward_mode == "dp":
+            key = comp_key
+            if key in dp_cache:
+                entry = dp_cache[key]
+                mean = float(entry["mean"])
+                std = float(entry["std"])
+            else:
+                assert dp_predictor is not None
+                pred = dp_predictor.predict_overpotential(comp, uncertainty=dp_uncertainty)
+                mean, std = float(pred[0]), float(pred[1])
+                dp_cache[key] = {"mean": mean, "std": std}
+            dp_mean = mean
+            dp_std = std
+            dp_mean_minus_std = mean - std
+
+        row = {
+            "formula": env.terminal_formula,
+            "reward": reward,
+            "dp_mean": dp_mean,
+            "dp_std": dp_std,
+            "dp_mean_minus_std": dp_mean_minus_std,
+            "primary_ok": bool(ok),
+            "primary_label": label or "",
+        }
+        rows.append(row)
+        accepted += 1
+        pbar.update(1)
+        if attempted % 2000 == 0:
+            rate = (accepted / attempted) if attempted else 0.0
+            pbar.set_postfix(attempts=attempted, rejected=rejected, rate=f"{rate:.3f}")
+
+    pbar.close()
+
+    rate = (accepted / attempted) if attempted else 0.0
+    print(
+        f"[INFO] PG generated: accepted {accepted}/{target_gen} after {attempted} attempts (rate={rate:.4f}).",
+        flush=True,
+    )
+    return rows
 
 
 def main() -> None:
@@ -354,6 +653,56 @@ def main() -> None:
         choices=["models", "configs", "total"],
     )
 
+    # Policy gradient options
+    parser.add_argument(
+        "--rl-method",
+        type=str,
+        default="dqn",
+        choices=["dqn", "reinforce", "a2c"],
+        help="RL algorithm: 'dqn' uses the existing offline Q-learning path; 'reinforce'/'a2c' use online policy gradient.",
+    )
+    parser.add_argument(
+        "--pg-warmup-eps",
+        type=int,
+        default=200,
+        help="Random warmup episodes for scaler fitting (PG methods only).",
+    )
+    parser.add_argument(
+        "--pg-train-eps",
+        type=int,
+        default=1000,
+        help="Online PG training episodes.",
+    )
+    parser.add_argument(
+        "--pg-lr-actor",
+        type=float,
+        default=1e-3,
+        help="Adam learning rate for PolicyNet (PG methods).",
+    )
+    parser.add_argument(
+        "--pg-lr-critic",
+        type=float,
+        default=1e-3,
+        help="Adam learning rate for ValueNet (A2C only).",
+    )
+    parser.add_argument(
+        "--entropy-coef",
+        type=float,
+        default=0.01,
+        help="Entropy regularization coefficient for actor loss (PG methods).",
+    )
+    parser.add_argument(
+        "--pg-epsilon",
+        type=float,
+        default=0.0,
+        help="Epsilon-greedy exploration probability during PG training rollouts.",
+    )
+    parser.add_argument(
+        "--pg-gen-stochastic",
+        action="store_true",
+        help="If set, PG generation samples from π(a|s); otherwise uses greedy argmax.",
+    )
+
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -440,6 +789,88 @@ def main() -> None:
             return -float(obj)
 
         env.reward_fn = dp_reward_fn
+
+    # === Policy Gradient early exit (REINFORCE / A2C) ===
+    if args.rl_method in {"reinforce", "a2c"}:
+        scaler = _fit_scaler_from_warmup(env, args.pg_warmup_eps)
+        joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"), compress=True)
+
+        state_dim = int(scaler.mean_.shape[0])
+        policy = PolicyNet(
+            state_dim=state_dim,
+            step_dim=env.max_steps,
+            elem_dim=len(env.cation_set),
+            frac_dim=len(env.fraction_set),
+        ).to(device)
+        value_net = (
+            ValueNet(state_dim=state_dim, step_dim=env.max_steps).to(device)
+            if args.rl_method == "a2c"
+            else None
+        )
+
+        current_phase = "random"
+        train_pg(
+            policy=policy,
+            value_net=value_net,
+            env=env,
+            scaler=scaler,
+            device=device,
+            n_episodes=args.pg_train_eps,
+            gamma=args.gamma,
+            lr_actor=args.pg_lr_actor,
+            lr_critic=args.pg_lr_critic,
+            entropy_coef=args.entropy_coef,
+            pg_epsilon=args.pg_epsilon,
+            rl_method=args.rl_method,
+        )
+
+        torch.save(policy.state_dict(), os.path.join(args.out, "policy.pt"))
+        if value_net is not None:
+            torch.save(value_net.state_dict(), os.path.join(args.out, "value_net.pt"))
+
+        current_phase = "generate"
+        rows = generate_pg(
+            policy=policy,
+            env=env,
+            scaler=scaler,
+            device=device,
+            n_eps=args.num_gen_eps,
+            pg_gen_stochastic=args.pg_gen_stochastic,
+            reward_mode=args.reward_mode,
+            dp_predictor=dp_predictor,
+            dp_cache=dp_cache,
+            dp_uncertainty=args.dp_uncertainty,
+            dp_objective=args.dp_objective,
+            dp_k=args.dp_k,
+            dp_exp_ref=args.dp_exp_ref,
+            dp_exp_scale=args.dp_exp_scale,
+            primary_phase_filter=args.primary_phase_filter,
+            max_gen_attempts=int(args.max_gen_attempts) if args.max_gen_attempts is not None else None,
+        )
+
+        if args.reward_mode == "dp":
+            if args.dp_objective == "exp_scaled":
+                rows.sort(key=lambda r: -float(r["reward"]) if r["reward"] != "" else float("inf"))
+            else:
+                def _sort_key_pg(r: dict) -> float:
+                    v = r.get("dp_mean_minus_std", "")
+                    try:
+                        return float(v)
+                    except Exception:
+                        return float("inf")
+                rows.sort(key=_sort_key_pg)
+
+        _pg_csv_keys = ["formula", "reward", "dp_mean", "dp_std", "dp_mean_minus_std", "primary_ok", "primary_label"]
+        with open(os.path.join(args.out, "generated.csv"), "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=_pg_csv_keys)
+            w.writeheader()
+            for r in rows:
+                w.writerow(r)
+
+        with open(os.path.join(args.out, "run_config.json"), "w") as f:
+            json.dump(vars(args), f, indent=2, sort_keys=True)
+
+        return
 
     scaler_path = args.load_scaler or os.path.join(args.out, "std_scaler.bin")
     qnet_path = args.load_qnet or os.path.join(args.out, "qnet.pt")
