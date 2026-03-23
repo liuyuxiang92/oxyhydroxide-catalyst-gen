@@ -98,12 +98,16 @@ def train_q(
     device: torch.device,
     epochs: int,
     lr: float,
-) -> None:
+    iteration: int = 0,
+) -> List[dict]:
     model.train()
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = torch.nn.MSELoss()
+    metrics: List[dict] = []
 
-    for _ in tqdm(range(epochs), desc="Q epochs"):
+    pbar = tqdm(range(epochs), desc="Q epochs")
+    for epoch_idx in pbar:
+        batch_losses: List[float] = []
         for s_mat, s_step, a_elem, a_comp, y in loader:
             s_mat = s_mat.to(device)
             s_step = s_step.to(device)
@@ -116,6 +120,14 @@ def train_q(
             loss = loss_fn(pred, y)
             loss.backward()
             opt.step()
+            batch_losses.append(float(loss.item()))
+
+        epoch_loss = float(np.mean(batch_losses)) if batch_losses else float("nan")
+        metrics.append({"phase": "dqn_train", "iteration": iteration, "epoch": epoch_idx + 1, "mse_loss": epoch_loss})
+        pbar.set_postfix(mse_loss=f"{epoch_loss:.4f}")
+        tqdm.write(f"[DQN train] iter={iteration} epoch={epoch_idx + 1}/{epochs} | mse_loss={epoch_loss:.4f}")
+
+    return metrics
 
 
 def choose_action(
@@ -267,7 +279,7 @@ def train_pg(
     entropy_coef: float,
     pg_epsilon: float,
     rl_method: str,
-) -> None:
+) -> List[dict]:
     """Online REINFORCE or A2C training loop."""
     policy.train()
     opt_actor = torch.optim.Adam(policy.parameters(), lr=lr_actor)
@@ -277,7 +289,16 @@ def train_pg(
     else:
         opt_critic = None
 
-    for _ep in tqdm(range(n_episodes), desc=f"{rl_method.upper()} training"):
+    metrics: List[dict] = []
+    # Rolling buffers for printing summaries every 50 episodes
+    _roll_returns: List[float] = []
+    _roll_actor: List[float] = []
+    _roll_entropy: List[float] = []
+    _roll_critic: List[float] = []
+    _PRINT_INTERVAL = 50
+
+    pbar = tqdm(range(n_episodes), desc=f"{rl_method.upper()} training")
+    for ep_idx in pbar:
         _rollout_pg_episode(
             env=env,
             policy=policy,
@@ -296,6 +317,7 @@ def train_pg(
             G = float(step.reward) + gamma * G
             returns.append(G)
         returns.reverse()
+        episode_return = returns[0] if returns else 0.0
 
         actor_losses: List[torch.Tensor] = []
         entropy_terms: List[torch.Tensor] = []
@@ -360,11 +382,60 @@ def train_pg(
         total_actor_loss.backward()
         opt_actor.step()
 
+        ep_critic_loss: float | str = ""
         if opt_critic is not None and critic_losses:
             critic_loss = torch.stack(critic_losses).mean()
             opt_critic.zero_grad(set_to_none=True)
             critic_loss.backward()
             opt_critic.step()
+            ep_critic_loss = float(critic_loss.item())
+
+        ep_actor_loss = float(actor_loss.item())
+        ep_entropy = float(entropy_bonus.item())
+
+        metrics.append({
+            "phase": "pg_train",
+            "iteration": 0,
+            "episode": ep_idx + 1,
+            "return": episode_return,
+            "actor_loss": ep_actor_loss,
+            "entropy": ep_entropy,
+            "critic_loss": ep_critic_loss,
+        })
+
+        _roll_returns.append(episode_return)
+        _roll_actor.append(ep_actor_loss)
+        _roll_entropy.append(ep_entropy)
+        if ep_critic_loss != "":
+            _roll_critic.append(float(ep_critic_loss))
+
+        # Keep rolling window at _PRINT_INTERVAL size
+        if len(_roll_returns) > _PRINT_INTERVAL:
+            _roll_returns.pop(0)
+            _roll_actor.pop(0)
+            _roll_entropy.pop(0)
+            if _roll_critic:
+                _roll_critic.pop(0)
+
+        if (ep_idx + 1) % _PRINT_INTERVAL == 0:
+            mean_ret = float(np.mean(_roll_returns))
+            mean_al = float(np.mean(_roll_actor))
+            mean_ent = float(np.mean(_roll_entropy))
+            pbar.set_postfix(ret=f"{mean_ret:.3f}", actor=f"{mean_al:.3f}", ent=f"{mean_ent:.3f}")
+            if _roll_critic:
+                mean_cl = float(np.mean(_roll_critic))
+                tqdm.write(
+                    f"[{rl_method.upper()} train] ep={ep_idx + 1}/{n_episodes} | "
+                    f"return={mean_ret:.3f} | actor_loss={mean_al:.3f} | "
+                    f"entropy={mean_ent:.3f} | critic_loss={mean_cl:.4f}"
+                )
+            else:
+                tqdm.write(
+                    f"[{rl_method.upper()} train] ep={ep_idx + 1}/{n_episodes} | "
+                    f"return={mean_ret:.3f} | actor_loss={mean_al:.3f} | entropy={mean_ent:.3f}"
+                )
+
+    return metrics
 
 
 def generate_pg(
@@ -442,13 +513,13 @@ def generate_pg(
         ok, label = check_primary_phase(comp)
         if need_generated_filter and not ok:
             rejected += 1
-            if rejected <= 20 or rejected % 2000 == 0:
+            if rejected <= 20 or rejected % 500 == 0:
                 tqdm.write(f"[REJECT] PG generated filter: attempt={attempted} rejected={rejected} comp={comp}")
             continue
 
         if comp_key in seen_comp_keys:
             dup_rejected += 1
-            if dup_rejected <= 20 or dup_rejected % 2000 == 0:
+            if dup_rejected <= 20 or dup_rejected % 500 == 0:
                 tqdm.write(f"[REJECT] PG duplicate generated: attempt={attempted} dup_rejected={dup_rejected}")
             continue
         seen_comp_keys.add(comp_key)
@@ -484,7 +555,7 @@ def generate_pg(
         rows.append(row)
         accepted += 1
         pbar.update(1)
-        if attempted % 2000 == 0:
+        if attempted % 500 == 0:
             rate = (accepted / attempted) if attempted else 0.0
             pbar.set_postfix(attempts=attempted, rejected=rejected, rate=f"{rate:.3f}")
 
@@ -809,7 +880,8 @@ def main() -> None:
         )
 
         current_phase = "random"
-        train_pg(
+        all_metrics: List[dict] = []
+        all_metrics.extend(train_pg(
             policy=policy,
             value_net=value_net,
             env=env,
@@ -822,7 +894,17 @@ def main() -> None:
             entropy_coef=args.entropy_coef,
             pg_epsilon=args.pg_epsilon,
             rl_method=args.rl_method,
-        )
+        ))
+
+        # Write training log CSV
+        _log_path = os.path.join(args.out, "training_log.csv")
+        _log_cols = ["phase", "iteration", "episode", "epoch", "return", "actor_loss", "entropy", "critic_loss", "mse_loss"]
+        with open(_log_path, "w", newline="") as _f:
+            _w = csv.DictWriter(_f, fieldnames=_log_cols, extrasaction="ignore")
+            _w.writeheader()
+            for _row in all_metrics:
+                _w.writerow({c: _row.get(c, "") for c in _log_cols})
+        print(f"[INFO] Training log written to {_log_path}", flush=True)
 
         torch.save(policy.state_dict(), os.path.join(args.out, "policy.pt"))
         if value_net is not None:
@@ -874,6 +956,8 @@ def main() -> None:
 
     scaler_path = args.load_scaler or os.path.join(args.out, "std_scaler.bin")
     qnet_path = args.load_qnet or os.path.join(args.out, "qnet.pt")
+
+    all_metrics: List[dict] = []
 
     if args.only_generate:
         if os.path.exists(scaler_path):
@@ -1010,7 +1094,7 @@ def main() -> None:
             frac_dim=a_comp.shape[1],
         ).to(device)
 
-        train_q(model=qnet, loader=loader, device=device, epochs=args.dqn_epochs, lr=args.lr)
+        all_metrics.extend(train_q(model=qnet, loader=loader, device=device, epochs=args.dqn_epochs, lr=args.lr, iteration=0))
 
     # Option B (iterative): grow the buffer with on-the-fly episodes from the learned policy, then retrain.
     # This runs for `--iter-num-iters` iterations, collecting episodes and retraining each time.
@@ -1117,7 +1201,7 @@ def main() -> None:
             )
             loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, drop_last=False)
             qnet.train()
-            train_q(model=qnet, loader=loader, device=device, epochs=iter_train_epochs, lr=args.lr)
+            all_metrics.extend(train_q(model=qnet, loader=loader, device=device, epochs=iter_train_epochs, lr=args.lr, iteration=it + 1))
 
             # Persist dataset after each iteration so long runs are resumable.
             np.savez_compressed(
@@ -1147,6 +1231,16 @@ def main() -> None:
             )
 
         torch.save(qnet.state_dict(), os.path.join(args.out, "qnet.pt"))
+
+    # Write DQN training log CSV
+    _log_path = os.path.join(args.out, "training_log.csv")
+    _log_cols = ["phase", "iteration", "episode", "epoch", "return", "actor_loss", "entropy", "critic_loss", "mse_loss"]
+    with open(_log_path, "w", newline="") as _f:
+        _w = csv.DictWriter(_f, fieldnames=_log_cols, extrasaction="ignore")
+        _w.writeheader()
+        for _row in all_metrics:
+            _w.writerow({c: _row.get(c, "") for c in _log_cols})
+    print(f"[INFO] Training log written to {_log_path}", flush=True)
 
     # 4) Generate candidates
     qnet.eval()
@@ -1204,7 +1298,7 @@ def main() -> None:
         ok, label = check_primary_phase(comp)
         if need_generated_filter and not ok:
             rejected += 1
-            if rejected <= 20 or rejected % 2000 == 0:
+            if rejected <= 20 or rejected % 500 == 0:
                 tqdm.write(
                     f"[REJECT] generated filter: attempt={attempted} rejected={rejected} comp={comp}"
                 )
@@ -1214,7 +1308,7 @@ def main() -> None:
         # will often regenerate the same terminal composition many times.
         if comp_key in seen_comp_keys:
             dup_rejected += 1
-            if dup_rejected <= 20 or dup_rejected % 2000 == 0:
+            if dup_rejected <= 20 or dup_rejected % 500 == 0:
                 tqdm.write(
                     f"[REJECT] duplicate generated: attempt={attempted} dup_rejected={dup_rejected} comp={comp}"
                 )
@@ -1255,7 +1349,7 @@ def main() -> None:
         accepted += 1
 
         pbar.update(1)
-        if attempted % 2000 == 0:
+        if attempted % 500 == 0:
             rate = (accepted / attempted) if attempted else 0.0
             pbar.set_postfix(attempts=attempted, rejected=rejected, rate=f"{rate:.3f}")
 
