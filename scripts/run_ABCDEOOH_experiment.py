@@ -211,16 +211,29 @@ def _rollout_policy_episode(
         env.step(a)
 
 
-def _fit_scaler_from_warmup(env: ABCDEOOHEnv, n_warmup_eps: int) -> StandardScaler:
+def _fit_scaler_from_warmup(env: ABCDEOOHEnv, n_warmup_eps: int, filter_fn=None) -> StandardScaler:
     """Roll out random episodes and fit a StandardScaler on material features."""
     all_s_mat = []
-    for _ in tqdm(range(n_warmup_eps), desc="PG warmup (scaler fit)"):
+    accepted = 0
+    attempted = 0
+    rejected = 0
+    pbar = tqdm(total=n_warmup_eps, desc="PG warmup (scaler fit)")
+    while accepted < n_warmup_eps:
+        attempted += 1
         _rollout_random_episode(env)
+        if filter_fn is not None:
+            comp = env.terminal_cation_fractions()
+            if not filter_fn(comp):
+                rejected += 1
+                continue
         for step in env.path:
             all_s_mat.append(np.asarray(step.state_material_features, dtype=float))
-    s_mat = np.asarray(all_s_mat, dtype=float)
+        accepted += 1
+        pbar.update(1)
+    pbar.close()
+    print(f"[INFO] PG warmup: accepted {accepted}/{n_warmup_eps} after {attempted} attempts (rejected={rejected}).")
     scaler = StandardScaler()
-    scaler.fit(s_mat)
+    scaler.fit(np.asarray(all_s_mat, dtype=float))
     return scaler
 
 
@@ -279,6 +292,8 @@ def train_pg(
     entropy_coef: float,
     pg_epsilon: float,
     rl_method: str,
+    filter_fn=None,
+    max_train_attempts=None,
 ) -> List[dict]:
     """Online REINFORCE or A2C training loop."""
     policy.train()
@@ -297,8 +312,13 @@ def train_pg(
     _roll_critic: List[float] = []
     _PRINT_INTERVAL = 50
 
-    pbar = tqdm(range(n_episodes), desc=f"{rl_method.upper()} training")
-    for ep_idx in pbar:
+    accepted = 0
+    attempted = 0
+    rejected = 0
+
+    pbar = tqdm(total=n_episodes, desc=f"{rl_method.upper()} training (accepted)")
+    while accepted < n_episodes and (max_train_attempts is None or attempted < max_train_attempts):
+        attempted += 1
         _rollout_pg_episode(
             env=env,
             policy=policy,
@@ -306,6 +326,17 @@ def train_pg(
             device=device,
             pg_epsilon=pg_epsilon,
         )
+
+        if filter_fn is not None:
+            comp = env.terminal_cation_fractions()
+            if not filter_fn(comp):
+                rejected += 1
+                if rejected <= 20 or rejected % 500 == 0:
+                    tqdm.write(
+                        f"[REJECT] PG train filter: attempt={attempted} rejected={rejected} comp={comp}"
+                    )
+                continue
+
         path = env.path
         if not path:
             continue
@@ -393,10 +424,13 @@ def train_pg(
         ep_actor_loss = float(actor_loss.item())
         ep_entropy = float(entropy_bonus.item())
 
+        accepted += 1
+        pbar.update(1)
+
         metrics.append({
             "phase": "pg_train",
             "iteration": 0,
-            "episode": ep_idx + 1,
+            "episode": accepted,
             "return": episode_return,
             "actor_loss": ep_actor_loss,
             "entropy": ep_entropy,
@@ -417,7 +451,7 @@ def train_pg(
             if _roll_critic:
                 _roll_critic.pop(0)
 
-        if (ep_idx + 1) % _PRINT_INTERVAL == 0:
+        if accepted % _PRINT_INTERVAL == 0:
             mean_ret = float(np.mean(_roll_returns))
             mean_al = float(np.mean(_roll_actor))
             mean_ent = float(np.mean(_roll_entropy))
@@ -425,15 +459,21 @@ def train_pg(
             if _roll_critic:
                 mean_cl = float(np.mean(_roll_critic))
                 tqdm.write(
-                    f"[{rl_method.upper()} train] ep={ep_idx + 1}/{n_episodes} | "
+                    f"[{rl_method.upper()} train] ep={accepted}/{n_episodes} | "
                     f"return={mean_ret:.3f} | actor_loss={mean_al:.3f} | "
                     f"entropy={mean_ent:.3f} | critic_loss={mean_cl:.4f}"
                 )
             else:
                 tqdm.write(
-                    f"[{rl_method.upper()} train] ep={ep_idx + 1}/{n_episodes} | "
+                    f"[{rl_method.upper()} train] ep={accepted}/{n_episodes} | "
                     f"return={mean_ret:.3f} | actor_loss={mean_al:.3f} | entropy={mean_ent:.3f}"
                 )
+
+    pbar.close()
+
+    if max_train_attempts is not None and accepted < n_episodes:
+        print(f"[WARN] PG training: only accepted {accepted}/{n_episodes} after {attempted} attempts.")
+    print(f"[INFO] PG training: accepted {accepted}/{n_episodes} after {attempted} attempts (rejected={rejected}).")
 
     return metrics
 
@@ -863,7 +903,10 @@ def main() -> None:
 
     # === Policy Gradient early exit (REINFORCE / A2C) ===
     if args.rl_method in {"reinforce", "a2c"}:
-        scaler = _fit_scaler_from_warmup(env, args.pg_warmup_eps)
+        need_buffer_filter = args.primary_phase_filter in {"buffer", "both"}
+        filter_fn = (lambda comp: check_primary_phase(comp)[0]) if need_buffer_filter else None
+
+        scaler = _fit_scaler_from_warmup(env, args.pg_warmup_eps, filter_fn=filter_fn)
         joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"), compress=True)
 
         state_dim = int(scaler.mean_.shape[0])
@@ -894,6 +937,8 @@ def main() -> None:
             entropy_coef=args.entropy_coef,
             pg_epsilon=args.pg_epsilon,
             rl_method=args.rl_method,
+            filter_fn=filter_fn,
+            max_train_attempts=None,
         ))
 
         # Write training log CSV
