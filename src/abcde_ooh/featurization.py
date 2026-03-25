@@ -37,30 +37,43 @@ except Exception:  # pragma: no cover
     _NUM_FEATURES = 8
 
 
+_featurize_cache: dict[str, np.ndarray] = {}
+
+
 def featurize_formula(formula: str) -> np.ndarray:
     """Featurize a (possibly partial) formula into a fixed-length float vector.
 
     Returns zeros if featurization fails (e.g., empty/invalid partial state).
+    Results are cached by formula string — safe because callers never mutate
+    the returned array.
     """
 
+    if formula in _featurize_cache:
+        return _featurize_cache[formula]
+
     if not formula:
-        return np.zeros(_NUM_FEATURES, dtype=float)
+        result = np.zeros(_NUM_FEATURES, dtype=float)
+        _featurize_cache[formula] = result
+        return result
 
     # Preferred: Magpie/matminer features.
     if feature_calculators is not None:
         try:
             chemical = Composition(formula)
             feats: Sequence[float] = feature_calculators.featurize(chemical)
-            return np.asarray(feats, dtype=float)
+            result = np.asarray(feats, dtype=float)
         except Exception:
-            return np.zeros(_NUM_FEATURES, dtype=float)
+            result = np.zeros(_NUM_FEATURES, dtype=float)
+        _featurize_cache[formula] = result
+        return result
 
     # Fallback: deterministic lightweight features from the string.
     import zlib
 
     h = zlib.adler32(formula.encode("utf-8"))
     # Spread bits into a small fixed vector in [0, 1).
-    out = np.zeros(_NUM_FEATURES, dtype=float)
+    result = np.zeros(_NUM_FEATURES, dtype=float)
     for i in range(_NUM_FEATURES):
-        out[i] = ((h >> (i * 3)) & 0xFF) / 255.0
-    return out
+        result[i] = ((h >> (i * 3)) & 0xFF) / 255.0
+    _featurize_cache[formula] = result
+    return result
