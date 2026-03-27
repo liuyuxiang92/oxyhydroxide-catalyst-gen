@@ -138,29 +138,35 @@ def main() -> None:
 
     rows: List[dict] = []
 
-    for formula in iter_formulas(args):
-        comp = parse_cation_fractions(formula, anion_formula=args.anion_formula)
-        mean, std = predictor.predict_overpotential(
-            comp,
-            uncertainty=args.dp_uncertainty,
-            debug_dir=args.dp_debug_dir,
-        )
-        obj = objective_from_mean_std(
-            float(mean), float(std),
-            mode=args.dp_objective, k=args.dp_k,
-            exp_ref=args.dp_exp_ref, exp_scale=args.dp_exp_scale,
-        )
-        reward = -float(obj)
+    skipped: List[Tuple[str, str]] = []
 
-        rows.append(
-            {
-                "formula": formula,
-                "dp_mean": float(mean),
-                "dp_std": float(std),
-                "dp_objective": float(obj),
-                "reward": float(reward),
-            }
-        )
+    for formula in iter_formulas(args):
+        try:
+            comp = parse_cation_fractions(formula, anion_formula=args.anion_formula)
+            mean, std = predictor.predict_overpotential(
+                comp,
+                uncertainty=args.dp_uncertainty,
+                debug_dir=args.dp_debug_dir,
+            )
+            obj = objective_from_mean_std(
+                float(mean), float(std),
+                mode=args.dp_objective, k=args.dp_k,
+                exp_ref=args.dp_exp_ref, exp_scale=args.dp_exp_scale,
+            )
+            reward = -float(obj)
+
+            rows.append(
+                {
+                    "formula": formula,
+                    "dp_mean": float(mean),
+                    "dp_std": float(std),
+                    "dp_objective": float(obj),
+                    "reward": float(reward),
+                }
+            )
+        except Exception as exc:
+            skipped.append((formula, str(exc)))
+            print(f"[WARN] Skipping {formula}: {exc}", flush=True)
 
     if args.out_csv:
         with open(args.out_csv, "w", newline="", encoding="utf-8") as f:
@@ -175,6 +181,11 @@ def main() -> None:
         )
         w.writeheader()
         w.writerows(rows)
+
+    if skipped:
+        print(f"\n[WARN] {len(skipped)} formula(s) skipped due to errors:")
+        for formula, reason in skipped:
+            print(f"  {formula}: {reason}")
 
 
 if __name__ == "__main__":
