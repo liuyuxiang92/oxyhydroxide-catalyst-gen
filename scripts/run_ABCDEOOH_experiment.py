@@ -730,6 +730,18 @@ def main() -> None:
     )
 
     parser.add_argument(
+        "--target-phase",
+        type=str,
+        default="none",
+        choices=["none", "Ni", "Co", "NiFe", "CoFe", "NiFeCo", "any"],
+        help=(
+            "Constrain action space at every step so all generated compositions satisfy "
+            "the target phase. Eliminates post-generation filtering; 100%% acceptance rate. "
+            "'any' allows any of the five valid phase types."
+        ),
+    )
+
+    parser.add_argument(
         "--use-saved-random-dataset",
         action="store_true",
         help="Load random_dataset.npz from --out instead of regenerating.",
@@ -846,11 +858,23 @@ def main() -> None:
             raise RuntimeError("DP reward is bound via env-aware closure")
         raise RuntimeError("Unknown reward mode")
 
+    phase_filter = None
+    if args.target_phase != "none":
+        from abcde_ooh.constraints.phase_sampler import PhaseActionFilter
+        _tmp_env = ABCDEOOHEnv(cation_set=DEFAULT_CATION_SET, fraction_set=DEFAULT_FRACTIONS)
+        phase_filter = PhaseActionFilter(
+            target_phase=args.target_phase,
+            allowed_units=_tmp_env._allowed_units,
+            possible_sums_by_k=_tmp_env._possible_sums_by_k,
+        )
+        print(f"[INFO] Target phase filter active: {args.target_phase}")
+
     env = ABCDEOOHEnv(
         cation_set=DEFAULT_CATION_SET,
         fraction_set=DEFAULT_FRACTIONS,
         anion_formula=args.anion_formula,
         reward_fn=reward_fn,
+        phase_filter=phase_filter,
     )
 
     current_phase = "random"  # random | generate

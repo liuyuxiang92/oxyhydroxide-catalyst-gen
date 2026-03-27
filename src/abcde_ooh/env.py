@@ -117,6 +117,7 @@ class ABCDEOOHEnv:
         max_steps: int = 5,
         reward_fn: Callable[[str], float] | None = None,
         state_featurizer: Callable[[str], np.ndarray] = featurize_formula,
+        phase_filter=None,
     ) -> None:
         if max_steps != 5:
             raise ValueError("This environment is designed for exactly 5 steps (A..E).")
@@ -134,11 +135,14 @@ class ABCDEOOHEnv:
             _possible_sums(self._allowed_units, k, self._total_units) for k in range(self.max_steps + 1)
         ]
 
+        self.phase_filter = phase_filter
+
         self.state: str = ""
         self.counter: int = 0
         self.path: List[EpisodeStep] = []
         self._selected: set[str] = set()
         self._used_units: int = 0
+        self._units_map: Dict[str, int] = {}
 
     def initialize(self) -> None:
         self.state = ""
@@ -146,6 +150,7 @@ class ABCDEOOHEnv:
         self.path = []
         self._selected = set()
         self._used_units = 0
+        self._units_map = {}
 
     @property
     def remaining_units(self) -> int:
@@ -212,6 +217,18 @@ class ABCDEOOHEnv:
                 comp = _format_fraction(u)
                 comp_oh = tuple(encode_choice(comp, self.fraction_set).tolist())
                 actions.append((elem_oh, comp_oh))
+
+        if self.phase_filter is not None:
+            actions = self.phase_filter.filter_actions(
+                actions=actions,
+                units_map=self._units_map,
+                steps_left=self.max_steps - self.counter - 1,
+                allowed_units=self._allowed_units,
+                possible_sums_by_k=self._possible_sums_by_k,
+                cation_set=self.cation_set,
+                fraction_set=self.fraction_set,
+            )
+
         return actions
 
     def sample_random_action(self) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
@@ -248,6 +265,7 @@ class ABCDEOOHEnv:
             self.state = f"{self.state}{elem}{comp_str}"
 
         self._selected.add(elem)
+        self._units_map[elem] = comp_units
         self._used_units += comp_units
         self.counter += 1
 
