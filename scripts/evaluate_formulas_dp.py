@@ -70,9 +70,11 @@ def main() -> None:
     parser.add_argument(
         "--dp-model",
         action="append",
-        default=[],
-        required=True,
-        help="Path to a DeepMD .pt checkpoint. Repeat for ensemble.",
+        default=None,
+        help=(
+            "Path to a DeepMD .pt checkpoint. Repeat for ensemble. "
+            "Defaults to model_1.ckpt.pt … model_5.ckpt.pt if not specified."
+        ),
     )
     parser.add_argument("--dp-poscar", type=str, default="POSCAR")
     parser.add_argument("--dp-n-random-configs", type=int, default=10)
@@ -106,6 +108,15 @@ def main() -> None:
     parser.add_argument("--out-csv", type=str, default=None)
 
     args = parser.parse_args()
+
+    if args.dp_model is None:
+        args.dp_model = [
+            "model_1.ckpt.pt",
+            "model_2.ckpt.pt",
+            "model_3.ckpt.pt",
+            "model_4.ckpt.pt",
+            "model_5.ckpt.pt",
+        ]
 
     # Local imports
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
