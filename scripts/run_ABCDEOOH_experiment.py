@@ -486,7 +486,6 @@ def generate_pg(
     device: torch.device,
     n_eps: int,
     pg_gen_stochastic: bool,
-    reward_mode: str,
     dp_predictor,
     dp_cache: dict,
     dp_uncertainty: str,
@@ -565,23 +564,18 @@ def generate_pg(
         seen_comp_keys.add(comp_key)
 
         reward = float(env.path[-1].reward) if env.path else 0.0
-        dp_mean = ""
-        dp_std = ""
-        dp_mean_minus_std = ""
-        if reward_mode == "dp":
-            key = comp_key
-            if key in dp_cache:
-                entry = dp_cache[key]
-                mean = float(entry["mean"])
-                std = float(entry["std"])
-            else:
-                assert dp_predictor is not None
-                pred = dp_predictor.predict_overpotential(comp, uncertainty=dp_uncertainty)
-                mean, std = float(pred[0]), float(pred[1])
-                dp_cache[key] = {"mean": mean, "std": std}
-            dp_mean = mean
-            dp_std = std
-            dp_mean_minus_std = mean - std
+        key = comp_key
+        if key in dp_cache:
+            entry = dp_cache[key]
+            mean = float(entry["mean"])
+            std = float(entry["std"])
+        else:
+            pred = dp_predictor.predict_overpotential(comp, uncertainty=dp_uncertainty)
+            mean, std = float(pred[0]), float(pred[1])
+            dp_cache[key] = {"mean": mean, "std": std}
+        dp_mean = mean
+        dp_std = std
+        dp_mean_minus_std = mean - std
 
         row = {
             "formula": env.terminal_formula,
@@ -607,6 +601,15 @@ def generate_pg(
         flush=True,
     )
     return rows
+
+
+_DEFAULT_DP_MODELS = [
+    "model_1.ckpt.pt",
+    "model_2.ckpt.pt",
+    "model_3.ckpt.pt",
+    "model_4.ckpt.pt",
+    "model_5.ckpt.pt",
+]
 
 
 def main() -> None:
@@ -716,13 +719,6 @@ def main() -> None:
     parser.add_argument("--anion-formula", type=str, default="O2H1")
 
     parser.add_argument(
-        "--reward-mode",
-        type=str,
-        default="none",
-        choices=["none", "dp"],
-    )
-
-    parser.add_argument(
         "--primary-phase-filter",
         type=str,
         default="none",
@@ -752,8 +748,11 @@ def main() -> None:
     parser.add_argument(
         "--dp-model",
         action="append",
-        default=[],
-        help="Path to a DeepMD .pt checkpoint. Repeat for ensemble.",
+        default=None,
+        help=(
+            "Path to a DeepMD .pt checkpoint. Repeat for ensemble. "
+            "Defaults to model_1.ckpt.pt … model_5.ckpt.pt if not specified."
+        ),
     )
     parser.add_argument("--dp-n-random-configs", type=int, default=10)
     parser.add_argument("--dp-ads-height", type=float, default=1.9)
@@ -828,35 +827,29 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    if args.dp_model is None:
+        args.dp_model = _DEFAULT_DP_MODELS
+
     set_seed(args.seed)
     ensure_dir(args.out)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    dp_predictor = None
     dp_cache = {}
-    if args.reward_mode == "dp":
-        if not args.dp_model:
-            raise SystemExit("--reward-mode dp requires at least one --dp-model")
+    if not args.dp_model:
+        raise SystemExit("--dp-model is required")
 
-        from abcde_ooh.dp_predictor import DPConfig, DeepMDOverpotentialPredictor, objective_from_mean_std
+    from abcde_ooh.dp_predictor import DPConfig, DeepMDOverpotentialPredictor, objective_from_mean_std
 
-        cfg = DPConfig(
-            base_poscar=args.dp_poscar,
-            model_files=tuple(args.dp_model) if args.dp_model else (),
-            n_random_configs=args.dp_n_random_configs,
-            ads_height=args.dp_ads_height,
-            ads_dz=args.dp_ads_dz,
-            seed=args.seed,
-        )
-        dp_predictor = DeepMDOverpotentialPredictor(cfg)
-
-    def reward_fn(formula: str) -> float:
-        if args.reward_mode == "none":
-            return 0.0
-        if args.reward_mode == "dp":
-            raise RuntimeError("DP reward is bound via env-aware closure")
-        raise RuntimeError("Unknown reward mode")
+    cfg = DPConfig(
+        base_poscar=args.dp_poscar,
+        model_files=tuple(args.dp_model) if args.dp_model else (),
+        n_random_configs=args.dp_n_random_configs,
+        ads_height=args.dp_ads_height,
+        ads_dz=args.dp_ads_dz,
+        seed=args.seed,
+    )
+    dp_predictor = DeepMDOverpotentialPredictor(cfg)
 
     phase_filter = None
     if args.target_phase != "none":
@@ -873,57 +866,52 @@ def main() -> None:
         cation_set=DEFAULT_CATION_SET,
         fraction_set=DEFAULT_FRACTIONS,
         anion_formula=args.anion_formula,
-        reward_fn=reward_fn,
         phase_filter=phase_filter,
     )
 
     current_phase = "random"  # random | generate
 
-    if args.reward_mode == "dp":
-        assert dp_predictor is not None
-        from abcde_ooh.dp_predictor import objective_from_mean_std
+    def _comp_key(comp: dict) -> tuple:
+        items = []
+        for el, frac in comp.items():
+            units = int(round(float(frac) * 20))
+            if units > 0:
+                items.append((str(el), units))
+        return tuple(sorted(items))
 
-        def _comp_key(comp: dict) -> tuple:
-            items = []
-            for el, frac in comp.items():
-                units = int(round(float(frac) * 20))
-                if units > 0:
-                    items.append((str(el), units))
-            return tuple(sorted(items))
+    def dp_reward_fn(_terminal_formula: str) -> float:
+        comp = env.terminal_cation_fractions()
 
-        def dp_reward_fn(_terminal_formula: str) -> float:
-            comp = env.terminal_cation_fractions()
+        # Skip expensive DeepMD if this comp would be discarded.
+        skip_for_constraints = False
+        if args.primary_phase_filter in {"buffer", "both"}:
+            skip_for_constraints = True
+        elif current_phase == "generate" and args.primary_phase_filter in {"generated", "both"}:
+            skip_for_constraints = True
 
-            # Skip expensive DeepMD if this comp would be discarded.
-            skip_for_constraints = False
-            if args.primary_phase_filter in {"buffer", "both"}:
-                skip_for_constraints = True
-            elif current_phase == "generate" and args.primary_phase_filter in {"generated", "both"}:
-                skip_for_constraints = True
+        if skip_for_constraints:
+            ok, label = check_primary_phase(comp)
+            if not ok:
+                return 0.0
 
-            if skip_for_constraints:
-                ok, label = check_primary_phase(comp)
-                if not ok:
-                    return 0.0
+        key = _comp_key(comp)
+        if key in dp_cache:
+            entry = dp_cache[key]
+            mean = entry["mean"]
+            std = entry["std"]
+        else:
+            pred = dp_predictor.predict_overpotential(comp, uncertainty=args.dp_uncertainty)
+            mean, std = pred[0], pred[1]
+            dp_cache[key] = {"mean": float(mean), "std": float(std)}
 
-            key = _comp_key(comp)
-            if key in dp_cache:
-                entry = dp_cache[key]
-                mean = entry["mean"]
-                std = entry["std"]
-            else:
-                pred = dp_predictor.predict_overpotential(comp, uncertainty=args.dp_uncertainty)
-                mean, std = pred[0], pred[1]
-                dp_cache[key] = {"mean": float(mean), "std": float(std)}
+        obj = objective_from_mean_std(
+            float(mean), float(std),
+            mode=args.dp_objective, k=args.dp_k,
+            exp_ref=args.dp_exp_ref, exp_scale=args.dp_exp_scale,
+        )
+        return -float(obj)
 
-            obj = objective_from_mean_std(
-                float(mean), float(std),
-                mode=args.dp_objective, k=args.dp_k,
-                exp_ref=args.dp_exp_ref, exp_scale=args.dp_exp_scale,
-            )
-            return -float(obj)
-
-        env.reward_fn = dp_reward_fn
+    env.reward_fn = dp_reward_fn
 
     # === Policy Gradient early exit (REINFORCE / A2C) ===
     if args.rl_method in {"reinforce", "a2c"}:
@@ -987,7 +975,6 @@ def main() -> None:
             device=device,
             n_eps=args.num_gen_eps,
             pg_gen_stochastic=args.pg_gen_stochastic,
-            reward_mode=args.reward_mode,
             dp_predictor=dp_predictor,
             dp_cache=dp_cache,
             dp_uncertainty=args.dp_uncertainty,
@@ -999,17 +986,16 @@ def main() -> None:
             max_gen_attempts=int(args.max_gen_attempts) if args.max_gen_attempts is not None else None,
         )
 
-        if args.reward_mode == "dp":
-            if args.dp_objective == "exp_scaled":
-                rows.sort(key=lambda r: -float(r["reward"]) if r["reward"] != "" else float("inf"))
-            else:
-                def _sort_key_pg(r: dict) -> float:
-                    v = r.get("dp_mean_minus_std", "")
-                    try:
-                        return float(v)
-                    except Exception:
-                        return float("inf")
-                rows.sort(key=_sort_key_pg)
+        if args.dp_objective == "exp_scaled":
+            rows.sort(key=lambda r: -float(r["reward"]) if r["reward"] != "" else float("inf"))
+        else:
+            def _sort_key_pg(r: dict) -> float:
+                v = r.get("dp_mean_minus_std", "")
+                try:
+                    return float(v)
+                except Exception:
+                    return float("inf")
+            rows.sort(key=_sort_key_pg)
 
         _pg_csv_keys = ["formula", "reward", "dp_mean", "dp_std", "dp_mean_minus_std", "primary_ok", "primary_label"]
         with open(os.path.join(args.out, "generated.csv"), "w", newline="") as f:
@@ -1386,23 +1372,18 @@ def main() -> None:
 
         reward = float(env.path[-1].reward) if env.path else 0.0
 
-        dp_mean = ""
-        dp_std = ""
-        dp_mean_minus_std = ""
-        if args.reward_mode == "dp":
-            key = comp_key
-            if key in dp_cache:
-                entry = dp_cache[key]
-                mean = float(entry["mean"])
-                std = float(entry["std"])
-            else:
-                assert dp_predictor is not None
-                pred = dp_predictor.predict_overpotential(comp, uncertainty=args.dp_uncertainty)
-                mean, std = float(pred[0]), float(pred[1])
-                dp_cache[key] = {"mean": mean, "std": std}
-            dp_mean = mean
-            dp_std = std
-            dp_mean_minus_std = mean - std
+        key = comp_key
+        if key in dp_cache:
+            entry = dp_cache[key]
+            mean = float(entry["mean"])
+            std = float(entry["std"])
+        else:
+            pred = dp_predictor.predict_overpotential(comp, uncertainty=args.dp_uncertainty)
+            mean, std = float(pred[0]), float(pred[1])
+            dp_cache[key] = {"mean": mean, "std": std}
+        dp_mean = mean
+        dp_std = std
+        dp_mean_minus_std = mean - std
 
         row = {
             "formula": env.terminal_formula,
@@ -1433,19 +1414,18 @@ def main() -> None:
     if max_gen_attempts is not None and accepted < target_gen:
         print(f"[WARN] Only accepted {accepted}/{target_gen} generated candidates after {attempted} attempts.")
 
-    # For DP reward mode, sort candidates best first.
-    if args.reward_mode == "dp":
-        if args.dp_objective == "exp_scaled":
-            rows.sort(key=lambda r: -float(r["reward"]) if r["reward"] != "" else float("inf"))
-        else:
-            def _sort_key(r: dict) -> float:
-                v = r.get("dp_mean_minus_std", "")
-                try:
-                    return float(v)
-                except Exception:
-                    return float("inf")
+    # Sort candidates best first.
+    if args.dp_objective == "exp_scaled":
+        rows.sort(key=lambda r: -float(r["reward"]) if r["reward"] != "" else float("inf"))
+    else:
+        def _sort_key(r: dict) -> float:
+            v = r.get("dp_mean_minus_std", "")
+            try:
+                return float(v)
+            except Exception:
+                return float("inf")
 
-            rows.sort(key=_sort_key)
+        rows.sort(key=_sort_key)
 
     out_csv = os.path.join(args.out, "generated.csv")
     keys = [
