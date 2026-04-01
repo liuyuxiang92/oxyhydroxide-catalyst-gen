@@ -637,6 +637,12 @@ def main() -> None:
         default=None,
         help="Path to saved std_scaler.bin (default: <out>/std_scaler.bin).",
     )
+    parser.add_argument(
+        "--load-policy",
+        type=str,
+        default=None,
+        help="Path to saved policy.pt state_dict (default: <out>/policy.pt). Used with --only-generate for PG methods.",
+    )
 
     parser.add_argument("--num-random-eps", type=int, default=5000)
     parser.add_argument("--max-random-attempts", type=int, default=None)
@@ -917,6 +923,66 @@ def main() -> None:
     if args.rl_method in {"reinforce", "a2c"}:
         need_buffer_filter = args.primary_phase_filter in {"buffer", "both"}
         filter_fn = (lambda comp: check_primary_phase(comp)[0]) if need_buffer_filter else None
+
+        if args.only_generate:
+            scaler_path = args.load_scaler or os.path.join(args.out, "std_scaler.bin")
+            if not os.path.exists(scaler_path):
+                raise SystemExit(f"--only-generate requires {scaler_path} (use --load-scaler to override)")
+            scaler = joblib.load(scaler_path)
+
+            state_dim = int(scaler.mean_.shape[0])
+            policy = PolicyNet(
+                state_dim=state_dim,
+                step_dim=env.max_steps,
+                elem_dim=len(env.cation_set),
+                frac_dim=len(env.fraction_set),
+            ).to(device)
+            policy_path = args.load_policy or os.path.join(args.out, "policy.pt")
+            if not os.path.exists(policy_path):
+                raise SystemExit(f"--only-generate requires {policy_path} (use --load-policy to override)")
+            policy.load_state_dict(torch.load(policy_path, map_location=device))
+            print(f"[INFO] Loaded policy from {policy_path}", flush=True)
+
+            rows = generate_pg(
+                policy=policy,
+                env=env,
+                scaler=scaler,
+                device=device,
+                n_eps=args.num_gen_eps,
+                pg_gen_stochastic=args.pg_gen_stochastic,
+                dp_predictor=dp_predictor,
+                dp_cache=dp_cache,
+                dp_uncertainty=args.dp_uncertainty,
+                dp_objective=args.dp_objective,
+                dp_k=args.dp_k,
+                dp_exp_ref=args.dp_exp_ref,
+                dp_exp_scale=args.dp_exp_scale,
+                primary_phase_filter=args.primary_phase_filter,
+                max_gen_attempts=int(args.max_gen_attempts) if args.max_gen_attempts is not None else None,
+            )
+
+            if args.dp_objective == "exp_scaled":
+                rows.sort(key=lambda r: -float(r["reward"]) if r["reward"] != "" else float("inf"))
+            else:
+                def _sort_key_pg_only(r: dict) -> float:
+                    v = r.get("dp_mean_minus_std", "")
+                    try:
+                        return float(v)
+                    except Exception:
+                        return float("inf")
+                rows.sort(key=_sort_key_pg_only)
+
+            _pg_csv_keys = ["formula", "reward", "dp_mean", "dp_std", "dp_mean_minus_std", "primary_ok", "primary_label"]
+            with open(os.path.join(args.out, "generated.csv"), "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=_pg_csv_keys)
+                w.writeheader()
+                for r in rows:
+                    w.writerow(r)
+
+            with open(os.path.join(args.out, "run_config.json"), "w") as f:
+                json.dump(vars(args), f, indent=2, sort_keys=True)
+
+            return
 
         scaler = _fit_scaler_from_warmup(env, args.pg_warmup_eps, filter_fn=filter_fn)
         joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"), compress=True)
