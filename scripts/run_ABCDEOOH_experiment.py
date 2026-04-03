@@ -466,6 +466,7 @@ def generate_pg(
     device: torch.device,
     n_eps: int,
     pg_gen_stochastic: bool,
+    temperature: float = 1.0,
     dp_predictor,
     dp_cache: dict,
     dp_uncertainty: str,
@@ -511,7 +512,7 @@ def generate_pg(
                 ).reshape(-1)
 
             if pg_gen_stochastic:
-                probs = torch.softmax(logits, dim=0).cpu().numpy()
+                probs = torch.softmax(logits / temperature, dim=0).cpu().numpy()
                 idx = int(np.random.choice(n, p=probs))
             else:
                 idx = int(torch.argmax(logits).item())
@@ -560,15 +561,15 @@ def generate_pg(
         rows.append(row)
         accepted += 1
         pbar.update(1)
-        if attempted % 500 == 0:
-            rate = (accepted / attempted) if attempted else 0.0
-            pbar.set_postfix(attempts=attempted, rate=f"{rate:.3f}")
+        rate = (accepted / attempted) if attempted else 0.0
+        pbar.set_postfix(attempts=attempted, rate=f"{rate:.3f}", dups=dup_rejected)
 
     pbar.close()
 
     rate = (accepted / attempted) if attempted else 0.0
     print(
-        f"[INFO] PG generated: accepted {accepted}/{target_gen} after {attempted} attempts (rate={rate:.4f}).",
+        f"[INFO] PG generated: accepted {accepted}/{target_gen} after {attempted} attempts "
+        f"(rate={rate:.4f}, dup_rejected={dup_rejected}).",
         flush=True,
     )
     return rows
@@ -794,6 +795,16 @@ def main() -> None:
         action="store_true",
         help="If set, PG generation samples from π(a|s); otherwise uses greedy argmax.",
     )
+    parser.add_argument(
+        "--pg-gen-temperature",
+        type=float,
+        default=1.0,
+        help=(
+            "Temperature for softmax sampling during PG generation (only with --pg-gen-stochastic). "
+            "T>1 flattens the distribution for more diversity; T<1 sharpens it. "
+            "Use T=2.0–5.0 if the policy has collapsed to near-deterministic."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -896,6 +907,7 @@ def main() -> None:
                 device=device,
                 n_eps=args.num_gen_eps,
                 pg_gen_stochastic=args.pg_gen_stochastic,
+                temperature=args.pg_gen_temperature,
                 dp_predictor=dp_predictor,
                 dp_cache=dp_cache,
                 dp_uncertainty=args.dp_uncertainty,
@@ -903,7 +915,7 @@ def main() -> None:
                 dp_k=args.dp_k,
                 dp_exp_ref=args.dp_exp_ref,
                 dp_exp_scale=args.dp_exp_scale,
-                max_gen_attempts=int(args.max_gen_attempts) if args.max_gen_attempts is not None else None,
+                max_gen_attempts=args.max_gen_attempts if args.max_gen_attempts is not None else 10 * args.num_gen_eps,
             )
 
             if args.dp_objective == "exp_scaled":
@@ -983,6 +995,7 @@ def main() -> None:
             device=device,
             n_eps=args.num_gen_eps,
             pg_gen_stochastic=args.pg_gen_stochastic,
+            temperature=args.pg_gen_temperature,
             dp_predictor=dp_predictor,
             dp_cache=dp_cache,
             dp_uncertainty=args.dp_uncertainty,
@@ -990,7 +1003,7 @@ def main() -> None:
             dp_k=args.dp_k,
             dp_exp_ref=args.dp_exp_ref,
             dp_exp_scale=args.dp_exp_scale,
-            max_gen_attempts=int(args.max_gen_attempts) if args.max_gen_attempts is not None else None,
+            max_gen_attempts=args.max_gen_attempts if args.max_gen_attempts is not None else 10 * args.num_gen_eps,
         )
 
         if args.dp_objective == "exp_scaled":
