@@ -211,27 +211,19 @@ def _rollout_policy_episode(
         env.step(a)
 
 
-def _fit_scaler_from_warmup(env: ABCDEOOHEnv, n_warmup_eps: int, filter_fn=None) -> StandardScaler:
+def _fit_scaler_from_warmup(env: ABCDEOOHEnv, n_warmup_eps: int) -> StandardScaler:
     """Roll out random episodes and fit a StandardScaler on material features."""
     all_s_mat = []
     accepted = 0
-    attempted = 0
-    rejected = 0
     pbar = tqdm(total=n_warmup_eps, desc="PG warmup (scaler fit)")
     while accepted < n_warmup_eps:
-        attempted += 1
         _rollout_random_episode(env)
-        if filter_fn is not None:
-            comp = env.terminal_cation_fractions()
-            if not filter_fn(comp):
-                rejected += 1
-                continue
         for step in env.path:
             all_s_mat.append(np.asarray(step.state_material_features, dtype=float))
         accepted += 1
         pbar.update(1)
     pbar.close()
-    print(f"[INFO] PG warmup: accepted {accepted}/{n_warmup_eps} after {attempted} attempts (rejected={rejected}).")
+    print(f"[INFO] PG warmup: accepted {accepted}/{n_warmup_eps}.")
     scaler = StandardScaler()
     scaler.fit(np.asarray(all_s_mat, dtype=float))
     return scaler
@@ -292,7 +284,6 @@ def train_pg(
     entropy_coef: float,
     pg_epsilon: float,
     rl_method: str,
-    filter_fn=None,
     max_train_attempts=None,
 ) -> List[dict]:
     """Online REINFORCE or A2C training loop."""
@@ -314,7 +305,6 @@ def train_pg(
 
     accepted = 0
     attempted = 0
-    rejected = 0
 
     pbar = tqdm(total=n_episodes, desc=f"{rl_method.upper()} training (accepted)")
     while accepted < n_episodes and (max_train_attempts is None or attempted < max_train_attempts):
@@ -326,16 +316,6 @@ def train_pg(
             device=device,
             pg_epsilon=pg_epsilon,
         )
-
-        if filter_fn is not None:
-            comp = env.terminal_cation_fractions()
-            if not filter_fn(comp):
-                rejected += 1
-                if rejected <= 20 or rejected % 500 == 0:
-                    tqdm.write(
-                        f"[REJECT] PG train filter: attempt={attempted} rejected={rejected} comp={comp}"
-                    )
-                continue
 
         path = env.path
         if not path:
@@ -473,7 +453,7 @@ def train_pg(
 
     if max_train_attempts is not None and accepted < n_episodes:
         print(f"[WARN] PG training: only accepted {accepted}/{n_episodes} after {attempted} attempts.")
-    print(f"[INFO] PG training: accepted {accepted}/{n_episodes} after {attempted} attempts (rejected={rejected}).")
+    print(f"[INFO] PG training: accepted {accepted}/{n_episodes} after {attempted} attempts.")
 
     return metrics
 
@@ -493,17 +473,14 @@ def generate_pg(
     dp_k: float,
     dp_exp_ref: float,
     dp_exp_scale: float,
-    primary_phase_filter: str,
     max_gen_attempts,
 ) -> List[dict]:
     """Generate candidate compositions using a trained PolicyNet."""
     policy.eval()
     rows: List[dict] = []
-    need_generated_filter = primary_phase_filter in {"generated", "both"}
     target_gen = n_eps
     accepted = 0
     attempted = 0
-    rejected = 0
     dup_rejected = 0
     seen_comp_keys: set = set()
 
@@ -550,12 +527,6 @@ def generate_pg(
             )
         )
         ok, label = check_primary_phase(comp)
-        if need_generated_filter and not ok:
-            rejected += 1
-            if rejected <= 20 or rejected % 500 == 0:
-                tqdm.write(f"[REJECT] PG generated filter: attempt={attempted} rejected={rejected} comp={comp}")
-            continue
-
         if comp_key in seen_comp_keys:
             dup_rejected += 1
             if dup_rejected <= 20 or dup_rejected % 500 == 0:
@@ -591,7 +562,7 @@ def generate_pg(
         pbar.update(1)
         if attempted % 500 == 0:
             rate = (accepted / attempted) if attempted else 0.0
-            pbar.set_postfix(attempts=attempted, rejected=rejected, rate=f"{rate:.3f}")
+            pbar.set_postfix(attempts=attempted, rate=f"{rate:.3f}")
 
     pbar.close()
 
@@ -723,13 +694,6 @@ def main() -> None:
     )
 
     parser.add_argument("--anion-formula", type=str, default="O2H1")
-
-    parser.add_argument(
-        "--primary-phase-filter",
-        type=str,
-        default="none",
-        choices=["none", "buffer", "generated", "both"],
-    )
 
     parser.add_argument(
         "--target-phase",
@@ -875,8 +839,6 @@ def main() -> None:
         phase_filter=phase_filter,
     )
 
-    current_phase = "random"  # random | generate
-
     def _comp_key(comp: dict) -> tuple:
         items = []
         for el, frac in comp.items():
@@ -887,19 +849,6 @@ def main() -> None:
 
     def dp_reward_fn(_terminal_formula: str) -> float:
         comp = env.terminal_cation_fractions()
-
-        # Skip expensive DeepMD if this comp would be discarded.
-        skip_for_constraints = False
-        if args.primary_phase_filter in {"buffer", "both"}:
-            skip_for_constraints = True
-        elif current_phase == "generate" and args.primary_phase_filter in {"generated", "both"}:
-            skip_for_constraints = True
-
-        if skip_for_constraints:
-            ok, label = check_primary_phase(comp)
-            if not ok:
-                return 0.0
-
         key = _comp_key(comp)
         if key in dp_cache:
             entry = dp_cache[key]
@@ -921,9 +870,6 @@ def main() -> None:
 
     # === Policy Gradient early exit (REINFORCE / A2C) ===
     if args.rl_method in {"reinforce", "a2c"}:
-        need_buffer_filter = args.primary_phase_filter in {"buffer", "both"}
-        filter_fn = (lambda comp: check_primary_phase(comp)[0]) if need_buffer_filter else None
-
         if args.only_generate:
             scaler_path = args.load_scaler or os.path.join(args.out, "std_scaler.bin")
             if not os.path.exists(scaler_path):
@@ -957,7 +903,6 @@ def main() -> None:
                 dp_k=args.dp_k,
                 dp_exp_ref=args.dp_exp_ref,
                 dp_exp_scale=args.dp_exp_scale,
-                primary_phase_filter=args.primary_phase_filter,
                 max_gen_attempts=int(args.max_gen_attempts) if args.max_gen_attempts is not None else None,
             )
 
@@ -984,7 +929,7 @@ def main() -> None:
 
             return
 
-        scaler = _fit_scaler_from_warmup(env, args.pg_warmup_eps, filter_fn=filter_fn)
+        scaler = _fit_scaler_from_warmup(env, args.pg_warmup_eps)
         joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"), compress=True)
 
         state_dim = int(scaler.mean_.shape[0])
@@ -1000,7 +945,6 @@ def main() -> None:
             else None
         )
 
-        current_phase = "random"
         all_metrics: List[dict] = []
         all_metrics.extend(train_pg(
             policy=policy,
@@ -1015,7 +959,6 @@ def main() -> None:
             entropy_coef=args.entropy_coef,
             pg_epsilon=args.pg_epsilon,
             rl_method=args.rl_method,
-            filter_fn=filter_fn,
             max_train_attempts=None,
         ))
 
@@ -1033,7 +976,6 @@ def main() -> None:
         if value_net is not None:
             torch.save(value_net.state_dict(), os.path.join(args.out, "value_net.pt"))
 
-        current_phase = "generate"
         rows = generate_pg(
             policy=policy,
             env=env,
@@ -1048,7 +990,6 @@ def main() -> None:
             dp_k=args.dp_k,
             dp_exp_ref=args.dp_exp_ref,
             dp_exp_scale=args.dp_exp_scale,
-            primary_phase_filter=args.primary_phase_filter,
             max_gen_attempts=int(args.max_gen_attempts) if args.max_gen_attempts is not None else None,
         )
 
@@ -1121,7 +1062,6 @@ def main() -> None:
             a_comp = data["a_comp"]
             y = data["y"]
         else:
-            need_buffer_filter = args.primary_phase_filter in {"buffer", "both"}
             target_accepted = int(args.num_random_eps)
             max_attempts = int(args.max_random_attempts) if args.max_random_attempts is not None else None
 
@@ -1130,9 +1070,6 @@ def main() -> None:
 
             accepted = 0
             attempted = 0
-            rejected = 0
-
-            current_phase = "random"
 
             pbar = tqdm(
                 total=target_accepted,
@@ -1143,17 +1080,6 @@ def main() -> None:
                 attempted += 1
                 _rollout_random_episode(env)
 
-                comp = env.terminal_cation_fractions()
-                if need_buffer_filter:
-                    ok, _label = check_primary_phase(comp)
-                    if not ok:
-                        rejected += 1
-                        if rejected <= 20 or rejected % 2000 == 0:
-                            tqdm.write(
-                                f"[REJECT] buffer filter: attempt={attempted} rejected={rejected} comp={comp}"
-                            )
-                        continue
-
                 inputs, q_targets = extract_mc_q_targets(env.path, gamma=args.gamma)
                 all_inputs.extend(inputs)
                 all_targets.extend(q_targets)
@@ -1162,7 +1088,7 @@ def main() -> None:
                 pbar.update(1)
                 if attempted % 2000 == 0:
                     rate = (accepted / attempted) if attempted else 0.0
-                    pbar.set_postfix(attempts=attempted, rejected=rejected, rate=f"{rate:.3f}")
+                    pbar.set_postfix(attempts=attempted, rate=f"{rate:.3f}")
 
             pbar.close()
 
@@ -1220,7 +1146,6 @@ def main() -> None:
     # Option B (iterative): grow the buffer with on-the-fly episodes from the learned policy, then retrain.
     # This runs for `--iter-num-iters` iterations, collecting episodes and retraining each time.
     if args.buffer_mode == "iterative" and int(args.num_online_eps) > 0:
-        need_buffer_filter = args.primary_phase_filter in {"buffer", "both"}
         target_online = int(args.num_online_eps)
         max_attempts = int(args.max_random_attempts) if args.max_random_attempts is not None else None
 
@@ -1233,9 +1158,6 @@ def main() -> None:
 
         accepted_total = 0
         attempted_total = 0
-        rejected_total = 0
-
-        current_phase = "random"  # treat as buffer phase for DP skip logic
 
         pbar = tqdm(
             total=target_online,
@@ -1255,7 +1177,6 @@ def main() -> None:
 
             accepted = 0
             attempted = 0
-            rejected = 0
 
             while accepted < target_this and (max_attempts is None or attempted_total < max_attempts):
                 attempted += 1
@@ -1269,14 +1190,6 @@ def main() -> None:
                     online_epsilon=float(args.online_epsilon),
                 )
 
-                comp = env.terminal_cation_fractions()
-                if need_buffer_filter:
-                    ok, _label = check_primary_phase(comp)
-                    if not ok:
-                        rejected += 1
-                        rejected_total += 1
-                        continue
-
                 inputs, q_targets = extract_mc_q_targets(env.path, gamma=args.gamma)
                 all_inputs.extend(inputs)
                 all_targets.extend(q_targets)
@@ -1287,7 +1200,7 @@ def main() -> None:
                 pbar.update(1)
                 if attempted_total % 2000 == 0:
                     rate = (accepted_total / attempted_total) if attempted_total else 0.0
-                    pbar.set_postfix(attempts=attempted_total, rejected=rejected_total, rate=f"{rate:.3f}")
+                    pbar.set_postfix(attempts=attempted_total, rate=f"{rate:.3f}")
 
             if max_attempts is not None and attempted_total >= max_attempts and accepted < target_this:
                 tqdm.write(
@@ -1336,7 +1249,7 @@ def main() -> None:
 
             tqdm.write(
                 f"[INFO] Iter {it + 1}/{iter_num}: collected={accepted}/{target_this} "
-                f"(attempted={attempted}, rejected={rejected}); retrained_epochs={iter_train_epochs}; "
+                f"(attempted={attempted}); retrained_epochs={iter_train_epochs}; "
                 f"buffer_rows={len(y)}"
             )
 
@@ -1367,15 +1280,11 @@ def main() -> None:
     qnet.eval()
 
     rows = []
-    need_generated_filter = args.primary_phase_filter in {"generated", "both"}
     target_gen = int(args.num_gen_eps)
     max_gen_attempts = int(args.max_gen_attempts) if args.max_gen_attempts is not None else None
 
-    current_phase = "generate"
-
     accepted = 0
     attempted = 0
-    rejected = 0
     dup_rejected = 0
 
     seen_comp_keys: set[tuple] = set()
@@ -1417,13 +1326,6 @@ def main() -> None:
         comp = env.terminal_cation_fractions()
         comp_key = tuple(sorted((str(k), int(round(float(v) * 20))) for k, v in comp.items() if int(round(float(v) * 20)) > 0))
         ok, label = check_primary_phase(comp)
-        if need_generated_filter and not ok:
-            rejected += 1
-            if rejected <= 20 or rejected % 500 == 0:
-                tqdm.write(
-                    f"[REJECT] generated filter: attempt={attempted} rejected={rejected} comp={comp}"
-                )
-            continue
 
         # Avoid duplicate compositions in generated.csv. Without this, a greedy policy
         # will often regenerate the same terminal composition many times.
@@ -1467,7 +1369,7 @@ def main() -> None:
         pbar.update(1)
         if attempted % 500 == 0:
             rate = (accepted / attempted) if attempted else 0.0
-            pbar.set_postfix(attempts=attempted, rejected=rejected, rate=f"{rate:.3f}")
+            pbar.set_postfix(attempts=attempted, rate=f"{rate:.3f}")
 
     pbar.close()
 
