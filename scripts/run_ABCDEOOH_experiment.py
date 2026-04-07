@@ -746,6 +746,19 @@ def main() -> None:
         choices=["models", "configs", "total"],
     )
 
+    # Geometry optimization
+    parser.add_argument(
+        "--geo-opt",
+        action="store_true",
+        help="Geometry-optimize each structure (LBFGS, fmax=0.001, max 1000 steps) before DP property evaluation.",
+    )
+    parser.add_argument(
+        "--geo-opt-model",
+        type=str,
+        default="./DPA-3.1-3M_1.pt",
+        help="Path to DP model .pt for geometry optimization (default: ./DPA-3.1-3M_1.pt).",
+    )
+
     # Policy gradient options
     parser.add_argument(
         "--rl-method",
@@ -829,6 +842,8 @@ def main() -> None:
         ads_height=args.dp_ads_height,
         ads_dz=args.dp_ads_dz,
         seed=args.seed,
+        geo_opt=args.geo_opt,
+        geo_opt_model=args.geo_opt_model,
     )
     dp_predictor = DeepMDOverpotentialPredictor(cfg)
 

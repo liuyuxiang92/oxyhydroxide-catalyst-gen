@@ -91,6 +91,10 @@ class DPConfig:
     ads_dz: float = 1.0
     seed: int = 123
 
+    # Geometry optimization before DeepProperty evaluation.
+    geo_opt: bool = False
+    geo_opt_model: str = "./DPA-3.1-3M_1.pt"
+
     # Optional debugging: if set, dump the exact structures (frames) used for DP evaluation.
     # This writes POSCAR files for the reordered frames (O*, OH*, OOH*), per random alloy config.
     debug_dir: Optional[str] = None
@@ -118,6 +122,7 @@ class DeepMDOverpotentialPredictor:
         self._ase_read = ase_read
         self._ase_write = ase_write
         self._DeepProperty = DeepProperty
+        self._geo_opt_calc = None  # lazily initialized DP calculator for geometry optimization
 
         # periodic type map in periodic-table order
         periodic_type_map: List[str] = [s for s in _ASE_CHEMICAL_SYMBOLS if s != "X"]
@@ -316,6 +321,41 @@ class DeepMDOverpotentialPredictor:
         new_mask = [inv[i] for i in ads_indices_in_frame]
         return reordered, new_mask
 
+    def _get_geo_opt_calc(self):
+        """Lazily create and cache the DP calculator for geometry optimization."""
+        if self._geo_opt_calc is None:
+            from deepmd.calculator import DP as DPCalc  # type: ignore[import-not-found]
+            self._geo_opt_calc = DPCalc(model=self.cfg.geo_opt_model, head="Omat24")
+        return self._geo_opt_calc
+
+    def _optimize_structure(self, atoms: "Atoms", masked_indices: List[int]) -> "Atoms":
+        """Geometry-optimize a structure, removing masked atoms first, then reconstructing."""
+        from ase.optimize import LBFGS  # type: ignore[import-not-found]
+        from ase.constraints import UnitCellFilter  # type: ignore[import-not-found]
+
+        mask_set = set(int(i) for i in masked_indices)
+        keep_indices = [i for i in range(len(atoms)) if i not in mask_set]
+
+        real_atoms = atoms[keep_indices]
+        real_atoms.calc = self._get_geo_opt_calc()
+        ucf = UnitCellFilter(real_atoms, scalar_pressure=0.0)
+        opt = LBFGS(ucf)
+        try:
+            opt.run(fmax=0.001, steps=1000)
+        except Exception as e:
+            print(f"[GEO-OPT] optimization did not converge or errored: {e}; using last frame")
+
+        # Rebuild full-size Atoms: update kept-atom positions, leave masked positions unchanged.
+        result = atoms.copy()
+        opt_positions = real_atoms.get_positions()
+        opt_cell = real_atoms.get_cell()
+        result.set_cell(opt_cell)
+        all_positions = result.get_positions().copy()
+        for new_i, orig_i in enumerate(keep_indices):
+            all_positions[orig_i] = opt_positions[new_i]
+        result.set_positions(all_positions)
+        return result
+
     def _build_dp_inputs_for_one_doped_slab(self, doped, anchor_elems: List[str], rng: random.Random):
         anchor_set = set(anchor_elems)
 
@@ -339,6 +379,10 @@ class DeepMDOverpotentialPredictor:
             fr_re, new_mask = self._reorder_slab_then_adsorbates(fr, masked)
             frames.append(fr_re)
             masks.append(new_mask)
+
+        if self.cfg.geo_opt:
+            for i in range(len(frames)):
+                frames[i] = self._optimize_structure(frames[i], masks[i])
 
         nframes = 3
         natoms = len(frames[0])

@@ -105,6 +105,18 @@ def main() -> None:
         help="If set, dump the exact POSCAR frames used for DP evaluation into this directory.",
     )
 
+    parser.add_argument(
+        "--geo-opt",
+        action="store_true",
+        help="Geometry-optimize each structure (LBFGS, fmax=0.001, max 1000 steps) before DP property evaluation.",
+    )
+    parser.add_argument(
+        "--geo-opt-model",
+        type=str,
+        default="./DPA-3.1-3M_1.pt",
+        help="Path to DP model .pt for geometry optimization (default: ./DPA-3.1-3M_1.pt).",
+    )
+
     parser.add_argument("--out-csv", type=str, default=None)
 
     args = parser.parse_args()
@@ -133,6 +145,8 @@ def main() -> None:
         ads_height=args.dp_ads_height,
         ads_dz=args.dp_ads_dz,
         seed=0,
+        geo_opt=args.geo_opt,
+        geo_opt_model=args.geo_opt_model,
     )
     predictor = DeepMDOverpotentialPredictor(cfg)
 
