@@ -331,7 +331,10 @@ class DeepMDOverpotentialPredictor:
     def _optimize_structure(self, atoms: "Atoms", masked_indices: List[int]) -> "Atoms":
         """Geometry-optimize a structure, removing masked atoms first, then reconstructing."""
         from ase.optimize import LBFGS  # type: ignore[import-not-found]
-        from ase.constraints import UnitCellFilter  # type: ignore[import-not-found]
+        try:
+            from ase.filters import UnitCellFilter  # ASE >= 3.23
+        except ImportError:
+            from ase.constraints import UnitCellFilter  # type: ignore[import-not-found]
 
         mask_set = set(int(i) for i in masked_indices)
         keep_indices = [i for i in range(len(atoms)) if i not in mask_set]
