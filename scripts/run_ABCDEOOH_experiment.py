@@ -229,17 +229,27 @@ def _rollout_policy_episode(
 
 
 def _fit_scaler_from_warmup(env: ABCDEOOHEnv, n_warmup_eps: int) -> StandardScaler:
-    """Roll out random episodes and fit a StandardScaler on material features."""
+    """Roll out random episodes and fit a StandardScaler on material features.
+
+    Warmup only needs partial-state composition features, so we temporarily
+    swap env.reward_fn for a no-op to avoid paying DeepMD (and, under
+    --geo-opt, LBFGS) cost on rewards that are immediately discarded.
+    """
     all_s_mat = []
     accepted = 0
     pbar = tqdm(total=n_warmup_eps, desc="PG warmup (scaler fit)")
-    while accepted < n_warmup_eps:
-        _rollout_random_episode(env)
-        for step in env.path:
-            all_s_mat.append(np.asarray(step.state_material_features, dtype=float))
-        accepted += 1
-        pbar.update(1)
-    pbar.close()
+    original_reward_fn = env.reward_fn
+    env.reward_fn = lambda _f: 0.0
+    try:
+        while accepted < n_warmup_eps:
+            _rollout_random_episode(env)
+            for step in env.path:
+                all_s_mat.append(np.asarray(step.state_material_features, dtype=float))
+            accepted += 1
+            pbar.update(1)
+    finally:
+        env.reward_fn = original_reward_fn
+        pbar.close()
     print(f"[INFO] PG warmup: accepted {accepted}/{n_warmup_eps}.")
     scaler = StandardScaler()
     scaler.fit(np.asarray(all_s_mat, dtype=float))
