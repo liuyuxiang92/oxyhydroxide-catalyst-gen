@@ -25,9 +25,11 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 import argparse
 import csv
 import json
+import math
 import random
 import sys
 import warnings
+from collections import Counter
 from typing import List, Sequence, Tuple
 
 import joblib
@@ -56,6 +58,21 @@ from abcde_ooh.env import ABCDEOOHEnv, DEFAULT_CATION_SET, DEFAULT_FRACTIONS  # 
 from abcde_ooh.constraints.primary_phase import check_primary_phase  # noqa: E402
 from abcde_ooh.featurization import feature_calculators  # noqa: E402
 from abcde_ooh.model import PolicyNet, QRegressor, ValueNet  # noqa: E402
+
+
+def _comp_key(comp: dict) -> tuple:
+    """Canonical hashable key for a terminal cation composition dict.
+
+    Quantizes each fraction to integer units of 1/20 (5%), drops zero-units,
+    and sorts. Used both for `dp_cache` lookups and for visit-count tracking
+    in the repeat-penalty shaping (`train_pg`).
+    """
+    items = []
+    for el, frac in comp.items():
+        units = int(round(float(frac) * 20))
+        if units > 0:
+            items.append((str(el), units))
+    return tuple(sorted(items))
 
 
 def set_seed(seed: int) -> None:
@@ -284,9 +301,17 @@ def train_pg(
     entropy_coef: float,
     pg_epsilon: float,
     rl_method: str,
+    repeat_penalty_coef: float = 0.0,
+    repeat_penalty_shape: str = "log",
     max_train_attempts=None,
 ) -> List[dict]:
-    """Online REINFORCE or A2C training loop."""
+    """Online REINFORCE or A2C training loop.
+
+    If `repeat_penalty_coef > 0`, each episode's return used for the *actor*
+    gradient is shaped as `G - α·f(visit_count)`, where visits are counted
+    per terminal composition key. The critic (when present) still learns on
+    raw returns so V(s) stays stationary. See plan docs for rationale.
+    """
     policy.train()
     opt_actor = torch.optim.Adam(policy.parameters(), lr=lr_actor)
     if value_net is not None:
@@ -294,6 +319,8 @@ def train_pg(
         opt_critic = torch.optim.Adam(value_net.parameters(), lr=lr_critic)
     else:
         opt_critic = None
+
+    visit_counts: Counter = Counter()
 
     metrics: List[dict] = []
     # Rolling buffers for printing summaries every 50 episodes
@@ -330,11 +357,29 @@ def train_pg(
         returns.reverse()
         episode_return = returns[0] if returns else 0.0
 
+        # Count-based repeat penalty on the terminal composition. Use the
+        # count *before* incrementing so the first visit is free (penalty=0),
+        # then increment so future visits see the updated count.
+        terminal_comp_key = _comp_key(env.terminal_cation_fractions())
+        n_visits_before = visit_counts[terminal_comp_key]
+        if repeat_penalty_coef > 0.0:
+            if repeat_penalty_shape == "log":
+                repeat_penalty = repeat_penalty_coef * math.log1p(n_visits_before)
+            elif repeat_penalty_shape == "sqrt":
+                repeat_penalty = repeat_penalty_coef * math.sqrt(n_visits_before)
+            else:  # "linear"
+                repeat_penalty = repeat_penalty_coef * float(n_visits_before)
+        else:
+            repeat_penalty = 0.0
+        visit_counts[terminal_comp_key] += 1
+        returns_shaped = [G_t - repeat_penalty for G_t in returns]
+        episode_return_shaped = returns_shaped[0] if returns_shaped else 0.0
+
         actor_losses: List[torch.Tensor] = []
         entropy_terms: List[torch.Tensor] = []
         critic_losses: List[torch.Tensor] = []
 
-        for step, G_t in zip(path, returns):
+        for step, G_t, G_t_shaped in zip(path, returns, returns_shaped):
             allowed = step.allowed_actions
             if not allowed:
                 continue
@@ -369,15 +414,18 @@ def train_pg(
             if taken_idx is None:
                 continue
 
-            G_t_tensor = torch.tensor(G_t, dtype=torch.float32, device=device)
+            G_raw_t = torch.tensor(G_t, dtype=torch.float32, device=device)
+            G_shaped_t = torch.tensor(G_t_shaped, dtype=torch.float32, device=device)
             if value_net is not None:
                 s_mat_single = torch.tensor(s_mat.reshape(1, -1), dtype=torch.float32, device=device)
                 s_step_single = torch.tensor(s_step.reshape(1, -1), dtype=torch.float32, device=device)
                 value = value_net(s_mat_single, s_step_single).reshape(-1)[0]
-                advantage = G_t_tensor - value.detach()
-                critic_losses.append((value - G_t_tensor) ** 2)
+                # Actor sees the shaped (penalty-adjusted) advantage; critic
+                # still learns on the raw return so V(s) stays stationary.
+                advantage = G_shaped_t - value.detach()
+                critic_losses.append((value - G_raw_t) ** 2)
             else:
-                advantage = G_t_tensor
+                advantage = G_shaped_t
 
             actor_losses.append(-log_probs[taken_idx] * advantage)
             entropy_terms.append(-(probs * log_probs).sum())
@@ -412,6 +460,13 @@ def train_pg(
             "iteration": 0,
             "episode": accepted,
             "return": episode_return,
+            "return_raw": episode_return,
+            "return_shaped": episode_return_shaped,
+            "repeat_penalty": repeat_penalty,
+            "visit_count_before": n_visits_before,
+            "unique_comps_seen": len(visit_counts),
+            "max_visit_count": max(visit_counts.values()) if visit_counts else 0,
+            "terminal_comp_key": ";".join(f"{el}:{u}" for el, u in terminal_comp_key),
             "actor_loss": ep_actor_loss,
             "entropy": ep_entropy,
             "critic_loss": ep_critic_loss,
@@ -825,6 +880,30 @@ def main() -> None:
         help="Epsilon-greedy exploration probability during PG training rollouts.",
     )
     parser.add_argument(
+        "--repeat-penalty-coef",
+        type=float,
+        default=0.0,
+        help=(
+            "Count-based repeat penalty for PG training. If >0, subtract "
+            "α·f(visit_count) from the return used in the actor gradient, "
+            "where counts are tracked per terminal composition and "
+            "accumulate across the training run. 0 disables (backward "
+            "compatible). Suggested starting value: 20.0 for the current "
+            "reward scale (~100 units of spread)."
+        ),
+    )
+    parser.add_argument(
+        "--repeat-penalty-shape",
+        type=str,
+        choices=["log", "sqrt", "linear"],
+        default="log",
+        help=(
+            "Functional form f(n) for the visit-count penalty. 'log' uses "
+            "log(1+n) — bounded growth, recommended default. 'sqrt' is "
+            "more aggressive. 'linear' grows without bound."
+        ),
+    )
+    parser.add_argument(
         "--pg-gen-stochastic",
         action="store_true",
         help="If set, PG generation samples from π(a|s); otherwise uses greedy argmax.",
@@ -922,14 +1001,6 @@ def main() -> None:
         anion_formula=args.anion_formula,
         phase_filter=phase_filter,
     )
-
-    def _comp_key(comp: dict) -> tuple:
-        items = []
-        for el, frac in comp.items():
-            units = int(round(float(frac) * 20))
-            if units > 0:
-                items.append((str(el), units))
-        return tuple(sorted(items))
 
     def dp_reward_fn(_terminal_formula: str) -> float:
         comp = env.terminal_cation_fractions()
@@ -1044,12 +1115,20 @@ def main() -> None:
             entropy_coef=args.entropy_coef,
             pg_epsilon=args.pg_epsilon,
             rl_method=args.rl_method,
+            repeat_penalty_coef=args.repeat_penalty_coef,
+            repeat_penalty_shape=args.repeat_penalty_shape,
             max_train_attempts=None,
         ))
 
         # Write training log CSV
         _log_path = os.path.join(args.out, "training_log.csv")
-        _log_cols = ["phase", "iteration", "episode", "epoch", "return", "actor_loss", "entropy", "critic_loss", "mse_loss"]
+        _log_cols = [
+            "phase", "iteration", "episode", "epoch",
+            "return", "return_raw", "return_shaped", "repeat_penalty",
+            "visit_count_before", "unique_comps_seen", "max_visit_count",
+            "terminal_comp_key",
+            "actor_loss", "entropy", "critic_loss", "mse_loss",
+        ]
         with open(_log_path, "w", newline="") as _f:
             _w = csv.DictWriter(_f, fieldnames=_log_cols, extrasaction="ignore")
             _w.writeheader()
@@ -1354,7 +1433,13 @@ def main() -> None:
 
     # Write DQN training log CSV
     _log_path = os.path.join(args.out, "training_log.csv")
-    _log_cols = ["phase", "iteration", "episode", "epoch", "return", "actor_loss", "entropy", "critic_loss", "mse_loss"]
+    _log_cols = [
+        "phase", "iteration", "episode", "epoch",
+        "return", "return_raw", "return_shaped", "repeat_penalty",
+        "visit_count_before", "unique_comps_seen", "max_visit_count",
+        "terminal_comp_key",
+        "actor_loss", "entropy", "critic_loss", "mse_loss",
+    ]
     with open(_log_path, "w", newline="") as _f:
         _w = csv.DictWriter(_f, fieldnames=_log_cols, extrasaction="ignore")
         _w.writeheader()
