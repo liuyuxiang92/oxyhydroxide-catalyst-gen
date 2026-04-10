@@ -524,11 +524,6 @@ def generate_pg(
     temperature: float = 1.0,
     dp_predictor,
     dp_cache: dict,
-    dp_uncertainty: str,
-    dp_objective: str,
-    dp_k: float,
-    dp_exp_ref: float,
-    dp_exp_scale: float,
     max_gen_attempts,
 ) -> List[dict]:
     """Generate candidate compositions using a trained PolicyNet."""
@@ -597,7 +592,7 @@ def generate_pg(
             mean = float(entry["mean"])
             std = float(entry["std"])
         else:
-            pred = dp_predictor.predict_overpotential(comp, uncertainty=dp_uncertainty)
+            pred = dp_predictor.predict_overpotential(comp)
             mean, std = float(pred[0]), float(pred[1])
             dp_cache[key] = {"mean": mean, "std": std}
         dp_mean = mean
@@ -804,23 +799,6 @@ def main() -> None:
     parser.add_argument("--dp-n-random-configs", type=int, default=10)
     parser.add_argument("--dp-ads-height", type=float, default=1.9)
     parser.add_argument("--dp-ads-dz", type=float, default=1.0)
-    parser.add_argument(
-        "--dp-objective",
-        dest="dp_objective",
-        default="mean_minus_kstd",
-        choices=["mean", "mean_minus_kstd", "mean_plus_kstd", "exp_scaled"],
-    )
-    parser.add_argument("--dp-k", type=float, default=1.0)
-    parser.add_argument("--dp-exp-ref", type=float, default=230.0,
-        help="Reference overpotential (mV) for exp_scaled objective. Default: 230.")
-    parser.add_argument("--dp-exp-scale", type=float, default=10.0,
-        help="Scale factor in denominator for exp_scaled objective. Default: 10.")
-    parser.add_argument(
-        "--dp-uncertainty",
-        dest="dp_uncertainty",
-        default="models",
-        choices=["models", "configs", "total"],
-    )
 
     # Geometry optimization
     parser.add_argument(
@@ -933,7 +911,7 @@ def main() -> None:
     if not args.dp_model:
         raise SystemExit("--dp-model is required")
 
-    from abcde_ooh.dp_predictor import DPConfig, DeepMDOverpotentialPredictor, objective_from_mean_std
+    from abcde_ooh.dp_predictor import DPConfig, DeepMDOverpotentialPredictor
 
     cfg = DPConfig(
         base_poscar=args.dp_poscar,
@@ -1010,16 +988,10 @@ def main() -> None:
             mean = entry["mean"]
             std = entry["std"]
         else:
-            pred = dp_predictor.predict_overpotential(comp, uncertainty=args.dp_uncertainty)
+            pred = dp_predictor.predict_overpotential(comp)
             mean, std = pred[0], pred[1]
             dp_cache[key] = {"mean": float(mean), "std": float(std)}
-
-        obj = objective_from_mean_std(
-            float(mean), float(std),
-            mode=args.dp_objective, k=args.dp_k,
-            exp_ref=args.dp_exp_ref, exp_scale=args.dp_exp_scale,
-        )
-        return -float(obj)
+        return -(float(mean) - float(std))
 
     env.reward_fn = dp_reward_fn
 
@@ -1054,24 +1026,16 @@ def main() -> None:
                 temperature=args.pg_gen_temperature,
                 dp_predictor=dp_predictor,
                 dp_cache=dp_cache,
-                dp_uncertainty=args.dp_uncertainty,
-                dp_objective=args.dp_objective,
-                dp_k=args.dp_k,
-                dp_exp_ref=args.dp_exp_ref,
-                dp_exp_scale=args.dp_exp_scale,
                 max_gen_attempts=args.max_gen_attempts if args.max_gen_attempts is not None else 10 * args.num_gen_eps,
             )
 
-            if args.dp_objective == "exp_scaled":
-                rows.sort(key=lambda r: -float(r["reward"]) if r["reward"] != "" else float("inf"))
-            else:
-                def _sort_key_pg_only(r: dict) -> float:
-                    v = r.get("dp_mean_minus_std", "")
-                    try:
-                        return float(v)
-                    except Exception:
-                        return float("inf")
-                rows.sort(key=_sort_key_pg_only)
+            def _sort_key_pg_only(r: dict) -> float:
+                v = r.get("dp_mean_minus_std", "")
+                try:
+                    return float(v)
+                except Exception:
+                    return float("inf")
+            rows.sort(key=_sort_key_pg_only)
 
             _pg_csv_keys = ["formula", "reward", "dp_mean", "dp_std", "dp_mean_minus_std", "primary_ok", "primary_label"]
             with open(os.path.join(args.out, "generated.csv"), "w", newline="") as f:
@@ -1150,24 +1114,16 @@ def main() -> None:
             temperature=args.pg_gen_temperature,
             dp_predictor=dp_predictor,
             dp_cache=dp_cache,
-            dp_uncertainty=args.dp_uncertainty,
-            dp_objective=args.dp_objective,
-            dp_k=args.dp_k,
-            dp_exp_ref=args.dp_exp_ref,
-            dp_exp_scale=args.dp_exp_scale,
             max_gen_attempts=args.max_gen_attempts if args.max_gen_attempts is not None else 10 * args.num_gen_eps,
         )
 
-        if args.dp_objective == "exp_scaled":
-            rows.sort(key=lambda r: -float(r["reward"]) if r["reward"] != "" else float("inf"))
-        else:
-            def _sort_key_pg(r: dict) -> float:
-                v = r.get("dp_mean_minus_std", "")
-                try:
-                    return float(v)
-                except Exception:
-                    return float("inf")
-            rows.sort(key=_sort_key_pg)
+        def _sort_key_pg(r: dict) -> float:
+            v = r.get("dp_mean_minus_std", "")
+            try:
+                return float(v)
+            except Exception:
+                return float("inf")
+        rows.sort(key=_sort_key_pg)
 
         _pg_csv_keys = ["formula", "reward", "dp_mean", "dp_std", "dp_mean_minus_std", "primary_ok", "primary_label"]
         with open(os.path.join(args.out, "generated.csv"), "w", newline="") as f:
@@ -1517,7 +1473,7 @@ def main() -> None:
             mean = float(entry["mean"])
             std = float(entry["std"])
         else:
-            pred = dp_predictor.predict_overpotential(comp, uncertainty=args.dp_uncertainty)
+            pred = dp_predictor.predict_overpotential(comp)
             mean, std = float(pred[0]), float(pred[1])
             dp_cache[key] = {"mean": mean, "std": std}
         dp_mean = mean
@@ -1554,17 +1510,14 @@ def main() -> None:
         print(f"[WARN] Only accepted {accepted}/{target_gen} generated candidates after {attempted} attempts.")
 
     # Sort candidates best first.
-    if args.dp_objective == "exp_scaled":
-        rows.sort(key=lambda r: -float(r["reward"]) if r["reward"] != "" else float("inf"))
-    else:
-        def _sort_key(r: dict) -> float:
-            v = r.get("dp_mean_minus_std", "")
-            try:
-                return float(v)
-            except Exception:
-                return float("inf")
+    def _sort_key(r: dict) -> float:
+        v = r.get("dp_mean_minus_std", "")
+        try:
+            return float(v)
+        except Exception:
+            return float("inf")
 
-        rows.sort(key=_sort_key)
+    rows.sort(key=_sort_key)
 
     out_csv = os.path.join(args.out, "generated.csv")
     keys = [
