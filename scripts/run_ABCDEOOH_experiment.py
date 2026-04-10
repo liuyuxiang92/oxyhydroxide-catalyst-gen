@@ -699,12 +699,33 @@ def main() -> None:
     parser.add_argument(
         "--target-phase",
         type=str,
-        default="none",
+        nargs="+",
+        default=["none"],
         choices=["none", "Ni", "Co", "NiFe", "CoFe", "NiFeCo", "any"],
+        metavar="PHASE",
         help=(
             "Constrain action space at every step so all generated compositions satisfy "
-            "the target phase. Eliminates post-generation filtering; 100%% acceptance rate. "
-            "'any' allows any of the five valid phase types."
+            "the target phase(s). Eliminates post-generation filtering; 100%% acceptance "
+            "rate. Multiple phases may be passed (e.g. --target-phase Ni Co); a "
+            "composition is accepted if it satisfies *any* of the listed phases. Use "
+            "'none' (the default) to disable. 'any' allows any of the five valid phase "
+            "types."
+        ),
+    )
+
+    parser.add_argument(
+        "--exclude-elements",
+        type=str,
+        nargs="+",
+        default=[],
+        metavar="EL",
+        help=(
+            "Elements to remove from the candidate cation set for both training and "
+            "generation (e.g. --exclude-elements Fe). Useful with --target-phase Ni Co "
+            "to enforce Ni- or Co-majority compositions that contain no Fe at all. "
+            "Errors out if an excluded element is required as a primary by any target "
+            "phase (e.g. excluding Fe with NiFe/CoFe/NiFeCo, or excluding Ni/Co with "
+            "the corresponding single-primary phase)."
         ),
     )
 
@@ -847,19 +868,56 @@ def main() -> None:
     )
     dp_predictor = DeepMDOverpotentialPredictor(cfg)
 
+    # Resolve target-phase list (drop "none"; empty means no filter).
+    target_phases: List[str] = [p for p in args.target_phase if p != "none"]
+
+    # Apply --exclude-elements to the candidate cation set.
+    excluded = {e.strip() for e in args.exclude_elements if e.strip()}
+    unknown = excluded - set(DEFAULT_CATION_SET)
+    if unknown:
+        raise SystemExit(
+            f"--exclude-elements: unknown element(s) {sorted(unknown)}. "
+            f"Valid elements: {DEFAULT_CATION_SET}"
+        )
+    cation_set = [el for el in DEFAULT_CATION_SET if el not in excluded]
+    if len(cation_set) < 5:
+        raise SystemExit(
+            f"--exclude-elements left only {len(cation_set)} cations; need at least 5 "
+            "for the 5-step environment."
+        )
+
+    # Validate that excluded elements aren't required primaries for any target phase.
+    _phase_required_primaries = {
+        "Ni": {"Ni"},
+        "Co": {"Co"},
+        "NiFe": {"Ni", "Fe"},
+        "CoFe": {"Co", "Fe"},
+        "NiFeCo": {"Ni", "Fe", "Co"},
+        "any": set(),  # 'any' is permissive; at least one phase must remain feasible
+    }
+    for phase in target_phases:
+        missing = _phase_required_primaries[phase] & excluded
+        if missing:
+            raise SystemExit(
+                f"--target-phase {phase} requires {sorted(_phase_required_primaries[phase])} "
+                f"as primaries, but {sorted(missing)} were removed via --exclude-elements."
+            )
+
     phase_filter = None
-    if args.target_phase != "none":
+    if target_phases:
         from abcde_ooh.constraints.phase_sampler import PhaseActionFilter
-        _tmp_env = ABCDEOOHEnv(cation_set=DEFAULT_CATION_SET, fraction_set=DEFAULT_FRACTIONS)
+        _tmp_env = ABCDEOOHEnv(cation_set=cation_set, fraction_set=DEFAULT_FRACTIONS)
         phase_filter = PhaseActionFilter(
-            target_phase=args.target_phase,
+            target_phase=target_phases,
             allowed_units=_tmp_env._allowed_units,
             possible_sums_by_k=_tmp_env._possible_sums_by_k,
         )
-        print(f"[INFO] Target phase filter active: {args.target_phase}")
+        print(f"[INFO] Target phase filter active: {target_phases}")
+    if excluded:
+        print(f"[INFO] Excluded cations: {sorted(excluded)} (cation set size: {len(cation_set)})")
 
     env = ABCDEOOHEnv(
-        cation_set=DEFAULT_CATION_SET,
+        cation_set=cation_set,
         fraction_set=DEFAULT_FRACTIONS,
         anion_formula=args.anion_formula,
         phase_filter=phase_filter,

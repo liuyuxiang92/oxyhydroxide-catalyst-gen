@@ -2,8 +2,8 @@
 
 PhaseActionFilter wraps around ABCDEOOHEnv.allowed_actions() and removes
 any action whose partial-composition cannot be completed into a valid
-terminal composition of the requested phase. This guarantees 100% pass rate
-without post-generation filtering.
+terminal composition of the requested phase(s). This guarantees 100% pass
+rate without post-generation filtering.
 
 Phase rules mirror check_primary_phase in primary_phase.py:
   - Ni / Co   : single primary ≥ 0.75; all others are dopants (< 0.25 total)
@@ -11,11 +11,14 @@ Phase rules mirror check_primary_phase in primary_phase.py:
   - CoFe      : co+fe ≥ 0.75, fe ≤ co; rest dopants
   - NiFeCo    : ni+fe+co ≥ 0.75, fe ≤ max(ni, co); rest dopants
   - any       : passes if any of the five checks passes
+
+Multiple target phases may be passed; an action is kept if its partial
+composition can be completed into *any* of the listed phases.
 """
 
 from __future__ import annotations
 
-from typing import Dict, List, Set, Tuple
+from typing import Dict, Iterable, List, Sequence, Set, Tuple, Union
 
 
 class PhaseActionFilter:
@@ -23,14 +26,26 @@ class PhaseActionFilter:
 
     def __init__(
         self,
-        target_phase: str,
+        target_phase: Union[str, Sequence[str]],
         allowed_units: List[int],
         possible_sums_by_k: List[set],
         total_units: int = 20,
     ) -> None:
-        if target_phase not in self.PHASES:
-            raise ValueError(f"Unknown target_phase '{target_phase}'. Valid: {self.PHASES}")
-        self.target_phase = target_phase
+        if isinstance(target_phase, str):
+            phases: List[str] = [target_phase]
+        else:
+            phases = list(target_phase)
+        if not phases:
+            raise ValueError("target_phase must not be empty.")
+        for p in phases:
+            if p not in self.PHASES:
+                raise ValueError(f"Unknown target_phase '{p}'. Valid: {self.PHASES}")
+        # If "any" is present, it subsumes everything else.
+        if "any" in phases:
+            phases = ["any"]
+        self.target_phases: List[str] = phases
+        # Backwards-compatible alias when a single phase is configured.
+        self.target_phase: str = phases[0] if len(phases) == 1 else ",".join(phases)
         self._allowed_units: List[int] = list(allowed_units)
         self._allowed_units_set: Set[int] = set(allowed_units)
         self._possible_sums_by_k = possible_sums_by_k
@@ -136,7 +151,19 @@ class PhaseActionFilter:
     # ------------------------------------------------------------------
 
     def _is_feasible(self, units_map: Dict[str, int], steps_left: int, budget_left: int) -> bool:
-        if self.target_phase == "any":
+        for phase in self.target_phases:
+            if self._is_feasible_single_phase(phase, units_map, steps_left, budget_left):
+                return True
+        return False
+
+    def _is_feasible_single_phase(
+        self,
+        phase: str,
+        units_map: Dict[str, int],
+        steps_left: int,
+        budget_left: int,
+    ) -> bool:
+        if phase == "any":
             return (
                 self._is_completable_single_primary("Ni", units_map, steps_left, budget_left)
                 or self._is_completable_single_primary("Co", units_map, steps_left, budget_left)
@@ -144,13 +171,13 @@ class PhaseActionFilter:
                 or self._is_completable_binary("CoFe", units_map, steps_left, budget_left)
                 or self._is_completable_nifeco(units_map, steps_left, budget_left)
             )
-        if self.target_phase in {"Ni", "Co"}:
-            return self._is_completable_single_primary(self.target_phase, units_map, steps_left, budget_left)
-        if self.target_phase == "NiFe":
+        if phase in {"Ni", "Co"}:
+            return self._is_completable_single_primary(phase, units_map, steps_left, budget_left)
+        if phase == "NiFe":
             return self._is_completable_binary("NiFe", units_map, steps_left, budget_left)
-        if self.target_phase == "CoFe":
+        if phase == "CoFe":
             return self._is_completable_binary("CoFe", units_map, steps_left, budget_left)
-        if self.target_phase == "NiFeCo":
+        if phase == "NiFeCo":
             return self._is_completable_nifeco(units_map, steps_left, budget_left)
         return False
 
