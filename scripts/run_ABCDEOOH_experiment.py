@@ -15,12 +15,13 @@ import os
 # Mitigation for OpenMP runtime conflicts (common on macOS when numpy/sklearn
 # and torch pull different OpenMP implementations). This is a best-effort guard
 # to avoid segfaults; a clean conda env with consistent BLAS/OpenMP is better.
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 import argparse
 import csv
@@ -75,11 +76,15 @@ def _comp_key(comp: dict) -> tuple:
     return tuple(sorted(items))
 
 
-def set_seed(seed: int) -> None:
+def set_seed(seed: int, deterministic: bool = False) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True, warn_only=True)
 
 
 def ensure_dir(path: str) -> None:
@@ -647,7 +652,38 @@ _DEFAULT_DP_MODELS = [
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--dp-seed",
+        type=int,
+        default=0,
+        help=(
+            "Seed for the DeepMD predictor (controls random alloy configurations and "
+            "adsorbate placement). Also acts as fallback for --pg-train-seed and "
+            "--pg-gen-seed if those are not set. Must be the same across runs for "
+            "fully reproducible training."
+        ),
+    )
+    parser.add_argument(
+        "--pg-train-seed",
+        type=int,
+        default=None,
+        help=(
+            "Seed for the training phase (warmup + PG training RNG). When set, also "
+            "enables GPU deterministic mode (cudnn.deterministic, "
+            "use_deterministic_algorithms). Falls back to --dp-seed if not provided. "
+            "Fix this together with --dp-seed for reproducible training."
+        ),
+    )
+    parser.add_argument(
+        "--pg-gen-seed",
+        type=int,
+        default=None,
+        help=(
+            "Seed applied just before the generation phase. Makes stochastic generation "
+            "(--pg-gen-stochastic) reproducible independently of training. "
+            "Falls back to --dp-seed if not provided."
+        ),
+    )
 
     parser.add_argument(
         "--only-generate",
@@ -912,7 +948,9 @@ def main() -> None:
     if args.dp_model is None:
         args.dp_model = _DEFAULT_DP_MODELS
 
-    set_seed(args.seed)
+    _train_seed = args.pg_train_seed if args.pg_train_seed is not None else args.dp_seed
+    _gen_seed   = args.pg_gen_seed   if args.pg_gen_seed   is not None else args.dp_seed
+    set_seed(_train_seed, deterministic=(args.pg_train_seed is not None))
     ensure_dir(args.out)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -929,7 +967,7 @@ def main() -> None:
         n_random_configs=args.dp_n_random_configs,
         ads_height=args.dp_ads_height,
         ads_dz=args.dp_ads_dz,
-        seed=args.seed,
+        seed=args.dp_seed,
         geo_opt=args.geo_opt,
         geo_opt_model=args.geo_opt_model,
     )
@@ -1026,6 +1064,10 @@ def main() -> None:
             policy.load_state_dict(torch.load(policy_path, map_location=device))
             print(f"[INFO] Loaded policy from {policy_path}", flush=True)
 
+            # Re-seed generation phase for reproducible stochastic sampling.
+            np.random.seed(_gen_seed)
+            random.seed(_gen_seed)
+
             rows = generate_pg(
                 policy=policy,
                 env=env,
@@ -1113,6 +1155,10 @@ def main() -> None:
         torch.save(policy.state_dict(), os.path.join(args.out, "policy.pt"))
         if value_net is not None:
             torch.save(value_net.state_dict(), os.path.join(args.out, "value_net.pt"))
+
+        # Re-seed generation phase so it is independent of training RNG state.
+        np.random.seed(_gen_seed)
+        random.seed(_gen_seed)
 
         rows = generate_pg(
             policy=policy,
