@@ -47,15 +47,19 @@ def main():
 
     ep = df["episode"].to_numpy()
     r = df["return"].to_numpy()
-    overpot = -r  # reward = -overpotential
     entropy = df["entropy"].to_numpy()
     actor_loss = df["actor_loss"].to_numpy()
 
+    critic_loss_raw = pd.to_numeric(df["critic_loss"], errors="coerce").to_numpy()
+
     roll = lambda x: pd.Series(x).rolling(args.window, min_periods=1).mean().to_numpy()
     roll_r = roll(r)
-    roll_o = roll(overpot)
     roll_h = roll(entropy)
     roll_al = roll(actor_loss)
+
+    # Critic loss rolling mean — skip NaN entries (rows without a critic)
+    critic_valid = ~np.isnan(critic_loss_raw)
+    has_critic = critic_valid.any()
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
 
@@ -68,17 +72,24 @@ def main():
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3)
 
-    # --- Overpotential vs episode ---
+    # --- Critic loss vs episode ---
     ax = axes[0, 1]
-    ax.scatter(ep, overpot, s=4, alpha=0.25, color="tab:blue", label="per-episode")
-    ax.plot(ep, roll_o, color="tab:red", lw=2, label=f"rolling mean (w={args.window})")
-    ax.set_ylabel("overpotential (= -return)")
-    ax.set_title("Overpotential vs episode")
+    if has_critic:
+        ep_c = ep[critic_valid]
+        cl = critic_loss_raw[critic_valid]
+        roll_cl = pd.Series(critic_loss_raw).rolling(args.window, min_periods=1).mean().to_numpy()
+        ax.scatter(ep_c, cl, s=4, alpha=0.25, color="tab:orange", label="per-episode")
+        ax.plot(ep[critic_valid], roll_cl[critic_valid], color="tab:red", lw=2,
+                label=f"rolling mean (w={args.window})")
+    else:
+        ax.text(0.5, 0.5, "No critic loss (REINFORCE)", ha="center", va="center",
+                transform=ax.transAxes, color="gray")
+    ax.set_ylabel("critic loss")
+    ax.set_title("Critic loss vs episode")
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3)
 
     # --- Policy entropy vs episode ---
-    # log(28) ≈ 3.33 is the entropy of a uniform policy over 28 cations.
     ax = axes[1, 0]
     ax.scatter(ep, entropy, s=4, alpha=0.25, color="tab:green", label="per-episode")
     ax.plot(ep, roll_h, color="tab:red", lw=2, label=f"rolling mean (w={args.window})")
@@ -114,8 +125,8 @@ def main():
             s, e = i * size, (i + 1) * size
             print(
                 f"  ep {ep[s]:4.0f}-{ep[e-1]:4.0f}: "
-                f"mean overpot = {overpot[s:e].mean():8.3f}  "
-                f"best overpot = {overpot[s:e].min():8.3f}  "
+                f"mean return = {r[s:e].mean():8.3f}  "
+                f"best return = {r[s:e].max():8.3f}  "
                 f"entropy = {entropy[s:e].mean():5.3f}  "
                 f"|actor_loss| = {np.abs(actor_loss[s:e]).mean():9.2f}"
             )
