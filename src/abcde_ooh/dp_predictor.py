@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import random
@@ -447,7 +448,9 @@ class DeepMDOverpotentialPredictor:
         fracs = {el: float(fr) for el, fr in comp.items()}
         metal_elem = self._infer_metal_elem_from_slab(self.base_slab)
 
-        base_seed = self.cfg.seed + (hash(tuple(sorted(fracs.items()))) % 100000)
+        _comp_str = ",".join(f"{k}:{v:.6f}" for k, v in sorted(fracs.items()))
+        _comp_hash = int(hashlib.md5(_comp_str.encode()).hexdigest(), 16) % 100000
+        base_seed = self.cfg.seed + _comp_hash
         rng = random.Random(base_seed)
 
         n_models = len(self.dp_models)
