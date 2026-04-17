@@ -84,7 +84,10 @@ def set_seed(seed: int, deterministic: bool = False) -> None:
     if deterministic:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-        torch.use_deterministic_algorithms(True, warn_only=True)
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        torch.use_deterministic_algorithms(True)
+        torch.set_num_threads(1)
 
 
 def ensure_dir(path: str) -> None:
