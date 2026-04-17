@@ -31,7 +31,7 @@ import random
 import sys
 import warnings
 from collections import Counter
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import joblib
 import numpy as np
@@ -116,6 +116,13 @@ def extract_mc_q_targets(episode, gamma: float):
     return inputs, q_targets
 
 
+def _save_checkpoint(path: str, data: dict) -> None:
+    """Atomically write a checkpoint dict (via temp file + os.replace)."""
+    tmp = path + ".tmp"
+    torch.save(data, tmp)
+    os.replace(tmp, path)
+
+
 def train_q(
     *,
     model: torch.nn.Module,
@@ -124,13 +131,24 @@ def train_q(
     epochs: int,
     lr: float,
     iteration: int = 0,
+    checkpoint_cfg: Optional[dict] = None,
 ) -> List[dict]:
     model.train()
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = torch.nn.MSELoss()
     metrics: List[dict] = []
 
-    pbar = tqdm(range(epochs), desc="Q epochs")
+    ckpt_path: Optional[str] = None
+    ckpt_freq: int = 0
+    start_epoch: int = 0
+    if checkpoint_cfg:
+        ckpt_path = checkpoint_cfg.get("path")
+        ckpt_freq = int(checkpoint_cfg.get("freq", 0))
+        start_epoch = int(checkpoint_cfg.get("start_epoch", 0))
+        if checkpoint_cfg.get("opt_state"):
+            opt.load_state_dict(checkpoint_cfg["opt_state"])
+
+    pbar = tqdm(range(start_epoch, epochs), desc="Q epochs")
     for epoch_idx in pbar:
         batch_losses: List[float] = []
         for s_mat, s_step, a_elem, a_comp, y in loader:
@@ -151,6 +169,17 @@ def train_q(
         metrics.append({"phase": "dqn_train", "iteration": iteration, "epoch": epoch_idx + 1, "mse_loss": epoch_loss})
         pbar.set_postfix(mse_loss=f"{epoch_loss:.4f}")
         tqdm.write(f"[DQN train] iter={iteration} epoch={epoch_idx + 1}/{epochs} | mse_loss={epoch_loss:.4f}")
+
+        if ckpt_freq > 0 and ckpt_path and (epoch_idx + 1) % ckpt_freq == 0:
+            _save_checkpoint(ckpt_path, {
+                "type": "dqn",
+                "rl_method": "dqn",
+                "epochs_completed": epoch_idx + 1,
+                "dqn_iteration": iteration,
+                "qnet_state": model.state_dict(),
+                "opt_state": opt.state_dict(),
+            })
+            tqdm.write(f"[INFO] Checkpoint saved at epoch {epoch_idx + 1} → {ckpt_path}")
 
     return metrics
 
@@ -322,6 +351,7 @@ def train_pg(
     repeat_penalty_coef: float = 0.0,
     repeat_penalty_shape: str = "log",
     max_train_attempts=None,
+    checkpoint_cfg: Optional[dict] = None,
 ) -> List[dict]:
     """Online REINFORCE or A2C training loop.
 
@@ -329,6 +359,15 @@ def train_pg(
     gradient is shaped as `G - α·f(visit_count)`, where visits are counted
     per terminal composition key. The critic (when present) still learns on
     raw returns so V(s) stays stationary. See plan docs for rationale.
+
+    `checkpoint_cfg` (optional dict) enables mid-training checkpointing and/or
+    resumption from a prior checkpoint:
+      - "path": str — where to write checkpoint.pt
+      - "freq": int — save every N accepted episodes (0 = disabled)
+      - "start_episode": int — resume: episodes already completed
+      - "opt_actor_state": dict | None — resume: restore optimizer state
+      - "opt_critic_state": dict | None — resume: restore optimizer state
+      - "visit_counts": dict | None — resume: restore visit counts
     """
     policy.train()
     opt_actor = torch.optim.Adam(policy.parameters(), lr=lr_actor)
@@ -338,7 +377,23 @@ def train_pg(
     else:
         opt_critic = None
 
-    visit_counts: Counter = Counter()
+    ckpt_path: Optional[str] = None
+    ckpt_freq: int = 0
+    start_episode: int = 0
+    if checkpoint_cfg:
+        ckpt_path = checkpoint_cfg.get("path")
+        ckpt_freq = int(checkpoint_cfg.get("freq", 0))
+        start_episode = int(checkpoint_cfg.get("start_episode", 0))
+        if checkpoint_cfg.get("opt_actor_state"):
+            opt_actor.load_state_dict(checkpoint_cfg["opt_actor_state"])
+        if opt_critic is not None and checkpoint_cfg.get("opt_critic_state"):
+            opt_critic.load_state_dict(checkpoint_cfg["opt_critic_state"])
+        if checkpoint_cfg.get("visit_counts"):
+            visit_counts: Counter = Counter(checkpoint_cfg["visit_counts"])
+        else:
+            visit_counts = Counter()
+    else:
+        visit_counts = Counter()
 
     metrics: List[dict] = []
     # Rolling buffers for printing summaries every 50 episodes
@@ -348,10 +403,12 @@ def train_pg(
     _roll_critic: List[float] = []
     _PRINT_INTERVAL = 50
 
-    accepted = 0
+    accepted = start_episode
     attempted = 0
 
     pbar = tqdm(total=n_episodes, desc=f"{rl_method.upper()} training (accepted)")
+    if start_episode > 0:
+        pbar.update(start_episode)
     while accepted < n_episodes and (max_train_attempts is None or attempted < max_train_attempts):
         attempted += 1
         _rollout_pg_episode(
@@ -503,6 +560,19 @@ def train_pg(
             _roll_entropy.pop(0)
             if _roll_critic:
                 _roll_critic.pop(0)
+
+        if ckpt_freq > 0 and ckpt_path and accepted % ckpt_freq == 0:
+            _save_checkpoint(ckpt_path, {
+                "type": "pg",
+                "rl_method": rl_method,
+                "episodes_completed": accepted,
+                "policy_state": policy.state_dict(),
+                "value_net_state": value_net.state_dict() if value_net is not None else None,
+                "opt_actor_state": opt_actor.state_dict(),
+                "opt_critic_state": opt_critic.state_dict() if opt_critic is not None else None,
+                "visit_counts": dict(visit_counts),
+            })
+            tqdm.write(f"[INFO] Checkpoint saved at episode {accepted} → {ckpt_path}")
 
         if accepted % _PRINT_INTERVAL == 0:
             mean_ret = float(np.mean(_roll_returns))
@@ -739,6 +809,20 @@ def main() -> None:
             "All paths default to <out>/<filename> and can be overridden by "
             "--load-scaler / --load-policy / --load-qnet / --load-value-net. "
             "Cannot be combined with --only-generate."
+        ),
+    )
+
+    parser.add_argument(
+        "--save-checkpoint-freq",
+        type=int,
+        default=0,
+        metavar="N",
+        dest="save_checkpoint_freq",
+        help=(
+            "Save a mid-training checkpoint every N episodes (PG) or N epochs (DQN). "
+            "0 disables. Saved atomically to <out>/checkpoint.pt. "
+            "When --resume-training is used and checkpoint.pt exists, it is loaded "
+            "instead of policy.pt/qnet.pt so training resumes from the exact interruption point."
         ),
     )
 
@@ -1134,8 +1218,11 @@ def main() -> None:
 
             return
 
+        _pg_ckpt_path = os.path.join(args.out, "checkpoint.pt")
+        _pg_mid_checkpoint = None  # set below if resuming from a mid-training checkpoint
+
         if args.resume_training:
-            # --- Resume PG: load scaler and policy (+ value_net for A2C); skip warmup ---
+            # --- Resume PG: load scaler; check for mid-training checkpoint first ---
             scaler_path = args.load_scaler or os.path.join(args.out, "std_scaler.bin")
             if not os.path.exists(scaler_path):
                 raise SystemExit(
@@ -1151,24 +1238,49 @@ def main() -> None:
                 elem_dim=len(env.cation_set),
                 frac_dim=len(env.fraction_set),
             ).to(device)
-            policy_path = args.load_policy or os.path.join(args.out, "policy.pt")
-            if not os.path.exists(policy_path):
-                raise SystemExit(
-                    f"--resume-training requires {policy_path} (use --load-policy to override)"
-                )
-            policy.load_state_dict(torch.load(policy_path, map_location=device))
-            print(f"[INFO] Loaded policy from {policy_path}", flush=True)
-
             value_net = None
             if args.rl_method == "a2c":
                 value_net = ValueNet(state_dim=state_dim, step_dim=env.max_steps).to(device)
-                vnet_path = args.load_value_net or os.path.join(args.out, "value_net.pt")
-                if not os.path.exists(vnet_path):
-                    raise SystemExit(
-                        f"--resume-training (a2c) requires {vnet_path} (use --load-value-net to override)"
+
+            # Prefer a mid-training checkpoint (has optimizer state + episode counter)
+            # over the final policy.pt (which only has model weights).
+            if os.path.exists(_pg_ckpt_path):
+                _raw = torch.load(_pg_ckpt_path, map_location=device)
+                if _raw.get("type") == "pg":
+                    _pg_mid_checkpoint = _raw
+                    policy.load_state_dict(_raw["policy_state"])
+                    if value_net is not None and _raw.get("value_net_state") is not None:
+                        value_net.load_state_dict(_raw["value_net_state"])
+                    print(
+                        f"[INFO] Resuming from mid-training checkpoint: "
+                        f"{_raw['episodes_completed']} episodes completed → {_pg_ckpt_path}",
+                        flush=True,
                     )
-                value_net.load_state_dict(torch.load(vnet_path, map_location=device))
-                print(f"[INFO] Loaded value_net from {vnet_path}", flush=True)
+                else:
+                    print(
+                        f"[WARN] checkpoint.pt exists but type={_raw.get('type')!r} "
+                        "(expected 'pg'); falling back to policy.pt.",
+                        flush=True,
+                    )
+
+            if _pg_mid_checkpoint is None:
+                # No valid mid-training checkpoint; fall back to loading policy.pt
+                policy_path = args.load_policy or os.path.join(args.out, "policy.pt")
+                if not os.path.exists(policy_path):
+                    raise SystemExit(
+                        f"--resume-training requires {policy_path} (use --load-policy to override)"
+                    )
+                policy.load_state_dict(torch.load(policy_path, map_location=device))
+                print(f"[INFO] Loaded policy from {policy_path}", flush=True)
+
+                if value_net is not None:
+                    vnet_path = args.load_value_net or os.path.join(args.out, "value_net.pt")
+                    if not os.path.exists(vnet_path):
+                        raise SystemExit(
+                            f"--resume-training (a2c) requires {vnet_path} (use --load-value-net to override)"
+                        )
+                    value_net.load_state_dict(torch.load(vnet_path, map_location=device))
+                    print(f"[INFO] Loaded value_net from {vnet_path}", flush=True)
         else:
             scaler = _fit_scaler_from_warmup(env, args.pg_warmup_eps)
             joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"), compress=True)
@@ -1185,6 +1297,20 @@ def main() -> None:
                 if args.rl_method == "a2c"
                 else None
             )
+
+        # Build checkpoint_cfg for train_pg (used when saving mid-training checkpoints
+        # and/or when resuming from a mid-training checkpoint).
+        _pg_checkpoint_cfg: Optional[dict] = None
+        if args.save_checkpoint_freq > 0 or _pg_mid_checkpoint is not None:
+            _pg_checkpoint_cfg = {
+                "path": _pg_ckpt_path,
+                "freq": args.save_checkpoint_freq,
+                "start_episode": _pg_mid_checkpoint["episodes_completed"] if _pg_mid_checkpoint else 0,
+                "opt_actor_state": _pg_mid_checkpoint.get("opt_actor_state") if _pg_mid_checkpoint else None,
+                "opt_critic_state": _pg_mid_checkpoint.get("opt_critic_state") if _pg_mid_checkpoint else None,
+                "visit_counts": _pg_mid_checkpoint.get("visit_counts") if _pg_mid_checkpoint else None,
+                "rl_method": args.rl_method,
+            }
 
         all_metrics: List[dict] = []
         all_metrics.extend(train_pg(
@@ -1203,9 +1329,11 @@ def main() -> None:
             repeat_penalty_coef=args.repeat_penalty_coef,
             repeat_penalty_shape=args.repeat_penalty_shape,
             max_train_attempts=None,
+            checkpoint_cfg=_pg_checkpoint_cfg,
         ))
 
-        # Write training log CSV
+        # Write training log CSV (append if resuming from a mid-training checkpoint
+        # so the log remains continuous; otherwise overwrite).
         _log_path = os.path.join(args.out, "training_log.csv")
         _log_cols = [
             "phase", "iteration", "episode", "epoch",
@@ -1214,12 +1342,14 @@ def main() -> None:
             "terminal_comp_key",
             "actor_loss", "entropy", "critic_loss", "mse_loss",
         ]
-        with open(_log_path, "w", newline="") as _f:
+        _log_mode = "a" if _pg_mid_checkpoint is not None else "w"
+        with open(_log_path, _log_mode, newline="") as _f:
             _w = csv.DictWriter(_f, fieldnames=_log_cols, extrasaction="ignore")
-            _w.writeheader()
+            if _log_mode == "w":
+                _w.writeheader()
             for _row in all_metrics:
                 _w.writerow({c: _row.get(c, "") for c in _log_cols})
-        print(f"[INFO] Training log written to {_log_path}", flush=True)
+        print(f"[INFO] Training log {'appended to' if _log_mode == 'a' else 'written to'} {_log_path}", flush=True)
 
         torch.save(policy.state_dict(), os.path.join(args.out, "policy.pt"))
         if value_net is not None:
@@ -1267,6 +1397,7 @@ def main() -> None:
     qnet_path = args.load_qnet or os.path.join(args.out, "qnet.pt")
 
     all_metrics: List[dict] = []
+    _dqn_mid_checkpoint = None  # may be set inside the training else-branch below
 
     if args.only_generate:
         if os.path.exists(scaler_path):
@@ -1297,8 +1428,11 @@ def main() -> None:
         qnet.load_state_dict(torch.load(qnet_path, map_location=device))
     else:
 
+        _dqn_ckpt_path = os.path.join(args.out, "checkpoint.pt")
+        _dqn_mid_checkpoint = None  # set below if resuming from a mid-training checkpoint
+
         if args.resume_training:
-            # --- Resume DQN: load scaler, buffer, and qnet checkpoint; train more epochs ---
+            # --- Resume DQN: load scaler, buffer, and qnet (prefer checkpoint.pt) ---
             scaler_path = args.load_scaler or os.path.join(args.out, "std_scaler.bin")
             if not os.path.exists(scaler_path):
                 raise SystemExit(
@@ -1336,15 +1470,50 @@ def main() -> None:
                 elem_dim=a_elem.shape[1],
                 frac_dim=a_comp.shape[1],
             ).to(device)
-            qnet_path = args.load_qnet or os.path.join(args.out, "qnet.pt")
-            if not os.path.exists(qnet_path):
-                raise SystemExit(
-                    f"--resume-training requires {qnet_path} (use --load-qnet to override)"
-                )
-            qnet.load_state_dict(torch.load(qnet_path, map_location=device))
-            print(f"[INFO] Loaded qnet from {qnet_path}", flush=True)
 
-            all_metrics.extend(train_q(model=qnet, loader=loader, device=device, epochs=args.dqn_epochs, lr=args.lr, iteration=0))
+            # Prefer a mid-training checkpoint (optimizer state + epoch counter)
+            # over the final qnet.pt (model weights only).
+            if os.path.exists(_dqn_ckpt_path):
+                _raw = torch.load(_dqn_ckpt_path, map_location=device)
+                if _raw.get("type") == "dqn":
+                    _dqn_mid_checkpoint = _raw
+                    qnet.load_state_dict(_raw["qnet_state"])
+                    print(
+                        f"[INFO] Resuming from mid-training checkpoint: "
+                        f"{_raw['epochs_completed']} epochs completed → {_dqn_ckpt_path}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[WARN] checkpoint.pt exists but type={_raw.get('type')!r} "
+                        "(expected 'dqn'); falling back to qnet.pt.",
+                        flush=True,
+                    )
+
+            if _dqn_mid_checkpoint is None:
+                qnet_path = args.load_qnet or os.path.join(args.out, "qnet.pt")
+                if not os.path.exists(qnet_path):
+                    raise SystemExit(
+                        f"--resume-training requires {qnet_path} (use --load-qnet to override)"
+                    )
+                qnet.load_state_dict(torch.load(qnet_path, map_location=device))
+                print(f"[INFO] Loaded qnet from {qnet_path}", flush=True)
+
+            _dqn_checkpoint_cfg: Optional[dict] = None
+            if args.save_checkpoint_freq > 0 or _dqn_mid_checkpoint is not None:
+                _dqn_checkpoint_cfg = {
+                    "path": _dqn_ckpt_path,
+                    "freq": args.save_checkpoint_freq,
+                    "start_epoch": _dqn_mid_checkpoint["epochs_completed"] if _dqn_mid_checkpoint else 0,
+                    "iteration": _dqn_mid_checkpoint.get("dqn_iteration", 0) if _dqn_mid_checkpoint else 0,
+                    "opt_state": _dqn_mid_checkpoint.get("opt_state") if _dqn_mid_checkpoint else None,
+                }
+
+            all_metrics.extend(train_q(
+                model=qnet, loader=loader, device=device,
+                epochs=args.dqn_epochs, lr=args.lr, iteration=0,
+                checkpoint_cfg=_dqn_checkpoint_cfg,
+            ))
 
         else:
             # 1) Build or load offline random dataset
@@ -1438,7 +1607,24 @@ def main() -> None:
                 frac_dim=a_comp.shape[1],
             ).to(device)
 
-            all_metrics.extend(train_q(model=qnet, loader=loader, device=device, epochs=args.dqn_epochs, lr=args.lr, iteration=0))
+            # Build checkpoint_cfg for fresh DQN training
+            _dqn_ckpt_path = os.path.join(args.out, "checkpoint.pt")
+            _dqn_mid_checkpoint = None
+            _dqn_checkpoint_cfg: Optional[dict] = None
+            if args.save_checkpoint_freq > 0:
+                _dqn_checkpoint_cfg = {
+                    "path": _dqn_ckpt_path,
+                    "freq": args.save_checkpoint_freq,
+                    "start_epoch": 0,
+                    "iteration": 0,
+                    "opt_state": None,
+                }
+
+            all_metrics.extend(train_q(
+                model=qnet, loader=loader, device=device,
+                epochs=args.dqn_epochs, lr=args.lr, iteration=0,
+                checkpoint_cfg=_dqn_checkpoint_cfg,
+            ))
 
         # Save qnet after initial training so it can be resumed later.
         # (The iterative block below will overwrite with the final checkpoint if it runs.)
@@ -1567,7 +1753,7 @@ def main() -> None:
 
         torch.save(qnet.state_dict(), os.path.join(args.out, "qnet.pt"))
 
-    # Write DQN training log CSV
+    # Write DQN training log CSV (append if resuming from a mid-training checkpoint).
     _log_path = os.path.join(args.out, "training_log.csv")
     _log_cols = [
         "phase", "iteration", "episode", "epoch",
@@ -1576,12 +1762,14 @@ def main() -> None:
         "terminal_comp_key",
         "actor_loss", "entropy", "critic_loss", "mse_loss",
     ]
-    with open(_log_path, "w", newline="") as _f:
+    _log_mode = "a" if _dqn_mid_checkpoint is not None else "w"
+    with open(_log_path, _log_mode, newline="") as _f:
         _w = csv.DictWriter(_f, fieldnames=_log_cols, extrasaction="ignore")
-        _w.writeheader()
+        if _log_mode == "w":
+            _w.writeheader()
         for _row in all_metrics:
             _w.writerow({c: _row.get(c, "") for c in _log_cols})
-    print(f"[INFO] Training log written to {_log_path}", flush=True)
+    print(f"[INFO] Training log {'appended to' if _log_mode == 'a' else 'written to'} {_log_path}", flush=True)
 
     if not args.skip_generation:
         # 4) Generate candidates
