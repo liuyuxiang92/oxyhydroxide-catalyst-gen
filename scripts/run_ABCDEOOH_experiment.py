@@ -1192,7 +1192,11 @@ def main() -> None:
             policy_path = args.load_policy or os.path.join(args.out, "policy.pt")
             if not os.path.exists(policy_path):
                 raise SystemExit(f"--only-generate requires {policy_path} (use --load-policy to override)")
-            policy.load_state_dict(torch.load(policy_path, map_location=device))
+            _policy_raw = torch.load(policy_path, map_location=device)
+            if isinstance(_policy_raw, dict) and "policy_state" in _policy_raw:
+                policy.load_state_dict(_policy_raw["policy_state"])
+            else:
+                policy.load_state_dict(_policy_raw)
             print(f"[INFO] Loaded policy from {policy_path}", flush=True)
 
             # Re-seed generation phase for reproducible stochastic sampling.
