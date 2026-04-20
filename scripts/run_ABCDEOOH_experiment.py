@@ -116,11 +116,23 @@ def extract_mc_q_targets(episode, gamma: float):
     return inputs, q_targets
 
 
-def _save_checkpoint(path: str, data: dict) -> None:
-    """Atomically write a checkpoint dict (via temp file + os.replace)."""
-    tmp = path + ".tmp"
+def _save_checkpoint(path: str, data: dict, numbered_path: Optional[str] = None) -> None:
+    """Atomically write a checkpoint dict.
+
+    If numbered_path is given, the data is written there and path is updated as
+    a relative symlink pointing to the new file (so checkpoint.pt always resolves
+    to the most-recently-saved numbered checkpoint).
+    """
+    target = numbered_path if numbered_path else path
+    tmp = target + ".tmp"
     torch.save(data, tmp)
-    os.replace(tmp, path)
+    os.replace(tmp, target)
+    if numbered_path:
+        link_tmp = path + ".lnk"
+        if os.path.lexists(link_tmp):
+            os.remove(link_tmp)
+        os.symlink(os.path.basename(numbered_path), link_tmp)
+        os.replace(link_tmp, path)
 
 
 def train_q(
@@ -171,6 +183,7 @@ def train_q(
         tqdm.write(f"[DQN train] iter={iteration} epoch={epoch_idx + 1}/{epochs} | mse_loss={epoch_loss:.4f}")
 
         if ckpt_freq > 0 and ckpt_path and (epoch_idx + 1) % ckpt_freq == 0:
+            _numbered = ckpt_path.replace(".pt", f"-{epoch_idx + 1}.pt")
             _save_checkpoint(ckpt_path, {
                 "type": "dqn",
                 "rl_method": "dqn",
@@ -178,8 +191,8 @@ def train_q(
                 "dqn_iteration": iteration,
                 "qnet_state": model.state_dict(),
                 "opt_state": opt.state_dict(),
-            })
-            tqdm.write(f"[INFO] Checkpoint saved at epoch {epoch_idx + 1} → {ckpt_path}")
+            }, numbered_path=_numbered)
+            tqdm.write(f"[INFO] Checkpoint saved at epoch {epoch_idx + 1} → {_numbered}")
 
     return metrics
 
@@ -561,7 +574,8 @@ def train_pg(
             if _roll_critic:
                 _roll_critic.pop(0)
 
-        if ckpt_freq > 0 and ckpt_path and accepted % ckpt_freq == 0:
+        if ckpt_freq > 0 and ckpt_path and accepted > 0 and accepted % ckpt_freq == 0:
+            _numbered = ckpt_path.replace(".pt", f"-{accepted}.pt")
             _save_checkpoint(ckpt_path, {
                 "type": "pg",
                 "rl_method": rl_method,
@@ -571,8 +585,8 @@ def train_pg(
                 "opt_actor_state": opt_actor.state_dict(),
                 "opt_critic_state": opt_critic.state_dict() if opt_critic is not None else None,
                 "visit_counts": dict(visit_counts),
-            })
-            tqdm.write(f"[INFO] Checkpoint saved at episode {accepted} → {ckpt_path}")
+            }, numbered_path=_numbered)
+            tqdm.write(f"[INFO] Checkpoint saved at episode {accepted} → {_numbered}")
 
         if accepted % _PRINT_INTERVAL == 0:
             mean_ret = float(np.mean(_roll_returns))
