@@ -1260,10 +1260,13 @@ def main() -> None:
             if args.rl_method == "a2c":
                 value_net = ValueNet(state_dim=state_dim, step_dim=env.max_steps).to(device)
 
-            # Prefer a mid-training checkpoint (has optimizer state + episode counter)
-            # over the final policy.pt (which only has model weights).
-            if os.path.exists(_pg_ckpt_path):
-                _raw = torch.load(_pg_ckpt_path, map_location=device)
+            # Determine which checkpoint file to load.
+            # --load-policy takes priority when explicitly given; otherwise default to checkpoint.pt.
+            _explicit_policy = args.load_policy
+            _resume_path = _explicit_policy if _explicit_policy else _pg_ckpt_path
+
+            if os.path.exists(_resume_path):
+                _raw = torch.load(_resume_path, map_location=device)
                 if _raw.get("type") == "pg":
                     _pg_mid_checkpoint = _raw
                     policy.load_state_dict(_raw["policy_state"])
@@ -1271,19 +1274,21 @@ def main() -> None:
                         value_net.load_state_dict(_raw["value_net_state"])
                     print(
                         f"[INFO] Resuming from mid-training checkpoint: "
-                        f"{_raw['episodes_completed']} episodes completed → {_pg_ckpt_path}",
+                        f"{_raw['episodes_completed']} episodes completed → {_resume_path}",
                         flush=True,
                     )
                 else:
                     print(
-                        f"[WARN] checkpoint.pt exists but type={_raw.get('type')!r} "
+                        f"[WARN] {_resume_path} exists but type={_raw.get('type')!r} "
                         "(expected 'pg'); falling back to policy.pt.",
                         flush=True,
                     )
+            elif _explicit_policy:
+                raise SystemExit(f"--load-policy path not found: {_explicit_policy}")
 
             if _pg_mid_checkpoint is None:
-                # No valid mid-training checkpoint; fall back to loading policy.pt
-                policy_path = args.load_policy or os.path.join(args.out, "policy.pt")
+                # No valid mid-training checkpoint; fall back to policy.pt
+                policy_path = os.path.join(args.out, "policy.pt")
                 if not os.path.exists(policy_path):
                     raise SystemExit(
                         f"--resume-training requires {policy_path} (use --load-policy to override)"
