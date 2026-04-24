@@ -4,5 +4,8 @@ __pycache__/
 .DS_Store
 .ipynb_checkpoints/
 
+# Large external RF checkpoints (sinter/calcine) copied from reference repos.
+models/sinter_calcine/
+
 # Note: we intentionally do NOT ignore *.npz/*.joblib globally.
 # Those may be legitimate tracked datasets/models in this clean repo.

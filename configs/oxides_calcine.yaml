@@ -1,0 +1,142 @@
+# Oxide calcination-temperature RL benchmark.
+# Mirrors the reference npj repo's env rules exactly:
+#   - 80-element pool (including O).
+#   - Integer digit ratios 0..9, no sum-to-1 constraint.
+#   - Step 5 = O with digit 1..9 (forced by LastStepElementFilter).
+#
+# Usage:
+#   python scripts/run_experiment.py --config configs/oxides_calcine.yaml \
+#       --method a2c --out runs/oxides_calcine_a2c_s0 --seed 0
+
+name: oxides_calcine
+description: "Oxide composition design — minimise calcination temperature (RF predictor)"
+
+# ---- Environment ----
+env_type: integer_ratio
+
+# 80-element set from RL_materials_generation/one_hot.py:18
+# (intersection of OQMD-formation-energy and RF-sintering-T training sets).
+cation_set:
+  - O
+  - Te
+  - N
+  - B
+  - Tm
+  - Ga
+  - Hf
+  - Ca
+  - Al
+  - P
+  - Li
+  - S
+  - Cr
+  - Zr
+  - Ta
+  - Sn
+  - Au
+  - Hg
+  - Cd
+  - Mn
+  - Cs
+  - Pd
+  - Th
+  - K
+  - Ti
+  - Ag
+  - Zn
+  - W
+  - Ce
+  - Nd
+  - Sr
+  - Tl
+  - Cl
+  - Mg
+  - Pr
+  - Rb
+  - Pb
+  - Ru
+  - Ho
+  - Nb
+  - Mo
+  - C
+  - V
+  - Er
+  - Pt
+  - Fe
+  - Ir
+  - Sb
+  - Y
+  - Na
+  - Co
+  - Be
+  - In
+  - La
+  - U
+  - Pu
+  - As
+  - Sm
+  - Br
+  - Ni
+  - Eu
+  - Ba
+  - F
+  - Rh
+  - Yb
+  - Gd
+  - Os
+  - Lu
+  - Ge
+  - Cu
+  - H
+  - Sc
+  - Si
+  - Re
+  - Dy
+  - Bi
+  - Tb
+  - Se
+
+ratio_set: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+anion_formula: ""
+n_components: 5
+
+# Force the last step to pick O with a nonzero digit (reference oxide rule).
+constraint_filter: last_step_element
+required_elements: ["O"]
+nonzero_ratio_at_last: true
+reserve_for_last: true
+
+# ---- Predictor ----
+predictor: sinter_calcine
+rf_model: models/sinter_calcine/optimal_calcine_RF.joblib
+mode: calcine
+objective: mean
+k: 0.0   # std not used by the RF single-model reward
+
+# ---- RL hyperparameters ----
+method: a2c
+pg_warmup_eps: 200
+pg_train_eps: 1000
+pg_lr_actor: 0.001
+pg_lr_critic: 0.001
+entropy_coef: 0.01
+pg_epsilon: 0.0
+pg_gen_stochastic: true
+temperature: 1.0
+gamma: 0.99
+hidden_dim: 128
+normalise_returns: true
+
+repeat_penalty_coef: 0.1
+repeat_penalty_shape: log
+
+# ---- Generation ----
+num_gen_eps: 1000          # 1000 final candidates per run (matches reference)
+exploration_gen_eps: 0
+
+# ---- DQN-specific ----
+num_random_eps: 500
+dqn_epochs: 50
+dqn_lr: 0.001
+dqn_batch_size: 256
+stochastic_top_frac: 0.0
