@@ -118,8 +118,22 @@ repeat_penalty_shape: log
 num_gen_eps: 20
 exploration_gen_eps: 0
 
-num_random_eps: 10
-dqn_epochs: 2
-dqn_lr: 0.001
-dqn_batch_size: 64
-stochastic_top_frac: 0.0
+num_random_eps: 20
+dqn_epochs: 3
+dqn_lr: 0.01
+dqn_batch_size: 32
+dqn_loss: smoothl1
+dqn_gamma: 0.9
+
+iter_num_iters: 3
+iter_eps_per_iter: 5
+iter_buffer_cap: 1000
+iter_sample_per_iter: 20
+iter_train_batch_size: 16
+iter_epochs: 5
+iter_lr: 0.01
+iter_initial_epsilon: 0.5
+iter_epsilon_decay: 0.9
+iter_top_frac: 0.15
+
+stochastic_top_frac: 0.2

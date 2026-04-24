@@ -47,6 +47,7 @@ from rl_matdesign.training import (
     _rollout_random_episode,
     extract_mc_q_targets,
     generate_candidates,
+    iterate_dqn,
     train_pg,
     train_q,
 )
@@ -261,7 +262,8 @@ def main() -> None:
         dqn_epochs = int(cfg.get("dqn_epochs", 50))
         dqn_lr = float(cfg.get("dqn_lr", 1e-3))
         dqn_batch = int(cfg.get("dqn_batch_size", 256))
-        gamma = float(cfg.get("gamma", 0.99))
+        dqn_loss = str(cfg.get("dqn_loss", "mse")).lower()
+        gamma = float(cfg.get("dqn_gamma", cfg.get("gamma", 0.99)))
         hidden_dim = int(cfg.get("hidden_dim", 128))
 
         # Random buffer.
@@ -289,9 +291,38 @@ def main() -> None:
         loader = DataLoader(dataset, batch_size=dqn_batch, shuffle=True)
 
         qnet = QRegressor(state_dim=state_dim, step_dim=step_dim, elem_dim=elem_dim, frac_dim=frac_dim, hidden_dim=hidden_dim).to(device)
-        train_rows = train_q(model=qnet, loader=loader, device=device, epochs=dqn_epochs, lr=dqn_lr)
+        train_rows = train_q(
+            model=qnet, loader=loader, device=device,
+            epochs=dqn_epochs, lr=dqn_lr, loss_type=dqn_loss,
+        )
         for r in train_rows:
             metrics.log(**r)
+
+        # Iterative on-policy DQN refinement (reference Phase 1).
+        iter_num_iters = int(cfg.get("iter_num_iters", 0))
+        if iter_num_iters > 0:
+            iter_rows = iterate_dqn(
+                env=env, qnet=qnet, scaler=scaler, device=device,
+                buffer_inputs=all_inputs,
+                buffer_targets=all_targets,
+                n_iters=iter_num_iters,
+                eps_per_iter=int(cfg.get("iter_eps_per_iter", 100)),
+                buffer_cap=int(cfg.get("iter_buffer_cap", 50000)),
+                sample_per_iter=int(cfg.get("iter_sample_per_iter", 100)),
+                train_batch_size=int(cfg.get("iter_train_batch_size", 80)),
+                epochs_per_iter=int(cfg.get("iter_epochs", 100)),
+                lr=float(cfg.get("iter_lr", dqn_lr)),
+                gamma=gamma,
+                initial_epsilon=float(cfg.get("iter_initial_epsilon", 0.99)),
+                epsilon_decay=float(cfg.get("iter_epsilon_decay", 0.99)),
+                top_frac=float(cfg.get("iter_top_frac", 0.15)),
+                loss_type=dqn_loss,
+                checkpoint_every=int(cfg.get("iter_checkpoint_every", 0)),
+                checkpoint_path=(os.path.join(args.out, "qnet.pt")
+                                 if int(cfg.get("iter_checkpoint_every", 0)) > 0 else None),
+            )
+            for r in iter_rows:
+                metrics.log(**r)
 
         # Save.
         torch.save(qnet.state_dict(), os.path.join(args.out, "qnet.pt"))
@@ -319,7 +350,7 @@ def main() -> None:
         lr_critic = float(cfg.get("pg_lr_critic", 1e-3))
         entropy_coef = float(cfg.get("entropy_coef", 0.01))
         pg_epsilon = float(cfg.get("pg_epsilon", 0.0))
-        gamma = float(cfg.get("gamma", 0.99))
+        gamma = float(cfg.get("pg_gamma", cfg.get("gamma", 0.99)))
         hidden_dim = int(cfg.get("hidden_dim", 128))
         repeat_penalty_coef = float(cfg.get("repeat_penalty_coef", 0.0))
         repeat_penalty_shape = cfg.get("repeat_penalty_shape", "log")

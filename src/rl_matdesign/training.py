@@ -132,11 +132,19 @@ def train_q(
     epochs: int,
     lr: float,
     iteration: int = 0,
+    loss_type: str = "mse",
 ) -> List[dict]:
-    """Supervised regression on MC Q-targets (MSELoss + Adam)."""
+    """Supervised regression on MC Q-targets (Adam).
+
+    ``loss_type`` selects the regression loss: ``"mse"`` (default) or
+    ``"smoothl1"`` (Huber, matches the npj DQN reference).
+    """
     model.train()
     opt = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = torch.nn.MSELoss()
+    if loss_type == "smoothl1":
+        loss_fn = torch.nn.SmoothL1Loss()
+    else:
+        loss_fn = torch.nn.MSELoss()
     metrics: List[dict] = []
 
     pbar = tqdm(range(epochs), desc="Q epochs")
@@ -161,12 +169,12 @@ def train_q(
             "phase": "dqn_train",
             "iteration": iteration,
             "epoch": epoch_idx + 1,
-            "mse_loss": epoch_loss,
+            "train_loss": epoch_loss,
         })
-        pbar.set_postfix(mse_loss=f"{epoch_loss:.4f}")
+        pbar.set_postfix(train_loss=f"{epoch_loss:.4f}")
         tqdm.write(
             f"[DQN train] iter={iteration} epoch={epoch_idx+1}/{epochs} "
-            f"| mse_loss={epoch_loss:.4f}"
+            f"| train_loss={epoch_loss:.4f}"
         )
 
     return metrics
@@ -214,6 +222,145 @@ def choose_action(
     k = max(1, int(round(stochastic_top_frac * n)))
     idx = int(np.random.choice(order[:k]))
     return allowed_actions[idx]
+
+
+# ---------------------------------------------------------------------------
+# Iterative DQN refinement (on-policy data collection)
+# ---------------------------------------------------------------------------
+
+def iterate_dqn(
+    *,
+    env: CompositionEnv,
+    qnet: torch.nn.Module,
+    scaler: StandardScaler,
+    device: torch.device,
+    buffer_inputs: List[Tuple],
+    buffer_targets: List[float],
+    n_iters: int,
+    eps_per_iter: int,
+    buffer_cap: int,
+    sample_per_iter: int,
+    train_batch_size: int,
+    epochs_per_iter: int,
+    lr: float,
+    gamma: float,
+    initial_epsilon: float,
+    epsilon_decay: float,
+    top_frac: float,
+    loss_type: str = "smoothl1",
+    checkpoint_every: int = 0,
+    checkpoint_path: Optional[str] = None,
+) -> List[dict]:
+    """Iterative on-policy DQN refinement, matching the npj reference loop.
+
+    Per iteration:
+      A) Collect ``eps_per_iter`` episodes with ε-greedy + top-``top_frac``
+         sampling on the non-random branch; append step-level MC targets to
+         the shared ``buffer_inputs`` / ``buffer_targets`` lists.
+      B) FIFO-evict down to ``buffer_cap`` step-level datapoints.
+      C) Uniformly sample ``sample_per_iter`` datapoints; keep the first
+         ``train_batch_size`` as the training batch (remainder = held-out).
+      D) Train the Q-network for ``epochs_per_iter`` full-batch passes.
+      E) Decay ε by ``epsilon_decay``.
+
+    The buffer lists are mutated in place; a per-iter metrics list is returned.
+    """
+    loss_fn = torch.nn.SmoothL1Loss() if loss_type == "smoothl1" else torch.nn.MSELoss()
+    opt = torch.optim.Adam(qnet.parameters(), lr=lr)
+    metrics: List[dict] = []
+
+    epsilon = float(initial_epsilon)
+    pbar = tqdm(range(n_iters), desc="DQN iterate")
+    for iter_idx in pbar:
+        # --- A. Collect new episodes with ε-greedy + top-k ---
+        qnet.eval()
+        ep_returns: List[float] = []
+        for _ in range(eps_per_iter):
+            env.initialize()
+            for _ in range(env.n_components):
+                allowed = env.allowed_actions()
+                s_mat = scaler.transform(
+                    env.state_featurizer(env.state).reshape(1, -1)
+                )[0]
+                s_step = np.zeros(env.n_components, dtype=float)
+                if env.counter < env.n_components:
+                    s_step[env.counter] = 1.0
+                if float(np.random.rand()) < epsilon:
+                    a = random.choice(allowed)
+                else:
+                    a = choose_action(
+                        model=qnet, device=device,
+                        s_material=s_mat, s_step=s_step,
+                        allowed_actions=allowed,
+                        stochastic_top_frac=top_frac,
+                    )
+                env.step(a)
+            inp, tgt = extract_mc_q_targets(env.path, gamma=gamma)
+            buffer_inputs.extend(inp)
+            buffer_targets.extend(tgt)
+            if tgt:
+                ep_returns.append(float(tgt[0]))
+
+        # --- B. FIFO eviction to buffer_cap ---
+        if len(buffer_inputs) > buffer_cap:
+            del buffer_inputs[: len(buffer_inputs) - buffer_cap]
+            del buffer_targets[: len(buffer_targets) - buffer_cap]
+
+        # --- C. Sample ``sample_per_iter`` datapoints ---
+        N = len(buffer_inputs)
+        k_sample = min(sample_per_iter, N)
+        idx = np.random.choice(N, size=k_sample, replace=False)
+
+        s_mat_arr = np.asarray([buffer_inputs[i][0] for i in idx], dtype=float)
+        s_mat_arr = scaler.transform(s_mat_arr)
+        s_step_arr = np.asarray([buffer_inputs[i][1] for i in idx], dtype=float)
+        a_elem_arr = np.asarray([buffer_inputs[i][2] for i in idx], dtype=float)
+        a_comp_arr = np.asarray([buffer_inputs[i][3] for i in idx], dtype=float)
+        y_arr = np.asarray([buffer_targets[i] for i in idx], dtype=float)
+
+        n_train = min(train_batch_size, k_sample)
+        s_mat_t = torch.tensor(s_mat_arr[:n_train], dtype=torch.float32, device=device)
+        s_step_t = torch.tensor(s_step_arr[:n_train], dtype=torch.float32, device=device)
+        a_elem_t = torch.tensor(a_elem_arr[:n_train], dtype=torch.float32, device=device)
+        a_comp_t = torch.tensor(a_comp_arr[:n_train], dtype=torch.float32, device=device)
+        y_t = torch.tensor(y_arr[:n_train], dtype=torch.float32, device=device).unsqueeze(1)
+
+        # --- D. Train qnet ``epochs_per_iter`` times on the train slice ---
+        qnet.train()
+        epoch_losses: List[float] = []
+        for _ in range(epochs_per_iter):
+            opt.zero_grad(set_to_none=True)
+            pred = qnet(s_mat_t, s_step_t, a_elem_t, a_comp_t)
+            loss = loss_fn(pred, y_t)
+            loss.backward()
+            opt.step()
+            epoch_losses.append(float(loss.item()))
+
+        avg_loss = float(np.mean(epoch_losses))
+        mean_return = float(np.mean(ep_returns)) if ep_returns else float("nan")
+
+        metrics.append({
+            "phase": "dqn_iterate",
+            "iteration": iter_idx + 1,
+            "epsilon": epsilon,
+            "buffer_size": N,
+            "train_loss": avg_loss,
+            "mean_return": mean_return,
+        })
+        pbar.set_postfix(
+            eps=f"{epsilon:.3f}", buf=N,
+            loss=f"{avg_loss:.4f}", ret=f"{mean_return:.2f}",
+        )
+
+        # --- E. Decay ε ---
+        epsilon *= epsilon_decay
+
+        if (checkpoint_every > 0 and checkpoint_path
+                and (iter_idx + 1) % checkpoint_every == 0):
+            torch.save(qnet.state_dict(), checkpoint_path)
+
+    pbar.close()
+    return metrics
 
 
 # ---------------------------------------------------------------------------
