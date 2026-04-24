@@ -137,12 +137,12 @@ repeat_penalty_shape: log
 num_gen_eps: 1000          # 1000 final candidates per run (matches reference)
 exploration_gen_eps: 0
 
-# ---- DQN (matches npj DQN reference Phase 0 + Phase 1) ----
+# ---- DQN (matches npj DQN reference Phase 0 + Phase 1 counts; loss/ε
+# kept at this repo's original supported form: MSELoss + constant ε) ----
 num_random_eps: 1000        # Phase 0: 1000 random episodes
 dqn_epochs: 100             # Phase 0: pretrain 100 epochs
 dqn_lr: 0.01                # Reference Adam lr=1e-2
 dqn_batch_size: 80          # Reference full-batch size
-dqn_loss: smoothl1          # Reference uses SmoothL1
 dqn_gamma: 0.9              # Reference gamma=0.9
 
 iter_num_iters: 500         # Phase 1: 500 iterations
@@ -152,8 +152,7 @@ iter_sample_per_iter: 100   # Phase 1: sample 100 datapoints/iter from buffer
 iter_train_batch_size: 80   # Phase 1: 80 train (remainder held out)
 iter_epochs: 100            # Phase 1: 100 full-batch epochs per iter
 iter_lr: 0.01               # Phase 1: Adam lr=1e-2
-iter_initial_epsilon: 0.99  # Phase 1: ε starts at 0.99
-iter_epsilon_decay: 0.99    # Phase 1: ε <- ε*0.99 per iter (~0.007 after 500)
+iter_online_epsilon: 0.1    # Phase 1: constant ε-greedy exploration
 iter_top_frac: 0.15         # Phase 1: non-random branch samples from top-15% Q
 
 stochastic_top_frac: 0.20   # Phase 2: 1000 greedy eval w/ top-20% diversity

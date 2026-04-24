@@ -132,19 +132,11 @@ def train_q(
     epochs: int,
     lr: float,
     iteration: int = 0,
-    loss_type: str = "mse",
 ) -> List[dict]:
-    """Supervised regression on MC Q-targets (Adam).
-
-    ``loss_type`` selects the regression loss: ``"mse"`` (default) or
-    ``"smoothl1"`` (Huber, matches the npj DQN reference).
-    """
+    """Supervised regression on MC Q-targets (MSELoss + Adam)."""
     model.train()
     opt = torch.optim.Adam(model.parameters(), lr=lr)
-    if loss_type == "smoothl1":
-        loss_fn = torch.nn.SmoothL1Loss()
-    else:
-        loss_fn = torch.nn.MSELoss()
+    loss_fn = torch.nn.MSELoss()
     metrics: List[dict] = []
 
     pbar = tqdm(range(epochs), desc="Q epochs")
@@ -244,32 +236,30 @@ def iterate_dqn(
     epochs_per_iter: int,
     lr: float,
     gamma: float,
-    initial_epsilon: float,
-    epsilon_decay: float,
+    online_epsilon: float,
     top_frac: float,
-    loss_type: str = "smoothl1",
     checkpoint_every: int = 0,
     checkpoint_path: Optional[str] = None,
 ) -> List[dict]:
-    """Iterative on-policy DQN refinement, matching the npj reference loop.
+    """Iterative on-policy DQN refinement (constant-ε rollouts).
 
     Per iteration:
-      A) Collect ``eps_per_iter`` episodes with ε-greedy + top-``top_frac``
-         sampling on the non-random branch; append step-level MC targets to
-         the shared ``buffer_inputs`` / ``buffer_targets`` lists.
+      A) Collect ``eps_per_iter`` episodes with constant ε-greedy + top-
+         ``top_frac`` sampling on the non-random branch; append step-level
+         MC targets to the shared ``buffer_inputs`` / ``buffer_targets`` lists.
       B) FIFO-evict down to ``buffer_cap`` step-level datapoints.
       C) Uniformly sample ``sample_per_iter`` datapoints; keep the first
          ``train_batch_size`` as the training batch (remainder = held-out).
-      D) Train the Q-network for ``epochs_per_iter`` full-batch passes.
-      E) Decay ε by ``epsilon_decay``.
+      D) Train the Q-network (MSELoss + Adam) for ``epochs_per_iter``
+         full-batch passes.
 
     The buffer lists are mutated in place; a per-iter metrics list is returned.
     """
-    loss_fn = torch.nn.SmoothL1Loss() if loss_type == "smoothl1" else torch.nn.MSELoss()
+    loss_fn = torch.nn.MSELoss()
     opt = torch.optim.Adam(qnet.parameters(), lr=lr)
     metrics: List[dict] = []
 
-    epsilon = float(initial_epsilon)
+    epsilon = float(online_epsilon)
     pbar = tqdm(range(n_iters), desc="DQN iterate")
     for iter_idx in pbar:
         # --- A. Collect new episodes with ε-greedy + top-k ---
@@ -351,9 +341,6 @@ def iterate_dqn(
             eps=f"{epsilon:.3f}", buf=N,
             loss=f"{avg_loss:.4f}", ret=f"{mean_return:.2f}",
         )
-
-        # --- E. Decay ε ---
-        epsilon *= epsilon_decay
 
         if (checkpoint_every > 0 and checkpoint_path
                 and (iter_idx + 1) % checkpoint_every == 0):

@@ -262,7 +262,6 @@ def main() -> None:
         dqn_epochs = int(cfg.get("dqn_epochs", 50))
         dqn_lr = float(cfg.get("dqn_lr", 1e-3))
         dqn_batch = int(cfg.get("dqn_batch_size", 256))
-        dqn_loss = str(cfg.get("dqn_loss", "mse")).lower()
         gamma = float(cfg.get("dqn_gamma", cfg.get("gamma", 0.99)))
         hidden_dim = int(cfg.get("hidden_dim", 128))
 
@@ -293,7 +292,7 @@ def main() -> None:
         qnet = QRegressor(state_dim=state_dim, step_dim=step_dim, elem_dim=elem_dim, frac_dim=frac_dim, hidden_dim=hidden_dim).to(device)
         train_rows = train_q(
             model=qnet, loader=loader, device=device,
-            epochs=dqn_epochs, lr=dqn_lr, loss_type=dqn_loss,
+            epochs=dqn_epochs, lr=dqn_lr,
         )
         for r in train_rows:
             metrics.log(**r)
@@ -313,10 +312,8 @@ def main() -> None:
                 epochs_per_iter=int(cfg.get("iter_epochs", 100)),
                 lr=float(cfg.get("iter_lr", dqn_lr)),
                 gamma=gamma,
-                initial_epsilon=float(cfg.get("iter_initial_epsilon", 0.99)),
-                epsilon_decay=float(cfg.get("iter_epsilon_decay", 0.99)),
+                online_epsilon=float(cfg.get("iter_online_epsilon", 0.1)),
                 top_frac=float(cfg.get("iter_top_frac", 0.15)),
-                loss_type=dqn_loss,
                 checkpoint_every=int(cfg.get("iter_checkpoint_every", 0)),
                 checkpoint_path=(os.path.join(args.out, "qnet.pt")
                                  if int(cfg.get("iter_checkpoint_every", 0)) > 0 else None),
