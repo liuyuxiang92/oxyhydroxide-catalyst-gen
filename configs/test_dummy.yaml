@@ -1,0 +1,26 @@
+# Test config using dummy predictor (no ASE/DeepMD required)
+name: test_dummy
+cation_set: [Co, Cr, Fe, Mn, Ni, Al, Ti, Cu, V, Mo]
+anion_formula: ""
+n_components: 5
+predictor: dummy
+constraint_filter: null
+pg_warmup_eps: 20
+pg_train_eps: 50
+pg_lr_actor: 0.001
+pg_lr_critic: 0.001
+entropy_coef: 0.01
+pg_epsilon: 0.0
+pg_gen_stochastic: true
+temperature: 1.0
+gamma: 0.99
+hidden_dim: 64
+normalise_returns: true
+repeat_penalty_coef: 0.1
+repeat_penalty_shape: log
+num_gen_eps: 20
+exploration_gen_eps: 10
+num_random_eps: 50
+dqn_epochs: 5
+dqn_lr: 0.001
+dqn_batch_size: 32

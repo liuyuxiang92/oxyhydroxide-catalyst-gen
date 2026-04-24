@@ -1,0 +1,89 @@
+# HEA case study configuration
+# Usage:
+#   python scripts/run_experiment.py --config configs/hea.yaml --method a2c \
+#       --out runs/hea_a2c_seed0 --seed 0
+
+name: hea
+description: "High-entropy alloy stability optimisation (5-component, FCC/BCC)"
+
+# ---- Environment ----
+cation_set:
+  - Co
+  - Cr
+  - Fe
+  - Mn
+  - Ni
+  - Al
+  - Ti
+  - Cu
+  - V
+  - Mo
+  - W
+  - Nb
+  - Ta
+  - Hf
+  - Zr
+
+fraction_set:
+  - "0.05"
+  - "0.10"
+  - "0.15"
+  - "0.20"
+  - "0.25"
+  - "0.30"
+  - "0.35"
+  - "0.40"
+  - "0.45"
+  - "0.50"
+  - "0.55"
+  - "0.60"
+  - "0.65"
+  - "0.70"
+  - "0.75"
+  - "0.80"
+
+anion_formula: ""         # No anion for metallic alloys
+n_components: 5           # Classic 5-component HEA
+
+constraint_filter: null   # No chemical constraint; DPA reward handles stability
+
+# ---- Predictor ----
+predictor: hea
+poscar: data/hea/FCC.POSCAR       # FCC supercell template; change to BCC.POSCAR if needed
+dp_models:
+  - models/hea/model_1.pt
+  - models/hea/model_2.pt
+  - models/hea/model_3.pt
+site_symbol: "X"           # Placeholder element in the POSCAR template
+objective: mean_minus_kstd # Exploitation objective (use mean_plus_kstd for exploration)
+k: 1.0
+n_random_configs: 5        # Random configs per composition during RL training
+structure_mode: random     # "random" for training; "sqs" for DFT validation
+
+# ---- RL hyperparameters ----
+method: a2c                # Default method (overridable via --method)
+pg_warmup_eps: 200
+pg_train_eps: 1000
+pg_lr_actor: 0.001
+pg_lr_critic: 0.001
+entropy_coef: 0.01
+pg_epsilon: 0.0
+pg_gen_stochastic: true
+temperature: 1.0
+gamma: 0.99
+hidden_dim: 128
+normalise_returns: true
+
+repeat_penalty_coef: 0.1
+repeat_penalty_shape: log
+
+# ---- Generation ----
+num_gen_eps: 200          # Exploitation candidates
+exploration_gen_eps: 50   # Exploration candidates (high dp_std; for DFT validation)
+
+# ---- DQN-specific (only used when --method dqn) ----
+num_random_eps: 500
+dqn_epochs: 50
+dqn_lr: 0.001
+dqn_batch_size: 256
+stochastic_top_frac: 0.0

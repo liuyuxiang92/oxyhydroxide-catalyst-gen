@@ -1,0 +1,125 @@
+# Tiny smoke config — end-to-end validation with minimal episode counts.
+name: oxides_smoke
+description: "Smoke test for integer_ratio env + sinter_calcine predictor"
+
+env_type: integer_ratio
+
+cation_set:
+  - O
+  - Te
+  - N
+  - B
+  - Tm
+  - Ga
+  - Hf
+  - Ca
+  - Al
+  - P
+  - Li
+  - S
+  - Cr
+  - Zr
+  - Ta
+  - Sn
+  - Au
+  - Hg
+  - Cd
+  - Mn
+  - Cs
+  - Pd
+  - Th
+  - K
+  - Ti
+  - Ag
+  - Zn
+  - W
+  - Ce
+  - Nd
+  - Sr
+  - Tl
+  - Cl
+  - Mg
+  - Pr
+  - Rb
+  - Pb
+  - Ru
+  - Ho
+  - Nb
+  - Mo
+  - C
+  - V
+  - Er
+  - Pt
+  - Fe
+  - Ir
+  - Sb
+  - Y
+  - Na
+  - Co
+  - Be
+  - In
+  - La
+  - U
+  - Pu
+  - As
+  - Sm
+  - Br
+  - Ni
+  - Eu
+  - Ba
+  - F
+  - Rh
+  - Yb
+  - Gd
+  - Os
+  - Lu
+  - Ge
+  - Cu
+  - H
+  - Sc
+  - Si
+  - Re
+  - Dy
+  - Bi
+  - Tb
+  - Se
+
+ratio_set: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+anion_formula: ""
+n_components: 5
+
+constraint_filter: last_step_element
+required_elements: ["O"]
+nonzero_ratio_at_last: true
+reserve_for_last: true
+
+predictor: sinter_calcine
+rf_model: models/sinter_calcine/optimal_sinter_RF.joblib
+mode: sinter
+objective: mean
+k: 0.0
+
+method: a2c
+pg_warmup_eps: 5
+pg_train_eps: 10
+pg_lr_actor: 0.001
+pg_lr_critic: 0.001
+entropy_coef: 0.01
+pg_epsilon: 0.0
+pg_gen_stochastic: true
+temperature: 1.0
+gamma: 0.99
+hidden_dim: 128
+normalise_returns: true
+
+repeat_penalty_coef: 0.1
+repeat_penalty_shape: log
+
+num_gen_eps: 20
+exploration_gen_eps: 0
+
+num_random_eps: 10
+dqn_epochs: 2
+dqn_lr: 0.001
+dqn_batch_size: 64
+stochastic_top_frac: 0.0

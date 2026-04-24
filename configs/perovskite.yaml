@@ -1,0 +1,97 @@
+# Perovskite B-site case study configuration
+# Usage:
+#   python scripts/run_experiment.py --config configs/perovskite.yaml --method a2c \
+#       --out runs/perovskite_a2c_seed0 --seed 0
+
+name: perovskite
+description: "High-entropy perovskite B-site design (La(ABCDE)O3)"
+
+# ---- Environment ----
+# B-site candidates (transition metals compatible with La3+ A-site and O2- anion)
+cation_set:
+  - Cr
+  - Mn
+  - Fe
+  - Co
+  - Ni
+  - Ti
+  - V
+  - Cu
+  - Zr
+  - Nb
+  - Mo
+
+fraction_set:
+  - "0.05"
+  - "0.10"
+  - "0.15"
+  - "0.20"
+  - "0.25"
+  - "0.30"
+  - "0.35"
+  - "0.40"
+  - "0.45"
+  - "0.50"
+  - "0.55"
+  - "0.60"
+  - "0.65"
+  - "0.70"
+  - "0.75"
+  - "0.80"
+
+# The anion formula is part of the full material but NOT part of the
+# optimised composition (La and O are fixed by the template).
+# Set anion_formula to "" because the RL agent only selects B-site cations.
+anion_formula: ""
+n_components: 5
+
+# Optional: SMACT charge neutrality for B-site (La is fixed as 3+, O as 2-).
+# For LaBO3 the B-site cation(s) must collectively provide +3 charge.
+# Uncomment to enable hard constraint enforcement during generation.
+# constraint_filter: smact_charge
+# smact_anions:
+#   - symbol: "O"
+#     charge: -2
+#     stoich: 3.0      # 3 O per formula unit → cations must provide +6 total
+constraint_filter: null   # Default: no constraint; DPA reward handles stability
+
+# ---- Predictor ----
+predictor: perovskite
+poscar: data/perovskite/LaBO3.POSCAR   # LaBO3 template; B-site marked as site_symbol
+dp_models:
+  - models/perovskite/model_1.pt
+  - models/perovskite/model_2.pt
+  - models/perovskite/model_3.pt
+site_symbol: "Fe"          # Placeholder for B-site atoms in the template POSCAR
+objective: mean_minus_kstd
+k: 1.0
+n_random_configs: 5
+structure_mode: random     # "random" for training; "sqs" for DFT validation
+
+# ---- RL hyperparameters ----
+method: a2c
+pg_warmup_eps: 200
+pg_train_eps: 1000
+pg_lr_actor: 0.001
+pg_lr_critic: 0.001
+entropy_coef: 0.01
+pg_epsilon: 0.0
+pg_gen_stochastic: true
+temperature: 1.0
+gamma: 0.99
+hidden_dim: 128
+normalise_returns: true
+
+repeat_penalty_coef: 0.1
+repeat_penalty_shape: log
+
+# ---- Generation ----
+num_gen_eps: 200
+exploration_gen_eps: 50    # High-uncertainty candidates for DFT to improve DPA model
+
+# ---- DQN-specific ----
+num_random_eps: 500
+dqn_epochs: 50
+dqn_lr: 0.001
+dqn_batch_size: 256
+stochastic_top_frac: 0.0
