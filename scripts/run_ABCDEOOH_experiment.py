@@ -1670,6 +1670,7 @@ def main() -> None:
 
     all_metrics: List[dict] = []
     _dqn_mid_checkpoint = None  # may be set inside the training else-branch below
+    dqn_ep_idx = 0  # cumulative DQN episode index across Phase-0 + Phase-1
 
     if args.only_generate:
         if os.path.exists(scaler_path):
@@ -1821,6 +1822,15 @@ def main() -> None:
                     all_targets.extend(q_targets)
                     accepted += 1
 
+                    dqn_ep_idx += 1
+                    all_metrics.append({
+                        "phase": "dqn_collect",
+                        "iteration": 0,
+                        "episode": dqn_ep_idx,
+                        "return": float(env.path[-1].reward),
+                        "epsilon": float("nan"),
+                    })
+
                     pbar.update(1)
                     if attempted % 2000 == 0:
                         rate = (accepted / attempted) if attempted else 0.0
@@ -1958,6 +1968,15 @@ def main() -> None:
                 new_targets.extend(q_targets)
                 accepted += 1
                 accepted_total += 1
+
+                dqn_ep_idx += 1
+                all_metrics.append({
+                    "phase": "dqn_collect",
+                    "iteration": it + 1,
+                    "episode": dqn_ep_idx,
+                    "return": float(env.path[-1].reward),
+                    "epsilon": eps_curr,
+                })
 
             if max_attempts is not None and attempted_total >= max_attempts and accepted < target_this:
                 tqdm.write(
