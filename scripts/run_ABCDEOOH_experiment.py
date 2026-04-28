@@ -899,30 +899,31 @@ def main() -> None:
         default=0,
         help=(
             "Seed for the DeepMD predictor (controls random alloy configurations and "
-            "adsorbate placement). Also acts as fallback for --pg-train-seed and "
-            "--pg-gen-seed if those are not set. Must be the same across runs for "
+            "adsorbate placement). Also acts as fallback for --train-seed and "
+            "--gen-seed if those are not set. Must be the same across runs for "
             "fully reproducible training."
         ),
     )
     parser.add_argument(
-        "--pg-train-seed",
+        "--train-seed",
         type=int,
         default=None,
         help=(
-            "Seed for the training phase (warmup + PG training RNG). When set, also "
-            "enables GPU deterministic mode (cudnn.deterministic, "
-            "use_deterministic_algorithms). Falls back to --dp-seed if not provided. "
-            "Fix this together with --dp-seed for reproducible training."
+            "Seed for the training phase (DQN buffer collection / iterative loop, or "
+            "PG warmup + training RNG). When set, also enables GPU deterministic mode "
+            "(cudnn.deterministic, use_deterministic_algorithms). Falls back to "
+            "--dp-seed if not provided. Fix this together with --dp-seed for "
+            "reproducible training."
         ),
     )
     parser.add_argument(
-        "--pg-gen-seed",
+        "--gen-seed",
         type=int,
         default=None,
         help=(
             "Seed applied just before the generation phase. Makes stochastic generation "
-            "(--pg-gen-stochastic) reproducible independently of training. "
-            "Falls back to --dp-seed if not provided."
+            "(--stochastic-top-frac for DQN or --pg-gen-stochastic for PG) reproducible "
+            "independently of training. Falls back to --dp-seed if not provided."
         ),
     )
 
@@ -1322,9 +1323,9 @@ def main() -> None:
     if args.dp_model is None:
         args.dp_model = _DEFAULT_DP_MODELS
 
-    _train_seed = args.pg_train_seed if args.pg_train_seed is not None else args.dp_seed
-    _gen_seed   = args.pg_gen_seed   if args.pg_gen_seed   is not None else args.dp_seed
-    set_seed(_train_seed, deterministic=(args.pg_train_seed is not None))
+    _train_seed = args.train_seed if args.train_seed is not None else args.dp_seed
+    _gen_seed   = args.gen_seed   if args.gen_seed   is not None else args.dp_seed
+    set_seed(_train_seed, deterministic=(args.train_seed is not None))
     ensure_dir(args.out)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
