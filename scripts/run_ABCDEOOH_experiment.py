@@ -1052,6 +1052,13 @@ _DEFAULT_DP_MODELS = [
 
 
 def main() -> None:
+    # Create --out early so shell redirections (e.g. > <out>/run.log 2>&1) work
+    # even when the directory doesn't exist yet — before argparse runs.
+    for _i, _arg in enumerate(sys.argv[:-1]):
+        if _arg == "--out":
+            os.makedirs(sys.argv[_i + 1], exist_ok=True)
+            break
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
     parser.add_argument(
