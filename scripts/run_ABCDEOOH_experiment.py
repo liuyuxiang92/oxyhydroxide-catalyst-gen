@@ -24,6 +24,8 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 import argparse
+import collections
+import copy
 import csv
 import json
 import math
@@ -31,7 +33,7 @@ import random
 import sys
 import warnings
 from collections import Counter
-from typing import List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 import joblib
 import numpy as np
@@ -345,6 +347,165 @@ def _rollout_random_episode(env: ABCDEOOHEnv) -> None:
     for _t in range(env.max_steps):
         a = env.sample_random_action()
         env.step(a)
+
+
+# ── Classical DQN helpers ──────────────────────────────────────────────────
+
+
+def _precompute_elem_features(
+    cation_set: List[str],
+    featurizer: Callable,
+) -> Tuple[np.ndarray, "StandardScaler"]:
+    """Precompute and scale element Magpie feature vectors for all cations.
+
+    Uses a separate scaler from s_mat because single-element Magpie
+    statistics have zero range features that differ from composites.
+    """
+    raw = np.asarray([featurizer(el + "1.00") for el in cation_set], dtype=float)
+    elem_scaler = StandardScaler()
+    elem_scaler.fit(raw)
+    return elem_scaler.transform(raw), elem_scaler
+
+
+def add_episode_to_buffer(
+    path: list,
+    buffer: collections.deque,
+    elem_feats_scaled: np.ndarray,
+    fraction_set: List[str],
+) -> None:
+    """Convert an episode path into 5 buffer rows and append them to buffer."""
+    for k, step in enumerate(path):
+        done = k == len(path) - 1
+        next_step = path[k + 1] if not done else None
+
+        next_allowed_idx: List[Tuple[int, int]] = []
+        if not done:
+            for (elem_oh, comp_oh) in next_step.allowed_actions:
+                next_allowed_idx.append(
+                    (int(np.argmax(elem_oh)), int(np.argmax(comp_oh)))
+                )
+
+        buffer.append({
+            "s_mat_raw":        np.asarray(step.state_material_features, dtype=float),
+            "s_step":           np.asarray(step.state_step_onehot, dtype=float),
+            "a_elem_idx":       int(np.argmax(step.action_elem_onehot)),
+            "a_comp_val":       float(fraction_set[int(np.argmax(step.action_comp_onehot))]),
+            "reward":           float(step.reward),
+            "s_mat_next_raw":   np.asarray(next_step.state_material_features, dtype=float)
+                                if not done else np.zeros(len(step.state_material_features), dtype=float),
+            "s_step_next":      np.asarray(next_step.state_step_onehot, dtype=float)
+                                if not done else np.zeros(len(step.state_step_onehot), dtype=float),
+            "next_allowed_idx": next_allowed_idx,
+            "done":             done,
+        })
+
+
+def _choose_action_dqn(
+    qnet: torch.nn.Module,
+    s_mat_scaled: np.ndarray,
+    s_step: np.ndarray,
+    allowed: list,
+    elem_feats_scaled: np.ndarray,
+    fraction_set: List[str],
+    device: torch.device,
+) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
+    """Return the greedy-best action (argmax Q) over all allowed actions."""
+    n = len(allowed)
+    a_elem_b = np.asarray(
+        [elem_feats_scaled[int(np.argmax(a[0]))] for a in allowed], dtype=float
+    )
+    a_comp_b = np.asarray(
+        [[float(fraction_set[int(np.argmax(a[1]))])] for a in allowed], dtype=float
+    )
+    s_mat_b = np.repeat(s_mat_scaled.reshape(1, -1), n, axis=0)
+    s_step_b = np.repeat(s_step.reshape(1, -1), n, axis=0)
+
+    with torch.no_grad():
+        q = qnet(
+            torch.tensor(s_mat_b, dtype=torch.float32, device=device),
+            torch.tensor(s_step_b, dtype=torch.float32, device=device),
+            torch.tensor(a_elem_b, dtype=torch.float32, device=device),
+            torch.tensor(a_comp_b, dtype=torch.float32, device=device),
+        ).reshape(-1)
+
+    return allowed[int(torch.argmax(q).item())]
+
+
+def _compute_td_target(
+    row: dict,
+    target_net: torch.nn.Module,
+    s_mat_scaler: StandardScaler,
+    elem_feats_scaled: np.ndarray,
+    fraction_set: List[str],
+    device: torch.device,
+    gamma: float,
+) -> float:
+    """TD target for one buffer row: r if done, else r + γ·max_a' Q_target(s',a')."""
+    if row["done"] or not row["next_allowed_idx"]:
+        return float(row["reward"])
+
+    next_idxs = row["next_allowed_idx"]
+    n = len(next_idxs)
+    ns_mat = s_mat_scaler.transform(row["s_mat_next_raw"].reshape(1, -1))[0]
+    a_e = np.asarray([elem_feats_scaled[ei] for ei, _ in next_idxs], dtype=float)
+    a_c = np.asarray([[float(fraction_set[fi])] for _, fi in next_idxs], dtype=float)
+    ns_mat_b = np.repeat(ns_mat.reshape(1, -1), n, axis=0)
+    ns_step_b = np.repeat(row["s_step_next"].reshape(1, -1), n, axis=0)
+
+    with torch.no_grad():
+        q_next = target_net(
+            torch.tensor(ns_mat_b, dtype=torch.float32, device=device),
+            torch.tensor(ns_step_b, dtype=torch.float32, device=device),
+            torch.tensor(a_e, dtype=torch.float32, device=device),
+            torch.tensor(a_c, dtype=torch.float32, device=device),
+        ).reshape(-1)
+
+    return float(row["reward"]) + gamma * float(q_next.max().item())
+
+
+def _dqn_gradient_step(
+    qnet: torch.nn.Module,
+    batch: list,
+    target_net: torch.nn.Module,
+    s_mat_scaler: StandardScaler,
+    elem_feats_scaled: np.ndarray,
+    fraction_set: List[str],
+    optimizer: torch.optim.Optimizer,
+    loss_fn: torch.nn.Module,
+    device: torch.device,
+    gamma: float,
+) -> float:
+    """One DQN gradient step: compute TD targets, forward, SmoothL1, backward."""
+    y = [
+        _compute_td_target(row, target_net, s_mat_scaler, elem_feats_scaled, fraction_set, device, gamma)
+        for row in batch
+    ]
+
+    s_mat_b = torch.tensor(
+        s_mat_scaler.transform(np.asarray([r["s_mat_raw"] for r in batch], dtype=float)),
+        dtype=torch.float32, device=device,
+    )
+    s_step_b = torch.tensor(
+        np.asarray([r["s_step"] for r in batch], dtype=float),
+        dtype=torch.float32, device=device,
+    )
+    a_elem_b = torch.tensor(
+        np.asarray([elem_feats_scaled[r["a_elem_idx"]] for r in batch], dtype=float),
+        dtype=torch.float32, device=device,
+    )
+    a_comp_b = torch.tensor(
+        np.asarray([[r["a_comp_val"]] for r in batch], dtype=float),
+        dtype=torch.float32, device=device,
+    )
+    y_t = torch.tensor(y, dtype=torch.float32, device=device).reshape(-1, 1)
+
+    qnet.train()
+    pred = qnet(s_mat_b, s_step_b, a_elem_b, a_comp_b)
+    loss = loss_fn(pred, y_t)
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+    return float(loss.item())
 
 
 def _rollout_policy_episode(
@@ -1133,7 +1294,46 @@ def main() -> None:
         type=str,
         choices=["mse", "smoothl1"],
         default="smoothl1",
-        help="Loss for DQN training (Phase-0 + Phase-1). Defaults to SmoothL1 (Huber) per paper.",
+        help="Loss for DQN training. Defaults to SmoothL1 (Huber).",
+    )
+
+    # Classical DQN flags (replace the old Phase-0/Phase-1 flags when --rl-method dqn).
+    # Old flags are kept below for backward compat but are ignored in classical DQN mode.
+    parser.add_argument(
+        "--warmup-eps",
+        type=int,
+        default=500,
+        help="Random episodes to collect before training starts; used to fit the s_mat scaler.",
+    )
+    parser.add_argument(
+        "--num-train-eps",
+        type=int,
+        default=20000,
+        help="Total training episodes for classical DQN.",
+    )
+    parser.add_argument(
+        "--buffer-size",
+        type=int,
+        default=50000,
+        help="Replay buffer capacity (FIFO). Replaces --replay-buffer-size for classical DQN.",
+    )
+    parser.add_argument(
+        "--target-update-freq",
+        type=int,
+        default=100,
+        help="Hard-copy qnet → target_net every N training episodes.",
+    )
+    parser.add_argument(
+        "--eps-anneal-eps",
+        type=int,
+        default=10000,
+        help="Linear epsilon annealing: ε reaches eps-min after this many training episodes.",
+    )
+    parser.add_argument(
+        "--grad-steps-per-ep",
+        type=int,
+        default=5,
+        help="Gradient steps per training episode (1:1 ratio with env steps in a 5-step episode).",
     )
 
     parser.add_argument("--anion-formula", type=str, default="O2H1")
@@ -1665,425 +1865,177 @@ def main() -> None:
 
         return
 
+    # === Classical DQN path ===
     scaler_path = args.load_scaler or os.path.join(args.out, "std_scaler.bin")
     qnet_path = args.load_qnet or os.path.join(args.out, "qnet.pt")
 
     all_metrics: List[dict] = []
-    _dqn_mid_checkpoint = None  # may be set inside the training else-branch below
-    dqn_ep_idx = 0  # cumulative DQN episode index across Phase-0 + Phase-1
+
+    # Precompute element Magpie feature lookup table — used for both training and generation.
+    print("[INFO] Precomputing element Magpie features...", flush=True)
+    elem_feats_scaled, _elem_scaler = _precompute_elem_features(env.cation_set, env.state_featurizer)
+    elem_dim = int(elem_feats_scaled.shape[1])
+    fraction_set = env.fraction_set
 
     if args.only_generate:
-        if os.path.exists(scaler_path):
-            scaler = joblib.load(scaler_path)
-        else:
-            # Fallback: fit a scaler from the saved dataset if available.
-            ds_path = os.path.join(args.out, "random_dataset.npz")
-            if not os.path.exists(ds_path):
-                raise SystemExit(
-                    f"--only-generate requires {scaler_path} (or {ds_path} to refit a scaler); neither was found."
-                )
-            data = np.load(ds_path)
-            s_mat = data["s_mat"]
-            scaler = StandardScaler()
-            scaler.fit(s_mat)
-            joblib.dump(scaler, scaler_path, compress=True)
-
+        if not os.path.exists(scaler_path):
+            raise SystemExit(f"--only-generate requires {scaler_path} (use --load-scaler to override)")
+        scaler = joblib.load(scaler_path)
         state_dim = int(getattr(scaler, "n_features_in_", scaler.mean_.shape[0]))
         qnet = QRegressor(
-            state_dim=state_dim,
-            step_dim=env.max_steps,
-            elem_dim=len(env.cation_set),
-            frac_dim=len(env.fraction_set),
+            state_dim=state_dim, step_dim=env.max_steps, elem_dim=elem_dim, frac_dim=1,
         ).to(device)
-
         if not os.path.exists(qnet_path):
             raise SystemExit(f"--only-generate requires {qnet_path} (use --load-qnet to override)")
-        qnet.load_state_dict(torch.load(qnet_path, map_location=device))
-    else:
-
-        _dqn_ckpt_path = os.path.join(args.out, "checkpoint.pt")
-        _dqn_mid_checkpoint = None  # set below if resuming from a mid-training checkpoint
-
-        if args.resume_training:
-            # --- Resume DQN: load scaler, buffer, and qnet (prefer checkpoint.pt) ---
-            scaler_path = args.load_scaler or os.path.join(args.out, "std_scaler.bin")
-            if not os.path.exists(scaler_path):
-                raise SystemExit(
-                    f"--resume-training requires {scaler_path} (use --load-scaler to override)"
-                )
-            scaler = joblib.load(scaler_path)
-            print(f"[INFO] Loaded scaler from {scaler_path}", flush=True)
-
-            ds_path = os.path.join(args.out, "random_dataset.npz")
-            if not os.path.exists(ds_path):
-                raise SystemExit(
-                    f"--resume-training requires {ds_path}; run a full training pass first."
-                )
-            data = np.load(ds_path)
-            s_mat = data["s_mat"]
-            s_step = data["s_step"]
-            a_elem = data["a_elem"]
-            a_comp = data["a_comp"]
-            y = data["y"]
-
-            s_mat_scaled = scaler.transform(s_mat)
-
-            qnet = QRegressor(
-                state_dim=s_mat_scaled.shape[1],
-                step_dim=s_step.shape[1],
-                elem_dim=a_elem.shape[1],
-                frac_dim=a_comp.shape[1],
-            ).to(device)
-
-            # Prefer a mid-training checkpoint (optimizer state + epoch counter)
-            # over the final qnet.pt (model weights only).
-            if os.path.exists(_dqn_ckpt_path):
-                _raw = torch.load(_dqn_ckpt_path, map_location=device)
-                if _raw.get("type") == "dqn":
-                    _dqn_mid_checkpoint = _raw
-                    qnet.load_state_dict(_raw["qnet_state"])
-                    print(
-                        f"[INFO] Resuming from mid-training checkpoint: "
-                        f"{_raw['epochs_completed']} epochs completed → {_dqn_ckpt_path}",
-                        flush=True,
-                    )
-                else:
-                    print(
-                        f"[WARN] checkpoint.pt exists but type={_raw.get('type')!r} "
-                        "(expected 'dqn'); falling back to qnet.pt.",
-                        flush=True,
-                    )
-
-            if _dqn_mid_checkpoint is None:
-                qnet_path = args.load_qnet or os.path.join(args.out, "qnet.pt")
-                if not os.path.exists(qnet_path):
-                    raise SystemExit(
-                        f"--resume-training requires {qnet_path} (use --load-qnet to override)"
-                    )
-                qnet.load_state_dict(torch.load(qnet_path, map_location=device))
-                print(f"[INFO] Loaded qnet from {qnet_path}", flush=True)
-
-            _dqn_checkpoint_cfg: Optional[dict] = None
-            if args.save_checkpoint_freq > 0 or _dqn_mid_checkpoint is not None:
-                _dqn_checkpoint_cfg = {
-                    "path": _dqn_ckpt_path,
-                    "freq": args.save_checkpoint_freq,
-                    "start_epoch": _dqn_mid_checkpoint["epochs_completed"] if _dqn_mid_checkpoint else 0,
-                    "iteration": _dqn_mid_checkpoint.get("dqn_iteration", 0) if _dqn_mid_checkpoint else 0,
-                    "opt_state": _dqn_mid_checkpoint.get("opt_state") if _dqn_mid_checkpoint else None,
-                }
-
-            train_loader, val_loader = _build_train_val_loaders(
-                s_mat_scaled, s_step, a_elem, a_comp, y,
-                batch_size=args.batch_size,
-                val_frac=float(args.val_frac),
-                rng=np.random.default_rng(_train_seed),
-            )
-            all_metrics.extend(train_q(
-                model=qnet, loader=train_loader, val_loader=val_loader, device=device,
-                epochs=args.dqn_epochs, lr=args.lr, iteration=0,
-                checkpoint_cfg=_dqn_checkpoint_cfg,
-                loss_name=args.dqn_loss,
-            ))
-
+        _raw = torch.load(qnet_path, map_location=device)
+        if isinstance(_raw, dict) and "qnet_state" in _raw:
+            qnet.load_state_dict(_raw["qnet_state"])
         else:
-            # 1) Build or load offline random dataset
-            if args.use_saved_random_dataset:
-                ds_path = os.path.join(args.out, "random_dataset.npz")
-                if not os.path.exists(ds_path):
-                    raise SystemExit(f"{ds_path} not found")
-                data = np.load(ds_path)
-                s_mat = data["s_mat"]
-                s_step = data["s_step"]
-                a_elem = data["a_elem"]
-                a_comp = data["a_comp"]
-                y = data["y"]
-            else:
-                target_accepted = int(args.num_random_eps)
-                max_attempts = int(args.max_random_attempts) if args.max_random_attempts is not None else None
+            qnet.load_state_dict(_raw)
+        print(f"[INFO] Loaded qnet from {qnet_path}", flush=True)
 
-                all_inputs = []
-                all_targets = []
-
-                accepted = 0
-                attempted = 0
-
-                pbar = tqdm(
-                    total=target_accepted,
-                    desc="Random episodes (accepted)",
-                )
-
-                while accepted < target_accepted and (max_attempts is None or attempted < max_attempts):
-                    attempted += 1
-                    _rollout_random_episode(env)
-
-                    inputs, q_targets = extract_mc_q_targets(env.path, gamma=args.gamma)
-                    all_inputs.extend(inputs)
-                    all_targets.extend(q_targets)
-                    accepted += 1
-
-                    dqn_ep_idx += 1
-                    all_metrics.append({
-                        "phase": "dqn_collect",
-                        "iteration": 0,
-                        "episode": dqn_ep_idx,
-                        "return": float(env.path[-1].reward),
-                        "epsilon": float("nan"),
-                    })
-
-                    pbar.update(1)
-                    if attempted % 2000 == 0:
-                        rate = (accepted / attempted) if attempted else 0.0
-                        pbar.set_postfix(attempts=attempted, rate=f"{rate:.3f}")
-
-                pbar.close()
-
-                rate = (accepted / attempted) if attempted else 0.0
-                print(
-                    f"[INFO] Random episodes: accepted {accepted}/{target_accepted} after {attempted} attempts (rate={rate:.4f}).",
-                    flush=True,
-                )
-
-                if max_attempts is not None and accepted < target_accepted:
-                    print(
-                        f"[WARN] Only accepted {accepted}/{target_accepted} random episodes after {attempted} attempts.",
-                        flush=True,
-                    )
-
-                s_mat = np.asarray([x[0] for x in all_inputs], dtype=float)
-                s_step = np.asarray([x[1] for x in all_inputs], dtype=float)
-                a_elem = np.asarray([x[2] for x in all_inputs], dtype=float)
-                a_comp = np.asarray([x[3] for x in all_inputs], dtype=float)
-                y = np.asarray(all_targets, dtype=float).reshape(-1, 1)
-
-                np.savez_compressed(
-                    os.path.join(args.out, "random_dataset.npz"),
-                    s_mat=s_mat,
-                    s_step=s_step,
-                    a_elem=a_elem,
-                    a_comp=a_comp,
-                    y=y,
-                )
-
-            # 2) Scale state features
-            scaler = StandardScaler()
-            s_mat_scaled = scaler.fit_transform(s_mat)
-            joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"), compress=True)
-
-            # 3) Train Q regressor (Phase 0 — pre-training on the random buffer)
-            qnet = QRegressor(
-                state_dim=s_mat_scaled.shape[1],
-                step_dim=s_step.shape[1],
-                elem_dim=a_elem.shape[1],
-                frac_dim=a_comp.shape[1],
-            ).to(device)
-
-            # Build checkpoint_cfg for fresh DQN training
-            _dqn_ckpt_path = os.path.join(args.out, "checkpoint.pt")
-            _dqn_mid_checkpoint = None
-            _dqn_checkpoint_cfg: Optional[dict] = None
-            if args.save_checkpoint_freq > 0:
-                _dqn_checkpoint_cfg = {
-                    "path": _dqn_ckpt_path,
-                    "freq": args.save_checkpoint_freq,
-                    "start_epoch": 0,
-                    "iteration": 0,
-                    "opt_state": None,
-                }
-
-            train_loader, val_loader = _build_train_val_loaders(
-                s_mat_scaled, s_step, a_elem, a_comp, y,
-                batch_size=args.batch_size,
-                val_frac=float(args.val_frac),
-                rng=np.random.default_rng(_train_seed),
+    else:
+        if args.resume_training:
+            tqdm.write(
+                "[WARN] --resume-training is not supported in classical DQN mode; starting fresh training."
             )
-            all_metrics.extend(train_q(
-                model=qnet, loader=train_loader, val_loader=val_loader, device=device,
-                epochs=args.dqn_epochs, lr=args.lr, iteration=0,
-                checkpoint_cfg=_dqn_checkpoint_cfg,
-                loss_name=args.dqn_loss,
-            ))
 
-        # Save qnet after initial training so it can be resumed later.
-        # (The iterative block below will overwrite with the final checkpoint if it runs.)
-        torch.save(qnet.state_dict(), os.path.join(args.out, "qnet.pt"))
+        # WARMUP: collect random episodes to fill buffer and fit the s_mat scaler.
+        warmup_eps = int(args.warmup_eps)
+        buffer_size = int(args.buffer_size)
+        buffer: collections.deque = collections.deque(maxlen=buffer_size)
 
-    # Phase-1: paper-aligned training loop. Per iteration:
-    #   collect --dqn-eps-per-iter ε-greedy episodes → append to buffer (FIFO-cap at
-    #   --replay-buffer-size) → uniformly sample --train-sample-size step-rows →
-    #   80/20 train/val split → train DQN ×--iter-train-epochs (SmoothL1 by default)
-    #   → anneal ε. Disabled by setting --dqn-num-iters 0.
-    if args.rl_method == "dqn" and int(args.dqn_num_iters) > 0 and not args.only_generate:
-        phase1_iters = int(args.dqn_num_iters)
-        phase1_eps_per_iter = max(1, int(args.dqn_eps_per_iter))
-        phase1_train_epochs = (
-            int(args.iter_train_epochs) if args.iter_train_epochs is not None else 100
-        )
-        replay_max = int(args.replay_buffer_size) if int(args.replay_buffer_size) > 0 else None
-        train_sample_size = max(1, int(args.train_sample_size))
-        ckpt_every = int(args.checkpoint_iter_freq)
+        print(f"[INFO] DQN warmup: {warmup_eps} random episodes...", flush=True)
+        pbar = tqdm(total=warmup_eps, desc="DQN warmup")
+        _orig_reward_fn = env.reward_fn
+        env.reward_fn = lambda _f: 0.0
+        try:
+            for _ in range(warmup_eps):
+                _rollout_random_episode(env)
+                add_episode_to_buffer(env.path, buffer, elem_feats_scaled, fraction_set)
+                pbar.update(1)
+        finally:
+            env.reward_fn = _orig_reward_fn
+            pbar.close()
 
-        eps_curr = float(args.eps_start)
+        _warmup_s_mat = np.asarray([row["s_mat_raw"] for row in buffer], dtype=float)
+        scaler = StandardScaler()
+        scaler.fit(_warmup_s_mat)
+        state_dim = int(_warmup_s_mat.shape[1])
+        joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"), compress=True)
+        print(f"[INFO] s_mat scaler fitted on {len(_warmup_s_mat)} warmup rows.", flush=True)
+
+        # INIT: qnet, frozen target net, optimizer.
+        qnet = QRegressor(
+            state_dim=state_dim, step_dim=env.max_steps, elem_dim=elem_dim, frac_dim=1,
+        ).to(device)
+        target_net = copy.deepcopy(qnet)
+        target_net.eval()
+        optimizer = torch.optim.Adam(qnet.parameters(), lr=args.lr)
+        loss_fn = _make_loss_fn(args.dqn_loss)
+
+        num_train_eps = int(args.num_train_eps)
+        batch_size = int(args.batch_size)
+        grad_steps = int(args.grad_steps_per_ep)
+        target_update_freq = int(args.target_update_freq)
+        eps_anneal_eps = int(args.eps_anneal_eps)
         eps_min = float(args.eps_min)
-        eps_decay = float(args.eps_decay)
-        rng = np.random.default_rng(_train_seed)
+        gamma = float(args.gamma)
+        ckpt_every = int(args.checkpoint_iter_freq)
+        dqn_ep_idx = 0
+        eps = 1.0
 
-        max_attempts = int(args.max_random_attempts) if args.max_random_attempts is not None else None
-        attempted_total = 0
-        accepted_total = 0
-
-        # Apply FIFO cap to the existing buffer carried over from Phase-0 once,
-        # so Phase-1 starts from a bounded buffer.
-        capped = _fifo_cap_arrays(
-            {"s_mat": s_mat, "s_step": s_step, "a_elem": a_elem, "a_comp": a_comp, "y": y},
-            replay_max,
+        print(
+            f"[INFO] Classical DQN: {num_train_eps} episodes, "
+            f"buffer_size={buffer_size}, batch_size={batch_size}, "
+            f"grad_steps_per_ep={grad_steps}, target_update_freq={target_update_freq}",
+            flush=True,
         )
-        s_mat, s_step = capped["s_mat"], capped["s_step"]
-        a_elem, a_comp, y = capped["a_elem"], capped["a_comp"], capped["y"]
 
-        outer_pbar = tqdm(range(phase1_iters), desc="DQN Phase-1 iters")
-        for it in outer_pbar:
+        # TRAINING LOOP
+        outer_pbar = tqdm(range(num_train_eps), desc="DQN train")
+        for ep in outer_pbar:
+            dqn_ep_idx += 1
+
+            # 1. Collect 1 episode with epsilon-greedy policy
             qnet.eval()
-            new_inputs: List[tuple] = []
-            new_targets: List[float] = []
+            env.initialize()
+            for _t in range(env.max_steps):
+                _allowed = env.allowed_actions()
+                _s_mat_raw = env.state_featurizer(env.state)
+                _s_mat_sc = scaler.transform(_s_mat_raw.reshape(1, -1))[0]
+                _s_step_oh = np.zeros(env.max_steps, dtype=float)
+                _s_step_oh[env.counter] = 1.0
 
-            accepted = 0
-            attempted = 0
-            target_this = phase1_eps_per_iter
+                if float(np.random.rand()) < eps:
+                    _a = random.choice(_allowed)
+                else:
+                    _a = _choose_action_dqn(
+                        qnet, _s_mat_sc, _s_step_oh, _allowed, elem_feats_scaled, fraction_set, device
+                    )
+                env.step(_a)
 
-            while accepted < target_this and (max_attempts is None or attempted_total < max_attempts):
-                attempted += 1
-                attempted_total += 1
-                _rollout_policy_episode(
-                    env=env,
-                    qnet=qnet,
-                    scaler=scaler,
-                    device=device,
-                    stochastic_top_frac=args.stochastic_top_frac,
-                    online_epsilon=eps_curr,
-                )
+            episode_reward = float(env.path[-1].reward)
 
-                inputs, q_targets = extract_mc_q_targets(env.path, gamma=args.gamma)
-                new_inputs.extend(inputs)
-                new_targets.extend(q_targets)
-                accepted += 1
-                accepted_total += 1
+            # 2. Add 5 rows to buffer
+            add_episode_to_buffer(env.path, buffer, elem_feats_scaled, fraction_set)
 
-                dqn_ep_idx += 1
-                all_metrics.append({
-                    "phase": "dqn_collect",
-                    "iteration": it + 1,
-                    "episode": dqn_ep_idx,
-                    "return": float(env.path[-1].reward),
-                    "epsilon": eps_curr,
-                })
+            # 3. Gradient steps — each samples batch_size rows from the full buffer
+            mean_loss = float("nan")
+            if len(buffer) >= batch_size:
+                _buf_list = list(buffer)
+                _losses = []
+                for _ in range(grad_steps):
+                    _batch = random.sample(_buf_list, batch_size)
+                    _losses.append(_dqn_gradient_step(
+                        qnet, _batch, target_net, scaler, elem_feats_scaled,
+                        fraction_set, optimizer, loss_fn, device, gamma,
+                    ))
+                mean_loss = float(np.mean(_losses))
 
-            if max_attempts is not None and attempted_total >= max_attempts and accepted < target_this:
-                tqdm.write(
-                    f"[WARN] Phase-1 iter {it + 1}/{phase1_iters}: max-attempts reached "
-                    f"(accepted_this={accepted}/{target_this}, attempted_total={attempted_total}/{max_attempts})"
-                )
+            all_metrics.append({
+                "phase": "dqn_train",
+                "iteration": ep + 1,
+                "episode": dqn_ep_idx,
+                "return": episode_reward,
+                "train_loss": mean_loss,
+                "mse_loss": mean_loss,
+                "epsilon": eps,
+                "buffer_rows": len(buffer),
+            })
 
-            if new_inputs:
-                s_mat_new = np.asarray([x[0] for x in new_inputs], dtype=float)
-                s_step_new = np.asarray([x[1] for x in new_inputs], dtype=float)
-                a_elem_new = np.asarray([x[2] for x in new_inputs], dtype=float)
-                a_comp_new = np.asarray([x[3] for x in new_inputs], dtype=float)
-                y_new = np.asarray(new_targets, dtype=float).reshape(-1, 1)
-
-                s_mat = np.concatenate([s_mat, s_mat_new], axis=0)
-                s_step = np.concatenate([s_step, s_step_new], axis=0)
-                a_elem = np.concatenate([a_elem, a_elem_new], axis=0)
-                a_comp = np.concatenate([a_comp, a_comp_new], axis=0)
-                y = np.concatenate([y, y_new], axis=0)
-
-                # FIFO cap: keep last `replay_max` rows.
-                capped = _fifo_cap_arrays(
-                    {"s_mat": s_mat, "s_step": s_step, "a_elem": a_elem, "a_comp": a_comp, "y": y},
-                    replay_max,
-                )
-                s_mat, s_step = capped["s_mat"], capped["s_step"]
-                a_elem, a_comp, y = capped["a_elem"], capped["a_comp"], capped["y"]
-
-            # Sample a mini-buffer for this iteration's training.
-            buffer_rows = int(s_mat.shape[0])
-            if buffer_rows == 0:
-                tqdm.write(f"[WARN] Phase-1 iter {it + 1}: buffer empty, skipping training.")
-            else:
-                sample_n = min(train_sample_size, buffer_rows)
-                sample_idx = rng.choice(buffer_rows, size=sample_n, replace=False)
-                s_mat_sample = scaler.transform(s_mat[sample_idx])
-                train_loader, val_loader = _build_train_val_loaders(
-                    s_mat_sample,
-                    s_step[sample_idx],
-                    a_elem[sample_idx],
-                    a_comp[sample_idx],
-                    y[sample_idx],
-                    batch_size=args.batch_size,
-                    val_frac=float(args.val_frac),
-                    rng=rng,
-                )
-
-                qnet.train()
-                iter_metrics = train_q(
-                    model=qnet,
-                    loader=train_loader,
-                    val_loader=val_loader,
-                    device=device,
-                    epochs=phase1_train_epochs,
-                    lr=args.lr,
-                    iteration=it + 1,
-                    loss_name=args.dqn_loss,
-                )
-                for m in iter_metrics:
-                    m["epsilon"] = eps_curr
-                    m["buffer_rows"] = buffer_rows
-                    m["sample_size"] = sample_n
-                all_metrics.extend(iter_metrics)
-
-            # Persist current buffer + qnet snapshot every iteration.
-            np.savez_compressed(
-                os.path.join(args.out, "random_dataset.npz"),
-                s_mat=s_mat,
-                s_step=s_step,
-                a_elem=a_elem,
-                a_comp=a_comp,
-                y=y,
+            outer_pbar.set_postfix(
+                eps=f"{eps:.3f}",
+                buf=len(buffer),
+                loss=f"{mean_loss:.4f}" if not math.isnan(mean_loss) else "warmup",
+                ret=f"{episode_reward:.3f}",
             )
 
-            # Numbered checkpoint every --checkpoint-iter-freq iterations.
-            if ckpt_every > 0 and (it + 1) % ckpt_every == 0:
+            # 4. Hard-copy target net every target_update_freq episodes
+            if (ep + 1) % target_update_freq == 0:
+                target_net.load_state_dict(qnet.state_dict())
+                target_net.eval()
+
+            # 5. Linear epsilon annealing: reaches eps_min at eps_anneal_eps episodes
+            eps = max(eps_min, 1.0 - ep / eps_anneal_eps)
+
+            # Periodic numbered checkpoint
+            if ckpt_every > 0 and (ep + 1) % ckpt_every == 0:
                 _ckpt_path = os.path.join(args.out, "checkpoint.pt")
-                _numbered = _ckpt_path.replace(".pt", f"-iter{it + 1}.pt")
+                _numbered = _ckpt_path.replace(".pt", f"-ep{ep + 1}.pt")
                 _save_checkpoint(_ckpt_path, {
                     "type": "dqn",
                     "rl_method": "dqn",
-                    "epochs_completed": phase1_train_epochs,
-                    "dqn_iteration": it + 1,
+                    "episodes_completed": ep + 1,
                     "qnet_state": qnet.state_dict(),
-                    "opt_state": None,
-                    "epsilon": eps_curr,
+                    "epsilon": eps,
                 }, numbered_path=_numbered)
-                tqdm.write(f"[INFO] Phase-1 checkpoint saved at iter {it + 1} → {_numbered}")
-
-            tqdm.write(
-                f"[INFO] Phase-1 iter {it + 1}/{phase1_iters}: "
-                f"collected={accepted}/{target_this} (attempted={attempted}); "
-                f"buffer_rows={int(s_mat.shape[0])}; ε={eps_curr:.4f}"
-            )
-            outer_pbar.set_postfix(eps=f"{eps_curr:.3f}", buf=int(s_mat.shape[0]))
-
-            # Anneal ε for next iteration.
-            eps_curr = _anneal_epsilon(eps_curr, eps_min, eps_decay)
-
-            if max_attempts is not None and attempted_total >= max_attempts:
-                break
 
         outer_pbar.close()
-
         torch.save(qnet.state_dict(), os.path.join(args.out, "qnet.pt"))
+        print(f"[INFO] qnet saved to {os.path.join(args.out, 'qnet.pt')}", flush=True)
 
-    # Write DQN training log CSV (append if resuming from a mid-training checkpoint).
+    # Write training log
     _log_path = os.path.join(args.out, "training_log.csv")
     _log_cols = [
         "phase", "iteration", "repeat", "update", "episode", "batch_eps", "epoch",
@@ -2094,80 +2046,61 @@ def main() -> None:
         "loss_name", "train_loss", "val_loss", "mse_loss",
         "epsilon", "buffer_rows", "sample_size",
     ]
-    _log_mode = "a" if _dqn_mid_checkpoint is not None else "w"
-    with open(_log_path, _log_mode, newline="") as _f:
+    with open(_log_path, "w", newline="") as _f:
         _w = csv.DictWriter(_f, fieldnames=_log_cols, extrasaction="ignore")
-        if _log_mode == "w":
-            _w.writeheader()
+        _w.writeheader()
         for _row in all_metrics:
             _w.writerow({c: _row.get(c, "") for c in _log_cols})
-    print(f"[INFO] Training log {'appended to' if _log_mode == 'a' else 'written to'} {_log_path}", flush=True)
+    print(f"[INFO] Training log written to {_log_path}", flush=True)
 
     if not args.skip_generation:
-        # 4) Generate candidates
+        # Generate candidates — pure greedy (ε=0)
         qnet.eval()
-
-        rows = []
+        rows: List[dict] = []
         target_gen = int(args.num_gen_eps)
         max_gen_attempts = int(args.max_gen_attempts) if args.max_gen_attempts is not None else None
-
         accepted = 0
         attempted = 0
         dup_rejected = 0
+        seen_comp_keys: set = set()
 
-        seen_comp_keys: set[tuple] = set()
+        np.random.seed(_gen_seed)
+        random.seed(_gen_seed)
 
-        pbar = tqdm(
-            total=target_gen,
-            desc="Generate (accepted)",
-        )
-
+        pbar = tqdm(total=target_gen, desc="Generate (accepted)")
         while accepted < target_gen and (max_gen_attempts is None or attempted < max_gen_attempts):
             attempted += 1
             env.initialize()
 
             for _t in range(env.max_steps):
-                allowed = env.allowed_actions()
-                s_mat = env.state_featurizer(env.state)
-                s_mat = scaler.transform(s_mat.reshape(1, -1))[0]
-
-                step_onehot = np.zeros(env.max_steps, dtype=float)
-                if env.counter < env.max_steps:
-                    step_onehot[env.counter] = 1.0
-
-                # Final generation policy:
-                # - If gen_epsilon > 0: epsilon-greedy (random with prob epsilon, otherwise greedy-best Q)
-                # - Else: existing top-k stochastic selection controlled by --stochastic-top-frac
-                if float(args.gen_epsilon) > 0.0 and float(np.random.rand()) < float(args.gen_epsilon):
-                    a = random.choice(allowed)
-                else:
-                    a = choose_action(
-                        model=qnet,
-                        device=device,
-                        s_material=s_mat,
-                        s_step=step_onehot,
-                        allowed_actions=allowed,
-                        stochastic_top_frac=(0.0 if float(args.gen_epsilon) > 0.0 else args.stochastic_top_frac),
-                    )
-                env.step(a)
+                _allowed_g = env.allowed_actions()
+                _s_mat_raw_g = env.state_featurizer(env.state)
+                _s_mat_sc_g = scaler.transform(_s_mat_raw_g.reshape(1, -1))[0]
+                _s_step_oh_g = np.zeros(env.max_steps, dtype=float)
+                _s_step_oh_g[env.counter] = 1.0
+                _a_g = _choose_action_dqn(
+                    qnet, _s_mat_sc_g, _s_step_oh_g, _allowed_g, elem_feats_scaled, fraction_set, device
+                )
+                env.step(_a_g)
 
             comp = env.terminal_cation_fractions()
-            comp_key = tuple(sorted((str(k), int(round(float(v) * 20))) for k, v in comp.items() if int(round(float(v) * 20)) > 0))
+            comp_key = tuple(sorted(
+                (str(k), int(round(float(v) * 20)))
+                for k, v in comp.items()
+                if int(round(float(v) * 20)) > 0
+            ))
             ok, label = check_primary_phase(comp)
 
-            # Avoid duplicate compositions in generated.csv. Without this, a greedy policy
-            # will often regenerate the same terminal composition many times.
             if comp_key in seen_comp_keys:
                 dup_rejected += 1
                 if dup_rejected <= 20 or dup_rejected % 500 == 0:
                     tqdm.write(
-                        f"[REJECT] duplicate generated: attempt={attempted} dup_rejected={dup_rejected} comp={comp}"
+                        f"[REJECT] duplicate generated: attempt={attempted} dup_rejected={dup_rejected}"
                     )
                 continue
             seen_comp_keys.add(comp_key)
 
             reward = float(env.path[-1].reward) if env.path else 0.0
-
             key = comp_key
             if key in dp_cache:
                 entry = dp_cache[key]
@@ -2177,62 +2110,42 @@ def main() -> None:
                 pred = dp_predictor.predict_overpotential(comp)
                 mean, std = float(pred[0]), float(pred[1])
                 dp_cache[key] = {"mean": mean, "std": std}
-            dp_mean = mean
-            dp_std = std
-            dp_mean_minus_std = mean - std
 
-            row = {
+            rows.append({
                 "formula": env.terminal_formula,
                 "reward": reward,
-                "dp_mean": dp_mean,
-                "dp_std": dp_std,
-                "dp_mean_minus_std": dp_mean_minus_std,
+                "dp_mean": mean,
+                "dp_std": std,
+                "dp_mean_minus_std": mean - std,
                 "primary_ok": bool(ok),
                 "primary_label": label or "",
-            }
-
-            rows.append(row)
+            })
             accepted += 1
-
             pbar.update(1)
-            if attempted % 500 == 0:
-                rate = (accepted / attempted) if attempted else 0.0
-                pbar.set_postfix(attempts=attempted, rate=f"{rate:.3f}")
+            rate = (accepted / attempted) if attempted else 0.0
+            pbar.set_postfix(attempts=attempted, rate=f"{rate:.3f}", dups=dup_rejected)
 
         pbar.close()
-
         rate = (accepted / attempted) if attempted else 0.0
         print(
-            f"[INFO] Generated candidates: accepted {accepted}/{target_gen} after {attempted} attempts (rate={rate:.4f}).",
+            f"[INFO] Generated: accepted {accepted}/{target_gen} after {attempted} attempts "
+            f"(rate={rate:.4f}, dup_rejected={dup_rejected}).",
             flush=True,
         )
-
         if max_gen_attempts is not None and accepted < target_gen:
-            print(f"[WARN] Only accepted {accepted}/{target_gen} generated candidates after {attempted} attempts.")
+            print(f"[WARN] Only {accepted}/{target_gen} candidates generated after {attempted} attempts.")
 
-        # Sort candidates best first.
         def _sort_key(r: dict) -> float:
-            v = r.get("dp_mean_minus_std", "")
             try:
-                return float(v)
+                return float(r.get("dp_mean_minus_std", "inf"))
             except Exception:
                 return float("inf")
-
         rows.sort(key=_sort_key)
 
         out_csv = os.path.join(args.out, "generated.csv")
-        keys = [
-            "formula",
-            "reward",
-            "dp_mean",
-            "dp_std",
-            "dp_mean_minus_std",
-            "primary_ok",
-            "primary_label",
-        ]
-
+        _csv_keys = ["formula", "reward", "dp_mean", "dp_std", "dp_mean_minus_std", "primary_ok", "primary_label"]
         with open(out_csv, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=keys)
+            w = csv.DictWriter(f, fieldnames=_csv_keys)
             w.writeheader()
             for r in rows:
                 w.writerow(r)

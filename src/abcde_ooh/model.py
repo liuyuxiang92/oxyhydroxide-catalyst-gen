@@ -5,7 +5,7 @@ from torch import nn
 
 
 class QRegressor(nn.Module):
-    """Simple MLP regressor for Q(s,a) used in offline DQN-style training."""
+    """Simple MLP regressor for Q(s,a) used in classical DQN training."""
 
     def __init__(
         self,
@@ -14,7 +14,7 @@ class QRegressor(nn.Module):
         step_dim: int,
         elem_dim: int,
         frac_dim: int,
-        hidden_dim: int = 128,
+        hidden_dim: int = 256,
     ) -> None:
         super().__init__()
         in_dim = int(state_dim + step_dim + elem_dim + frac_dim)
