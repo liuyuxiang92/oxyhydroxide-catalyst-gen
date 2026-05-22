@@ -1052,13 +1052,6 @@ _DEFAULT_DP_MODELS = [
 
 
 def main() -> None:
-    # Create --out early so shell redirections (e.g. > <out>/run.log 2>&1) work
-    # even when the directory doesn't exist yet — before argparse runs.
-    for _i, _arg in enumerate(sys.argv[:-1]):
-        if _arg == "--out":
-            os.makedirs(sys.argv[_i + 1], exist_ok=True)
-            break
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
     parser.add_argument(
@@ -1912,18 +1905,16 @@ def main() -> None:
         buffer_size = int(args.buffer_size)
         buffer: collections.deque = collections.deque(maxlen=buffer_size)
 
-        print(f"[INFO] DQN warmup: {warmup_eps} random episodes...", flush=True)
+        # Warmup uses real DeepMD rewards so the buffer is correctly pre-filled.
+        # This matches standard DQN practice and costs the same total DeepMD calls
+        # as clearing the buffer would (early training with ε=1 would re-pay the cost).
+        print(f"[INFO] DQN warmup: {warmup_eps} random episodes with real rewards...", flush=True)
         pbar = tqdm(total=warmup_eps, desc="DQN warmup")
-        _orig_reward_fn = env.reward_fn
-        env.reward_fn = lambda _f: 0.0
-        try:
-            for _ in range(warmup_eps):
-                _rollout_random_episode(env)
-                add_episode_to_buffer(env.path, buffer, elem_feats_scaled, fraction_set)
-                pbar.update(1)
-        finally:
-            env.reward_fn = _orig_reward_fn
-            pbar.close()
+        for _ in range(warmup_eps):
+            _rollout_random_episode(env)
+            add_episode_to_buffer(env.path, buffer, elem_feats_scaled, fraction_set)
+            pbar.update(1)
+        pbar.close()
 
         _warmup_s_mat = np.asarray([row["s_mat_raw"] for row in buffer], dtype=float)
         scaler = StandardScaler()
