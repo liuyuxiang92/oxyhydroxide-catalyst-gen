@@ -408,9 +408,17 @@ def _choose_action_dqn(
     elem_feats_scaled: np.ndarray,
     fraction_set: List[str],
     device: torch.device,
+    *,
+    gen_epsilon: float = 0.0,
+    gen_top_frac: float = 0.0,
+    gen_temperature: float = 0.0,
 ) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
-    """Return the greedy-best action (argmax Q) over all allowed actions."""
+    """Return action via Q-network. Priority: epsilon-greedy > Boltzmann > top-k > greedy."""
     n = len(allowed)
+
+    if gen_epsilon > 0.0 and np.random.random() < gen_epsilon:
+        return allowed[int(np.random.randint(n))]
+
     a_elem_b = np.asarray(
         [elem_feats_scaled[int(np.argmax(a[0]))] for a in allowed], dtype=float
     )
@@ -427,6 +435,18 @@ def _choose_action_dqn(
             torch.tensor(a_elem_b, dtype=torch.float32, device=device),
             torch.tensor(a_comp_b, dtype=torch.float32, device=device),
         ).reshape(-1)
+
+    if gen_temperature > 0.0:
+        q_np = q.cpu().numpy().astype(float) / gen_temperature
+        q_np -= q_np.max()
+        probs = np.exp(q_np)
+        probs /= probs.sum()
+        return allowed[int(np.random.choice(n, p=probs))]
+
+    if gen_top_frac > 0.0:
+        k = max(1, int(round(gen_top_frac * n)))
+        topk = torch.argsort(q, descending=True).cpu().tolist()[:k]
+        return allowed[int(np.random.choice(topk))]
 
     return allowed[int(torch.argmax(q).item())]
 
@@ -529,7 +549,7 @@ def _rollout_policy_episode(
 
         # Online collection policy:
         # - If online_epsilon > 0: epsilon-greedy (random with prob epsilon, otherwise greedy-best Q)
-        # - Else: use the existing top-k stochastic selection controlled by --stochastic-top-frac
+        # - Else: greedy-best Q (classic DQN online collection)
         if online_epsilon > 0.0 and float(np.random.rand()) < float(online_epsilon):
             a = random.choice(allowed)
         else:
@@ -577,8 +597,9 @@ def _rollout_pg_episode(
     env: ABCDEOOHEnv,
     policy: torch.nn.Module,
     scaler: StandardScaler,
+    elem_feats_scaled: np.ndarray,
+    fraction_set,
     device: torch.device,
-    pg_epsilon: float,
 ) -> None:
     """Roll out one episode using the policy network (softmax sampling)."""
     env.initialize()
@@ -591,24 +612,25 @@ def _rollout_pg_episode(
         if env.counter < env.max_steps:
             step_onehot[env.counter] = 1.0
 
-        if pg_epsilon > 0.0 and float(np.random.rand()) < pg_epsilon:
-            a = random.choice(allowed)
-        else:
-            n = len(allowed)
-            a_elem_batch = np.asarray([a[0] for a in allowed], dtype=float)
-            a_comp_batch = np.asarray([a[1] for a in allowed], dtype=float)
-            s_mat_batch = np.repeat(s_mat_scaled.reshape(1, -1), n, axis=0)
-            s_step_batch = np.repeat(step_onehot.reshape(1, -1), n, axis=0)
-            with torch.no_grad():
-                logits = policy(
-                    torch.tensor(s_mat_batch, dtype=torch.float32, device=device),
-                    torch.tensor(s_step_batch, dtype=torch.float32, device=device),
-                    torch.tensor(a_elem_batch, dtype=torch.float32, device=device),
-                    torch.tensor(a_comp_batch, dtype=torch.float32, device=device),
-                ).reshape(-1)
-            probs = torch.softmax(logits, dim=0).cpu().numpy()
-            idx = int(np.random.choice(n, p=probs))
-            a = allowed[idx]
+        n = len(allowed)
+        a_elem_batch = np.asarray(
+            [elem_feats_scaled[int(np.argmax(a[0]))] for a in allowed], dtype=float
+        )
+        a_comp_batch = np.asarray(
+            [[float(fraction_set[int(np.argmax(a[1]))])] for a in allowed], dtype=float
+        )
+        s_mat_batch = np.repeat(s_mat_scaled.reshape(1, -1), n, axis=0)
+        s_step_batch = np.repeat(step_onehot.reshape(1, -1), n, axis=0)
+        with torch.no_grad():
+            logits = policy(
+                torch.tensor(s_mat_batch, dtype=torch.float32, device=device),
+                torch.tensor(s_step_batch, dtype=torch.float32, device=device),
+                torch.tensor(a_elem_batch, dtype=torch.float32, device=device),
+                torch.tensor(a_comp_batch, dtype=torch.float32, device=device),
+            ).reshape(-1)
+        probs = torch.softmax(logits, dim=0).cpu().numpy()
+        idx = int(np.random.choice(n, p=probs))
+        a = allowed[idx]
 
         env.step(a)
 
@@ -621,6 +643,8 @@ def _episode_pg_terms(
     policy: torch.nn.Module,
     value_net,
     scaler: StandardScaler,
+    elem_feats_scaled: np.ndarray,
+    fraction_set,
     device: torch.device,
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
     """Build per-step actor/entropy/critic loss tensors for one episode.
@@ -642,8 +666,12 @@ def _episode_pg_terms(
         s_step = np.asarray(step.state_step_onehot, dtype=float)
 
         n = len(allowed)
-        a_elem_batch = np.asarray([a[0] for a in allowed], dtype=float)
-        a_comp_batch = np.asarray([a[1] for a in allowed], dtype=float)
+        a_elem_batch = np.asarray(
+            [elem_feats_scaled[int(np.argmax(a[0]))] for a in allowed], dtype=float
+        )
+        a_comp_batch = np.asarray(
+            [[float(fraction_set[int(np.argmax(a[1]))])] for a in allowed], dtype=float
+        )
         s_mat_batch = np.repeat(s_mat.reshape(1, -1), n, axis=0)
         s_step_batch = np.repeat(s_step.reshape(1, -1), n, axis=0)
 
@@ -689,15 +717,15 @@ def train_pg(
     value_net,
     env: ABCDEOOHEnv,
     scaler: StandardScaler,
+    elem_feats_scaled: np.ndarray,
+    fraction_set,
     device: torch.device,
     num_iters: int,
-    repeats_per_iter: int,
     batch_eps: int,
     gamma: float,
     lr_actor: float,
     lr_critic: float,
     entropy_coef: float,
-    pg_epsilon: float,
     rl_method: str,
     repeat_penalty_coef: float = 0.0,
     repeat_penalty_shape: str = "log",
@@ -705,14 +733,13 @@ def train_pg(
     checkpoint_cfg: Optional[dict] = None,
     checkpoint_iter_freq: int = 0,
 ) -> List[dict]:
-    """Paper-aligned outer/inner/batch PG training loop.
+    """Batched PG training loop.
 
     Structure:
         for it in range(num_iters):
-            for r in range(repeats_per_iter):
-                collect `batch_eps` episodes
-                accumulate per-step actor/entropy/critic terms across all of them
-                one optimizer step over the entire batch
+            collect `batch_eps` episodes
+            accumulate per-step actor/entropy/critic terms across all of them
+            one optimizer step over the entire batch
             (optionally checkpoint)
 
     Repeat-penalty shaping (`repeat_penalty_coef > 0`) and entropy bonus carry
@@ -750,160 +777,161 @@ def train_pg(
     attempted = 0
     update_idx = 0  # outer*inner counter for diagnostics
 
-    total_updates = max(1, int(num_iters)) * max(1, int(repeats_per_iter))
+    total_updates = max(1, int(num_iters))
     print(
-        f"[INFO] PG: {num_iters} outer iters × {repeats_per_iter} inner repeats × "
+        f"[INFO] PG: {num_iters} iters × "
         f"{batch_eps} eps/update = {total_updates} updates, {total_updates * batch_eps} total episodes."
     )
 
-    outer_pbar = tqdm(range(int(num_iters)), desc=f"{rl_method.upper()} outer iters")
+    outer_pbar = tqdm(range(int(num_iters)), desc=f"{rl_method.upper()} iters")
     for it in outer_pbar:
-        for r in range(int(repeats_per_iter)):
-            # Collect a batch of `batch_eps` episodes, all rolled out under the *current* policy.
-            batch_paths: List[list] = []
-            batch_returns: List[List[float]] = []
-            batch_returns_shaped: List[List[float]] = []
-            batch_terminal_keys: List[tuple] = []
-            batch_repeat_penalties: List[float] = []
-            batch_visits_before: List[int] = []
+        # Collect a batch of `batch_eps` episodes, all rolled out under the *current* policy.
+        batch_paths: List[list] = []
+        batch_returns: List[List[float]] = []
+        batch_returns_shaped: List[List[float]] = []
+        batch_terminal_keys: List[tuple] = []
+        batch_repeat_penalties: List[float] = []
+        batch_visits_before: List[int] = []
 
-            collected = 0
-            while collected < int(batch_eps):
-                attempted += 1
-                if max_train_attempts is not None and attempted > max_train_attempts:
-                    break
-                _rollout_pg_episode(
-                    env=env,
-                    policy=policy,
-                    scaler=scaler,
-                    device=device,
-                    pg_epsilon=pg_epsilon,
-                )
-                path = env.path
-                if not path:
-                    continue
+        collected = 0
+        while collected < int(batch_eps):
+            attempted += 1
+            if max_train_attempts is not None and attempted > max_train_attempts:
+                break
+            _rollout_pg_episode(
+                env=env,
+                policy=policy,
+                scaler=scaler,
+                elem_feats_scaled=elem_feats_scaled,
+                fraction_set=fraction_set,
+                device=device,
+            )
+            path = env.path
+            if not path:
+                continue
 
-                # MC returns backwards
-                G = 0.0
-                returns: List[float] = []
-                for step in reversed(path):
-                    G = float(step.reward) + gamma * G
-                    returns.append(G)
-                returns.reverse()
+            # MC returns backwards
+            G = 0.0
+            returns: List[float] = []
+            for step in reversed(path):
+                G = float(step.reward) + gamma * G
+                returns.append(G)
+            returns.reverse()
 
-                terminal_key = _comp_key(env.terminal_cation_fractions())
-                n_visits_before = visit_counts[terminal_key]
-                if repeat_penalty_coef > 0.0:
-                    if repeat_penalty_shape == "log":
-                        repeat_penalty = repeat_penalty_coef * math.log1p(n_visits_before)
-                    elif repeat_penalty_shape == "sqrt":
-                        repeat_penalty = repeat_penalty_coef * math.sqrt(n_visits_before)
-                    else:
-                        repeat_penalty = repeat_penalty_coef * float(n_visits_before)
+            terminal_key = _comp_key(env.terminal_cation_fractions())
+            n_visits_before = visit_counts[terminal_key]
+            if repeat_penalty_coef > 0.0:
+                if repeat_penalty_shape == "log":
+                    repeat_penalty = repeat_penalty_coef * math.log1p(n_visits_before)
+                elif repeat_penalty_shape == "sqrt":
+                    repeat_penalty = repeat_penalty_coef * math.sqrt(n_visits_before)
                 else:
-                    repeat_penalty = 0.0
-                visit_counts[terminal_key] += 1
-                returns_shaped = [G_t - repeat_penalty for G_t in returns]
+                    repeat_penalty = repeat_penalty_coef * float(n_visits_before)
+            else:
+                repeat_penalty = 0.0
+            visit_counts[terminal_key] += 1
+            returns_shaped = [G_t - repeat_penalty for G_t in returns]
 
-                batch_paths.append(path)
-                batch_returns.append(returns)
-                batch_returns_shaped.append(returns_shaped)
-                batch_terminal_keys.append(terminal_key)
-                batch_repeat_penalties.append(repeat_penalty)
-                batch_visits_before.append(n_visits_before)
-                collected += 1
-                accepted += 1
+            batch_paths.append(path)
+            batch_returns.append(returns)
+            batch_returns_shaped.append(returns_shaped)
+            batch_terminal_keys.append(terminal_key)
+            batch_repeat_penalties.append(repeat_penalty)
+            batch_visits_before.append(n_visits_before)
+            collected += 1
+            accepted += 1
 
-            if not batch_paths:
-                continue
+        if not batch_paths:
+            continue
 
-            # Build losses for the entire batch in one autograd graph.
-            all_actor: List[torch.Tensor] = []
-            all_entropy: List[torch.Tensor] = []
-            all_critic: List[torch.Tensor] = []
-            for path, returns, returns_shaped in zip(batch_paths, batch_returns, batch_returns_shaped):
-                a_terms, e_terms, c_terms = _episode_pg_terms(
-                    path=path,
-                    returns=returns,
-                    returns_shaped=returns_shaped,
-                    policy=policy,
-                    value_net=value_net,
-                    scaler=scaler,
-                    device=device,
-                )
-                all_actor.extend(a_terms)
-                all_entropy.extend(e_terms)
-                all_critic.extend(c_terms)
-
-            if not all_actor:
-                continue
-
-            actor_loss = torch.stack(all_actor).mean()
-            entropy_bonus = torch.stack(all_entropy).mean()
-            total_actor_loss = actor_loss - entropy_coef * entropy_bonus
-
-            opt_actor.zero_grad(set_to_none=True)
-            total_actor_loss.backward()
-            opt_actor.step()
-
-            critic_loss_val: float | str = ""
-            if opt_critic is not None and all_critic:
-                critic_loss = torch.stack(all_critic).mean()
-                opt_critic.zero_grad(set_to_none=True)
-                critic_loss.backward()
-                opt_critic.step()
-                critic_loss_val = float(critic_loss.item())
-
-            update_idx += 1
-            ep_actor_loss = float(actor_loss.item())
-            ep_entropy = float(entropy_bonus.item())
-            mean_return_raw = float(np.mean([rs[0] for rs in batch_returns])) if batch_returns else 0.0
-            mean_return_shaped = (
-                float(np.mean([rs[0] for rs in batch_returns_shaped])) if batch_returns_shaped else 0.0
+        # Build losses for the entire batch in one autograd graph.
+        all_actor: List[torch.Tensor] = []
+        all_entropy: List[torch.Tensor] = []
+        all_critic: List[torch.Tensor] = []
+        for path, returns, returns_shaped in zip(batch_paths, batch_returns, batch_returns_shaped):
+            a_terms, e_terms, c_terms = _episode_pg_terms(
+                path=path,
+                returns=returns,
+                returns_shaped=returns_shaped,
+                policy=policy,
+                value_net=value_net,
+                scaler=scaler,
+                elem_feats_scaled=elem_feats_scaled,
+                fraction_set=fraction_set,
+                device=device,
             )
+            all_actor.extend(a_terms)
+            all_entropy.extend(e_terms)
+            all_critic.extend(c_terms)
 
-            metrics.append({
-                "phase": "pg_train",
+        if not all_actor:
+            continue
+
+        actor_loss = torch.stack(all_actor).mean()
+        entropy_bonus = torch.stack(all_entropy).mean()
+        total_actor_loss = actor_loss - entropy_coef * entropy_bonus
+
+        opt_actor.zero_grad(set_to_none=True)
+        total_actor_loss.backward()
+        opt_actor.step()
+
+        critic_loss_val: float | str = ""
+        if opt_critic is not None and all_critic:
+            critic_loss = torch.stack(all_critic).mean()
+            opt_critic.zero_grad(set_to_none=True)
+            critic_loss.backward()
+            opt_critic.step()
+            critic_loss_val = float(critic_loss.item())
+
+        update_idx += 1
+        ep_actor_loss = float(actor_loss.item())
+        ep_entropy = float(entropy_bonus.item())
+        mean_return_raw = float(np.mean([rs[0] for rs in batch_returns])) if batch_returns else 0.0
+        mean_return_shaped = (
+            float(np.mean([rs[0] for rs in batch_returns_shaped])) if batch_returns_shaped else 0.0
+        )
+
+        metrics.append({
+            "phase": "pg_train",
+            "iteration": it + 1,
+            "update": update_idx,
+            "episode": accepted,
+            "batch_eps": int(batch_eps),
+            "return": mean_return_raw,
+            "return_raw": mean_return_raw,
+            "return_shaped": mean_return_shaped,
+            "repeat_penalty": float(np.mean(batch_repeat_penalties)) if batch_repeat_penalties else 0.0,
+            "visit_count_before": int(np.max(batch_visits_before)) if batch_visits_before else 0,
+            "unique_comps_seen": len(visit_counts),
+            "max_visit_count": max(visit_counts.values()) if visit_counts else 0,
+            "terminal_comp_key": ";".join(f"{el}:{u}" for el, u in batch_terminal_keys[-1]) if batch_terminal_keys else "",
+            "actor_loss": ep_actor_loss,
+            "entropy": ep_entropy,
+            "critic_loss": critic_loss_val,
+        })
+
+        outer_pbar.set_postfix(
+            ret=f"{mean_return_raw:.3f}",
+            actor=f"{ep_actor_loss:.3f}",
+            ent=f"{ep_entropy:.3f}",
+            upd=update_idx,
+        )
+
+        # Legacy per-episode checkpoint (--save-checkpoint-freq) honoured here too.
+        if ckpt_freq_eps > 0 and ckpt_path and accepted > 0 and accepted % ckpt_freq_eps == 0:
+            _numbered = ckpt_path.replace(".pt", f"-{accepted}.pt")
+            _save_checkpoint(ckpt_path, {
+                "type": "pg",
+                "rl_method": rl_method,
+                "episodes_completed": accepted,
                 "iteration": it + 1,
-                "repeat": r + 1,
-                "update": update_idx,
-                "episode": accepted,
-                "batch_eps": int(batch_eps),
-                "return": mean_return_raw,
-                "return_raw": mean_return_raw,
-                "return_shaped": mean_return_shaped,
-                "repeat_penalty": float(np.mean(batch_repeat_penalties)) if batch_repeat_penalties else 0.0,
-                "visit_count_before": int(np.max(batch_visits_before)) if batch_visits_before else 0,
-                "unique_comps_seen": len(visit_counts),
-                "max_visit_count": max(visit_counts.values()) if visit_counts else 0,
-                "terminal_comp_key": ";".join(f"{el}:{u}" for el, u in batch_terminal_keys[-1]) if batch_terminal_keys else "",
-                "actor_loss": ep_actor_loss,
-                "entropy": ep_entropy,
-                "critic_loss": critic_loss_val,
-            })
-
-            outer_pbar.set_postfix(
-                ret=f"{mean_return_raw:.3f}",
-                actor=f"{ep_actor_loss:.3f}",
-                ent=f"{ep_entropy:.3f}",
-                upd=update_idx,
-            )
-
-            # Legacy per-episode checkpoint (--save-checkpoint-freq) honoured here too.
-            if ckpt_freq_eps > 0 and ckpt_path and accepted > 0 and accepted % ckpt_freq_eps == 0:
-                _numbered = ckpt_path.replace(".pt", f"-{accepted}.pt")
-                _save_checkpoint(ckpt_path, {
-                    "type": "pg",
-                    "rl_method": rl_method,
-                    "episodes_completed": accepted,
-                    "iteration": it + 1,
-                    "policy_state": policy.state_dict(),
-                    "value_net_state": value_net.state_dict() if value_net is not None else None,
-                    "opt_actor_state": opt_actor.state_dict(),
-                    "opt_critic_state": opt_critic.state_dict() if opt_critic is not None else None,
-                    "visit_counts": dict(visit_counts),
-                }, numbered_path=_numbered)
-                tqdm.write(f"[INFO] PG checkpoint saved at episode {accepted} → {_numbered}")
+                "policy_state": policy.state_dict(),
+                "value_net_state": value_net.state_dict() if value_net is not None else None,
+                "opt_actor_state": opt_actor.state_dict(),
+                "opt_critic_state": opt_critic.state_dict() if opt_critic is not None else None,
+                "visit_counts": dict(visit_counts),
+            }, numbered_path=_numbered)
+            tqdm.write(f"[INFO] PG checkpoint saved at episode {accepted} → {_numbered}")
 
         # Outer-iter checkpoint (--pg-checkpoint-iter-freq).
         if checkpoint_iter_freq > 0 and ckpt_path and (it + 1) % checkpoint_iter_freq == 0:
@@ -935,10 +963,13 @@ def generate_pg(
     policy: torch.nn.Module,
     env: ABCDEOOHEnv,
     scaler: StandardScaler,
+    elem_feats_scaled: np.ndarray,
+    fraction_set,
     device: torch.device,
     n_eps: int,
-    pg_gen_stochastic: bool,
-    temperature: float = 1.0,
+    gen_epsilon: float = 0.0,
+    gen_top_frac: float = 0.0,
+    gen_temperature: float = 0.0,
     dp_predictor,
     dp_cache: dict,
     max_gen_attempts,
@@ -966,8 +997,12 @@ def generate_pg(
                 step_onehot[env.counter] = 1.0
 
             n = len(allowed)
-            a_elem_batch = np.asarray([a[0] for a in allowed], dtype=float)
-            a_comp_batch = np.asarray([a[1] for a in allowed], dtype=float)
+            a_elem_batch = np.asarray(
+                [elem_feats_scaled[int(np.argmax(a[0]))] for a in allowed], dtype=float
+            )
+            a_comp_batch = np.asarray(
+                [[float(fraction_set[int(np.argmax(a[1]))])] for a in allowed], dtype=float
+            )
             s_mat_batch = np.repeat(s_mat_scaled.reshape(1, -1), n, axis=0)
             s_step_batch = np.repeat(step_onehot.reshape(1, -1), n, axis=0)
             with torch.no_grad():
@@ -978,9 +1013,18 @@ def generate_pg(
                     torch.tensor(a_comp_batch, dtype=torch.float32, device=device),
                 ).reshape(-1)
 
-            if pg_gen_stochastic:
-                probs = torch.softmax(logits / temperature, dim=0).cpu().numpy()
+            if gen_epsilon > 0.0 and np.random.random() < gen_epsilon:
+                idx = int(np.random.randint(n))
+            elif gen_temperature > 0.0:
+                lg = logits.cpu().numpy().astype(float) / gen_temperature
+                lg -= lg.max()
+                probs = np.exp(lg)
+                probs /= probs.sum()
                 idx = int(np.random.choice(n, p=probs))
+            elif gen_top_frac > 0.0:
+                k = max(1, int(round(gen_top_frac * n)))
+                topk = torch.argsort(logits, descending=True).cpu().tolist()[:k]
+                idx = int(np.random.choice(topk))
             else:
                 idx = int(torch.argmax(logits).item())
 
@@ -1083,7 +1127,7 @@ def main() -> None:
         default=None,
         help=(
             "Seed applied just before the generation phase. Makes stochastic generation "
-            "(--stochastic-top-frac for DQN or --pg-gen-stochastic for PG) reproducible "
+            "(--gen-temperature, --gen-top-frac, --gen-epsilon) reproducible "
             "independently of training. Falls back to --dp-seed if not provided."
         ),
     )
@@ -1166,27 +1210,34 @@ def main() -> None:
 
     parser.add_argument("--num-gen-eps", type=int, default=500)
     parser.add_argument("--max-gen-attempts", type=int, default=None)
-    parser.add_argument("--stochastic-top-frac", type=float, default=0.0)
-
-    parser.add_argument(
-        "--online-epsilon",
-        type=float,
-        default=0.0,
-        help=(
-            "When --buffer-mode iterative: use epsilon-greedy policy for online episode collection. "
-            "With prob epsilon choose a random allowed action, otherwise choose the greedy-best Q action. "
-            "If >0, this overrides --stochastic-top-frac during online collection."
-        ),
-    )
-
     parser.add_argument(
         "--gen-epsilon",
         type=float,
         default=0.0,
         help=(
-            "During final candidate generation: use epsilon-greedy policy. "
-            "With prob epsilon choose a random allowed action, otherwise choose the greedy-best Q action. "
-            "If >0, this overrides --stochastic-top-frac during generation."
+            "Candidate generation: epsilon-greedy policy for all RL methods. "
+            "With prob ε choose a random allowed action, otherwise use the best action. "
+            "Takes priority over --gen-temperature and --gen-top-frac."
+        ),
+    )
+    parser.add_argument(
+        "--gen-temperature",
+        type=float,
+        default=0.0,
+        help=(
+            "Candidate generation: Boltzmann sampling temperature for all RL methods. "
+            "Converts Q-values/logits to probabilities via softmax(x / τ). "
+            "τ=0 disables (pure greedy). Ignored if --gen-epsilon > 0. Typical range: 0.5–3.0."
+        ),
+    )
+    parser.add_argument(
+        "--gen-top-frac",
+        type=float,
+        default=0.0,
+        help=(
+            "Candidate generation: uniformly sample from top-k%% of actions by Q/logit. "
+            "0 = disabled. Ignored if --gen-epsilon or --gen-temperature is set. "
+            "Example: 0.3 = top 30%%."
         ),
     )
 
@@ -1444,12 +1495,6 @@ def main() -> None:
         help="Entropy regularization coefficient for actor loss (PG methods).",
     )
     parser.add_argument(
-        "--pg-epsilon",
-        type=float,
-        default=0.0,
-        help="Epsilon-greedy exploration probability during PG training rollouts.",
-    )
-    parser.add_argument(
         "--repeat-penalty-coef",
         type=float,
         default=0.0,
@@ -1474,33 +1519,10 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--pg-gen-stochastic",
-        action="store_true",
-        help="If set, PG generation samples from π(a|s); otherwise uses greedy argmax.",
-    )
-    parser.add_argument(
-        "--pg-gen-temperature",
-        type=float,
-        default=1.0,
-        help=(
-            "Temperature for softmax sampling during PG generation (only with --pg-gen-stochastic). "
-            "T>1 flattens the distribution for more diversity; T<1 sharpens it. "
-            "Use T=2.0–5.0 if the policy has collapsed to near-deterministic."
-        ),
-    )
-
-    # Paper-aligned PG outer/inner/batch loop. Total updates = pg_num_iters × pg_repeats_per_iter.
-    parser.add_argument(
         "--pg-num-iters",
         type=int,
         default=500,
-        help="Outer PG iterations. Each iteration runs --pg-repeats-per-iter batched updates.",
-    )
-    parser.add_argument(
-        "--pg-repeats-per-iter",
-        type=int,
-        default=1,
-        help="Number of batched gradient updates inside each outer PG iteration.",
+        help="PG training iterations. Each iteration collects --pg-batch-eps episodes and does one gradient step.",
     )
     parser.add_argument(
         "--pg-batch-eps",
@@ -1626,12 +1648,16 @@ def main() -> None:
                 raise SystemExit(f"--only-generate requires {scaler_path} (use --load-scaler to override)")
             scaler = joblib.load(scaler_path)
 
+            elem_feats_scaled, _elem_scaler = _precompute_elem_features(env.cation_set, env.state_featurizer)
+            elem_dim = int(elem_feats_scaled.shape[1])
+            fraction_set = env.fraction_set
+
             state_dim = int(scaler.mean_.shape[0])
             policy = PolicyNet(
                 state_dim=state_dim,
                 step_dim=env.max_steps,
-                elem_dim=len(env.cation_set),
-                frac_dim=len(env.fraction_set),
+                elem_dim=elem_dim,
+                frac_dim=1,
             ).to(device)
             policy_path = args.load_policy or os.path.join(args.out, "policy.pt")
             if not os.path.exists(policy_path):
@@ -1651,10 +1677,13 @@ def main() -> None:
                 policy=policy,
                 env=env,
                 scaler=scaler,
+                elem_feats_scaled=elem_feats_scaled,
+                fraction_set=fraction_set,
                 device=device,
                 n_eps=args.num_gen_eps,
-                pg_gen_stochastic=args.pg_gen_stochastic,
-                temperature=args.pg_gen_temperature,
+                gen_epsilon=args.gen_epsilon,
+                gen_top_frac=args.gen_top_frac,
+                gen_temperature=args.gen_temperature,
                 dp_predictor=dp_predictor,
                 dp_cache=dp_cache,
                 max_gen_attempts=args.max_gen_attempts if args.max_gen_attempts is not None else 10 * args.num_gen_eps,
@@ -1693,12 +1722,16 @@ def main() -> None:
             scaler = joblib.load(scaler_path)
             print(f"[INFO] Loaded scaler from {scaler_path}", flush=True)
 
+            elem_feats_scaled, _elem_scaler = _precompute_elem_features(env.cation_set, env.state_featurizer)
+            elem_dim = int(elem_feats_scaled.shape[1])
+            fraction_set = env.fraction_set
+
             state_dim = int(scaler.mean_.shape[0])
             policy = PolicyNet(
                 state_dim=state_dim,
                 step_dim=env.max_steps,
-                elem_dim=len(env.cation_set),
-                frac_dim=len(env.fraction_set),
+                elem_dim=elem_dim,
+                frac_dim=1,
             ).to(device)
             value_net = None
             if args.rl_method == "a2c":
@@ -1752,12 +1785,16 @@ def main() -> None:
             scaler = _fit_scaler_from_warmup(env, args.pg_warmup_eps)
             joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"), compress=True)
 
+            elem_feats_scaled, _elem_scaler = _precompute_elem_features(env.cation_set, env.state_featurizer)
+            elem_dim = int(elem_feats_scaled.shape[1])
+            fraction_set = env.fraction_set
+
             state_dim = int(scaler.mean_.shape[0])
             policy = PolicyNet(
                 state_dim=state_dim,
                 step_dim=env.max_steps,
-                elem_dim=len(env.cation_set),
-                frac_dim=len(env.fraction_set),
+                elem_dim=elem_dim,
+                frac_dim=1,
             ).to(device)
             value_net = (
                 ValueNet(state_dim=state_dim, step_dim=env.max_steps).to(device)
@@ -1785,15 +1822,15 @@ def main() -> None:
             value_net=value_net,
             env=env,
             scaler=scaler,
+            elem_feats_scaled=elem_feats_scaled,
+            fraction_set=fraction_set,
             device=device,
             num_iters=args.pg_num_iters,
-            repeats_per_iter=args.pg_repeats_per_iter,
             batch_eps=args.pg_batch_eps,
             gamma=args.gamma,
             lr_actor=args.pg_lr_actor,
             lr_critic=args.pg_lr_critic,
             entropy_coef=args.entropy_coef,
-            pg_epsilon=args.pg_epsilon,
             rl_method=args.rl_method,
             repeat_penalty_coef=args.repeat_penalty_coef,
             repeat_penalty_shape=args.repeat_penalty_shape,
@@ -1836,10 +1873,13 @@ def main() -> None:
                 policy=policy,
                 env=env,
                 scaler=scaler,
+                elem_feats_scaled=elem_feats_scaled,
+                fraction_set=fraction_set,
                 device=device,
                 n_eps=args.num_gen_eps,
-                pg_gen_stochastic=args.pg_gen_stochastic,
-                temperature=args.pg_gen_temperature,
+                gen_epsilon=args.gen_epsilon,
+                gen_top_frac=args.gen_top_frac,
+                gen_temperature=args.gen_temperature,
                 dp_predictor=dp_predictor,
                 dp_cache=dp_cache,
                 max_gen_attempts=args.max_gen_attempts if args.max_gen_attempts is not None else 10 * args.num_gen_eps,
@@ -2077,7 +2117,10 @@ def main() -> None:
                 _s_step_oh_g = np.zeros(env.max_steps, dtype=float)
                 _s_step_oh_g[env.counter] = 1.0
                 _a_g = _choose_action_dqn(
-                    qnet, _s_mat_sc_g, _s_step_oh_g, _allowed_g, elem_feats_scaled, fraction_set, device
+                    qnet, _s_mat_sc_g, _s_step_oh_g, _allowed_g, elem_feats_scaled, fraction_set, device,
+                    gen_epsilon=args.gen_epsilon,
+                    gen_top_frac=args.gen_top_frac,
+                    gen_temperature=args.gen_temperature,
                 )
                 env.step(_a_g)
 
