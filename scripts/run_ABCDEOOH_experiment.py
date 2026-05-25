@@ -448,7 +448,7 @@ def _choose_action_dqn(
         topk = torch.argsort(q, descending=True).cpu().tolist()[:k]
         return allowed[int(np.random.choice(topk))]
 
-    return allowed[int(torch.argmax(q).item())]
+    raise ValueError("No generation strategy active: set --gen-temperature, --gen-top-frac, or --gen-epsilon.")
 
 
 def _compute_td_target(
@@ -1026,7 +1026,7 @@ def generate_pg(
                 topk = torch.argsort(logits, descending=True).cpu().tolist()[:k]
                 idx = int(np.random.choice(topk))
             else:
-                idx = int(torch.argmax(logits).item())
+                raise ValueError("No generation strategy active: set --gen-temperature, --gen-top-frac, or --gen-epsilon.")
 
             env.step(allowed[idx])
 
@@ -1223,11 +1223,11 @@ def main() -> None:
     parser.add_argument(
         "--gen-temperature",
         type=float,
-        default=0.0,
+        default=1.0,
         help=(
             "Candidate generation: Boltzmann sampling temperature for all RL methods. "
             "Converts Q-values/logits to probabilities via softmax(x / τ). "
-            "τ=0 disables (pure greedy). Ignored if --gen-epsilon > 0. Typical range: 0.5–3.0."
+            "Ignored if --gen-epsilon > 0. Typical range: 0.5–3.0. Default: 1.0."
         ),
     )
     parser.add_argument(
