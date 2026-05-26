@@ -1,0 +1,113 @@
+# OOH catalyst configuration
+# Usage:
+#   python scripts/run_experiment.py --config configs/ooh.yaml --method reinforce \
+#       --out runs/ooh_reinforce_seed0 \
+#       --dp-seed 321 --train-seed 123 --gen-seed 213
+
+name: ooh
+description: "5-cation oxyhydroxide (ABCDE-OOH) overpotential optimisation"
+
+# ---- Environment ----
+cation_set:
+  - Mg
+  - Ca
+  - Sc
+  - Ti
+  - Cu
+  - Sr
+  - Y
+  - Zr
+  - Hf
+  - Bi
+  - La
+  - Ce
+  - Pr
+  - Nd
+  - Sm
+  - Eu
+  - Gd
+  - Tb
+  - Dy
+  - Ho
+  - Er
+  - Tm
+  - Yb
+  - Lu
+  - Co
+  - Ni
+  - Fe
+  - Mn
+
+fraction_set:
+  - "0.05"
+  - "0.10"
+  - "0.15"
+  - "0.20"
+  - "0.25"
+  - "0.30"
+  - "0.35"
+  - "0.40"
+  - "0.45"
+  - "0.50"
+  - "0.55"
+  - "0.60"
+  - "0.65"
+  - "0.70"
+  - "0.75"
+  - "0.80"
+
+anion_formula: "O2H1"
+n_components: 5
+
+constraint_filter: null   # --target-phase any → no phase filter
+
+# ---- Predictor ----
+predictor: ooh
+base_poscar: POSCAR                # default path used by run_ABCDEOOH_experiment.py
+dp_models:
+  - 20260514_oc22_1.ckpt.pt
+  - 20260514_oc22_2.ckpt.pt
+  - 20260514_oc22_3.ckpt.pt
+  - 20260514_oc22_4.ckpt.pt
+  - 20260514_oc22_5.ckpt.pt
+objective: mean_minus_kstd
+k: 1.0
+n_random_configs: 10              # --dp-n-random-configs 10
+ads_height: 1.9
+ads_dz: 1.0
+geo_opt: false
+geo_opt_model: "./DPA-3.1-3M_1.pt"
+uncertainty: models
+
+# ---- RL hyperparameters ----
+method: reinforce
+pg_warmup_eps: 1000               # --pg-warmup-eps 1000
+pg_num_iters: 1000                # --pg-num-iters 1000
+pg_batch_eps: 21                  # --pg-batch-eps 21
+pg_lr_actor: 0.001
+pg_lr_critic: 0.001
+entropy_coef: 0.15                # --entropy-coef 0.15
+gen_temperature: 3.0              # --pg-gen-stochastic --pg-gen-temperature 3.0
+gen_top_frac: 0.0
+gen_epsilon: 0.0
+gamma: 0.9
+
+repeat_penalty_coef: 10           # --repeat-penalty-coef 10
+repeat_penalty_shape: log         # --repeat-penalty-shape log
+
+# ---- Generation ----
+num_gen_eps: 2000                 # --num-gen-eps 2000
+exploration_gen_eps: 0
+
+# ---- DQN-specific (unused for reinforce, kept for completeness) ----
+num_random_eps: 500
+dqn_epochs: 50
+dqn_lr: 0.001
+dqn_batch_size: 256
+dqn_warmup_eps: 500
+num_train_eps: 20000
+buffer_size: 50000
+grad_steps_per_ep: 5
+target_update_freq: 100
+eps_anneal_eps: 10000
+eps_min: 0.05

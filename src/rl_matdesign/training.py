@@ -589,16 +589,95 @@ def _rollout_pg_episode(
 # Policy gradient training (REINFORCE / A2C)
 # ---------------------------------------------------------------------------
 
+def _episode_pg_terms(
+    *,
+    path,
+    returns: List[float],
+    returns_shaped: List[float],
+    policy: torch.nn.Module,
+    value_net: Optional[torch.nn.Module],
+    scaler: "StandardScaler",
+    elem_feats_scaled: np.ndarray,
+    fraction_set: List[str],
+    device: "torch.device",
+) -> tuple:
+    """Build per-step actor/entropy/critic loss tensors for one episode.
+
+    Tensors carry autograd state so they can be stacked with terms from other
+    episodes in the same batch and backproped together.
+    """
+    actor_losses: List[torch.Tensor] = []
+    entropy_terms: List[torch.Tensor] = []
+    critic_losses: List[torch.Tensor] = []
+
+    for step, G_t, G_t_shaped in zip(path, returns, returns_shaped):
+        allowed = step.allowed_actions
+        if not allowed:
+            continue
+
+        s_mat_raw = np.asarray(step.state_material_features, dtype=float)
+        s_mat = scaler.transform(s_mat_raw.reshape(1, -1))[0]
+        s_step = np.asarray(step.state_step_onehot, dtype=float)
+
+        n = len(allowed)
+        a_elem_batch = np.asarray(
+            [elem_feats_scaled[int(np.argmax(a[0]))] for a in allowed], dtype=float
+        )
+        a_comp_batch = np.asarray(
+            [[float(fraction_set[int(np.argmax(a[1]))])] for a in allowed], dtype=float
+        )
+        s_mat_batch  = np.repeat(s_mat.reshape(1, -1), n, axis=0)
+        s_step_batch = np.repeat(s_step.reshape(1, -1), n, axis=0)
+
+        s_mat_t  = torch.tensor(s_mat_batch,  dtype=torch.float32, device=device)
+        s_step_t = torch.tensor(s_step_batch, dtype=torch.float32, device=device)
+        a_elem_t = torch.tensor(a_elem_batch, dtype=torch.float32, device=device)
+        a_comp_t = torch.tensor(a_comp_batch, dtype=torch.float32, device=device)
+
+        logits    = policy(s_mat_t, s_step_t, a_elem_t, a_comp_t).reshape(-1)
+        log_probs = torch.log_softmax(logits, dim=0)
+        probs     = torch.softmax(logits, dim=0)
+
+        taken_elem = np.asarray(step.action_elem_onehot)
+        taken_comp = np.asarray(step.action_comp_onehot)
+        taken_idx = None
+        for i, a in enumerate(allowed):
+            if (np.array_equal(np.asarray(a[0]), taken_elem)
+                    and np.array_equal(np.asarray(a[1]), taken_comp)):
+                taken_idx = i
+                break
+        if taken_idx is None:
+            continue
+
+        G_raw_t    = torch.tensor(G_t,        dtype=torch.float32, device=device)
+        G_shaped_t = torch.tensor(G_t_shaped, dtype=torch.float32, device=device)
+
+        if value_net is not None:
+            s_mat_single  = torch.tensor(s_mat.reshape(1, -1),  dtype=torch.float32, device=device)
+            s_step_single = torch.tensor(s_step.reshape(1, -1), dtype=torch.float32, device=device)
+            value = value_net(s_mat_single, s_step_single).reshape(-1)[0]
+            advantage = G_shaped_t - value.detach()
+            critic_losses.append((value - G_raw_t) ** 2)
+        else:
+            advantage = G_shaped_t
+
+        actor_losses.append(-log_probs[taken_idx] * advantage)
+        entropy_terms.append(-(probs * log_probs).sum())
+
+    return actor_losses, entropy_terms, critic_losses
+
+
 def train_pg(
     *,
     policy: torch.nn.Module,
     value_net: Optional[torch.nn.Module],
     env: CompositionEnv,
-    scaler: StandardScaler,
+    scaler: "StandardScaler",
     elem_feats_scaled: np.ndarray,
     fraction_set: List[str],
-    device: torch.device,
-    n_episodes: int,
+    device: "torch.device",
+    num_iters: int,
+    batch_eps: int,
     gamma: float = 0.99,
     lr_actor: float = 1e-3,
     lr_critic: float = 1e-3,
@@ -606,18 +685,15 @@ def train_pg(
     rl_method: str = "a2c",
     repeat_penalty_coef: float = 0.0,
     repeat_penalty_shape: str = "log",
-    normalise_returns: bool = True,
     max_train_attempts: Optional[int] = None,
 ) -> List[dict]:
-    """Online REINFORCE or A2C training loop with Magpie action encoding.
+    """Batched REINFORCE / A2C training loop (matches feat/classical-dqn).
 
-    The actor gradient uses shaped returns (with repeat penalty applied after
-    optional normalisation).  The critic (A2C only) learns on raw returns so
-    V(s) stays stationary.
-
-    ``pg_epsilon`` has been removed: epsilon-greedy is off-policy contamination
-    in an on-policy method.  Exploration is handled by softmax temperature
-    during generation.
+    Structure:
+        for it in range(num_iters):
+            collect batch_eps episodes under current policy
+            accumulate per-step actor/entropy/critic terms across all of them
+            one optimizer step over the entire batch
     """
     policy.train()
     opt_actor = torch.optim.Adam(policy.parameters(), lr=lr_actor)
@@ -629,181 +705,144 @@ def train_pg(
 
     visit_counts: Counter = Counter()
     metrics: List[dict] = []
-    _roll_returns: List[float] = []
-    _roll_actor: List[float] = []
-    _roll_entropy: List[float] = []
-    _roll_critic: List[float] = []
-    _PRINT_INTERVAL = 50
-
     accepted = 0
     attempted = 0
+    update_idx = 0
 
-    pbar = tqdm(total=n_episodes, desc=f"{rl_method.upper()} training")
-    while accepted < n_episodes and (max_train_attempts is None or attempted < max_train_attempts):
-        attempted += 1
-        _rollout_pg_episode(
-            env=env, policy=policy, scaler=scaler,
-            elem_feats_scaled=elem_feats_scaled, fraction_set=fraction_set,
-            device=device,
-        )
+    total_updates = max(1, int(num_iters))
+    print(
+        f"[INFO] PG: {num_iters} iters × "
+        f"{batch_eps} eps/update = {total_updates} updates, {total_updates * batch_eps} total episodes."
+    )
 
-        path = env.path
-        if not path:
-            continue
+    outer_pbar = tqdm(range(int(num_iters)), desc=f"{rl_method.upper()} iters")
+    for it in outer_pbar:
+        batch_paths: List[list] = []
+        batch_returns: List[List[float]] = []
+        batch_returns_shaped: List[List[float]] = []
+        batch_terminal_keys: List[tuple] = []
+        batch_repeat_penalties: List[float] = []
+        batch_visits_before: List[int] = []
 
-        G = 0.0
-        returns: List[float] = []
-        for step in reversed(path):
-            G = float(step.reward) + gamma * G
-            returns.append(G)
-        returns.reverse()
-        episode_return = returns[0] if returns else 0.0
-
-        if normalise_returns and len(returns) > 1:
-            ret_arr = np.asarray(returns, dtype=float)
-            returns_norm = ((ret_arr - ret_arr.mean()) / (ret_arr.std() + 1e-8)).tolist()
-        else:
-            returns_norm = returns
-
-        terminal_comp_key = env.terminal_comp_key()
-        n_visits_before = visit_counts[terminal_comp_key]
-        if repeat_penalty_coef > 0.0:
-            if repeat_penalty_shape == "log":
-                repeat_penalty = repeat_penalty_coef * math.log1p(n_visits_before)
-            elif repeat_penalty_shape == "sqrt":
-                repeat_penalty = repeat_penalty_coef * math.sqrt(n_visits_before)
-            else:
-                repeat_penalty = repeat_penalty_coef * float(n_visits_before)
-        else:
-            repeat_penalty = 0.0
-        visit_counts[terminal_comp_key] += 1
-
-        returns_shaped = [g - repeat_penalty for g in returns_norm]
-
-        actor_losses: List[torch.Tensor] = []
-        entropy_terms: List[torch.Tensor] = []
-        critic_losses: List[torch.Tensor] = []
-
-        for step, G_t_raw, G_t_shaped in zip(path, returns, returns_shaped):
-            allowed = step.allowed_actions
-            if not allowed:
+        collected = 0
+        while collected < int(batch_eps):
+            attempted += 1
+            if max_train_attempts is not None and attempted > max_train_attempts:
+                break
+            _rollout_pg_episode(
+                env=env, policy=policy, scaler=scaler,
+                elem_feats_scaled=elem_feats_scaled, fraction_set=fraction_set,
+                device=device,
+            )
+            path = env.path
+            if not path:
                 continue
 
-            s_mat = scaler.transform(
-                np.asarray(step.state_material_features, dtype=float).reshape(1, -1)
-            )[0]
-            s_step = np.asarray(step.state_step_onehot, dtype=float)
+            G = 0.0
+            returns: List[float] = []
+            for step in reversed(path):
+                G = float(step.reward) + gamma * G
+                returns.append(G)
+            returns.reverse()
 
-            n = len(allowed)
-            a_elem_batch = np.asarray(
-                [elem_feats_scaled[int(np.argmax(a[0]))] for a in allowed], dtype=float
-            )
-            a_comp_batch = np.asarray(
-                [[float(fraction_set[int(np.argmax(a[1]))])] for a in allowed], dtype=float
-            )
-            s_mat_batch  = np.repeat(s_mat.reshape(1, -1), n, axis=0)
-            s_step_batch = np.repeat(s_step.reshape(1, -1), n, axis=0)
-
-            s_mat_t  = torch.tensor(s_mat_batch,  dtype=torch.float32, device=device)
-            s_step_t = torch.tensor(s_step_batch, dtype=torch.float32, device=device)
-            a_elem_t = torch.tensor(a_elem_batch, dtype=torch.float32, device=device)
-            a_comp_t = torch.tensor(a_comp_batch, dtype=torch.float32, device=device)
-
-            logits   = policy(s_mat_t, s_step_t, a_elem_t, a_comp_t).reshape(-1)
-            log_probs = torch.log_softmax(logits, dim=0)
-            probs     = torch.softmax(logits, dim=0)
-
-            taken_elem = np.asarray(step.action_elem_onehot)
-            taken_comp = np.asarray(step.action_comp_onehot)
-            taken_idx = None
-            for i, a in enumerate(allowed):
-                if (np.array_equal(np.asarray(a[0]), taken_elem)
-                        and np.array_equal(np.asarray(a[1]), taken_comp)):
-                    taken_idx = i
-                    break
-            if taken_idx is None:
-                continue
-
-            G_shaped_t = torch.tensor(G_t_shaped, dtype=torch.float32, device=device)
-            G_raw_t    = torch.tensor(G_t_raw,    dtype=torch.float32, device=device)
-
-            if value_net is not None:
-                s_mat_single  = torch.tensor(s_mat.reshape(1, -1),  dtype=torch.float32, device=device)
-                s_step_single = torch.tensor(s_step.reshape(1, -1), dtype=torch.float32, device=device)
-                value = value_net(s_mat_single, s_step_single).reshape(-1)[0]
-                advantage = G_shaped_t - value.detach()
-                critic_losses.append((value - G_raw_t) ** 2)
+            terminal_key = env.terminal_comp_key()
+            n_visits_before = visit_counts[terminal_key]
+            if repeat_penalty_coef > 0.0:
+                if repeat_penalty_shape == "log":
+                    repeat_penalty = repeat_penalty_coef * math.log1p(n_visits_before)
+                elif repeat_penalty_shape == "sqrt":
+                    repeat_penalty = repeat_penalty_coef * math.sqrt(n_visits_before)
+                else:
+                    repeat_penalty = repeat_penalty_coef * float(n_visits_before)
             else:
-                advantage = G_shaped_t
+                repeat_penalty = 0.0
+            visit_counts[terminal_key] += 1
+            returns_shaped = [G_t - repeat_penalty for G_t in returns]
 
-            actor_losses.append(-log_probs[taken_idx] * advantage)
-            entropy_terms.append(-(probs * log_probs).sum())
+            batch_paths.append(path)
+            batch_returns.append(returns)
+            batch_returns_shaped.append(returns_shaped)
+            batch_terminal_keys.append(terminal_key)
+            batch_repeat_penalties.append(repeat_penalty)
+            batch_visits_before.append(n_visits_before)
+            collected += 1
+            accepted += 1
 
-        if not actor_losses:
+        if not batch_paths:
             continue
 
-        actor_loss      = torch.stack(actor_losses).mean()
-        entropy_bonus   = torch.stack(entropy_terms).mean()
+        all_actor: List[torch.Tensor] = []
+        all_entropy: List[torch.Tensor] = []
+        all_critic: List[torch.Tensor] = []
+        for path, returns, returns_shaped in zip(batch_paths, batch_returns, batch_returns_shaped):
+            a_terms, e_terms, c_terms = _episode_pg_terms(
+                path=path,
+                returns=returns,
+                returns_shaped=returns_shaped,
+                policy=policy,
+                value_net=value_net,
+                scaler=scaler,
+                elem_feats_scaled=elem_feats_scaled,
+                fraction_set=fraction_set,
+                device=device,
+            )
+            all_actor.extend(a_terms)
+            all_entropy.extend(e_terms)
+            all_critic.extend(c_terms)
+
+        if not all_actor:
+            continue
+
+        actor_loss       = torch.stack(all_actor).mean()
+        entropy_bonus    = torch.stack(all_entropy).mean()
         total_actor_loss = actor_loss - entropy_coef * entropy_bonus
 
         opt_actor.zero_grad(set_to_none=True)
         total_actor_loss.backward()
         opt_actor.step()
 
-        ep_critic_loss: float | str = ""
-        if opt_critic is not None and critic_losses:
-            critic_loss = torch.stack(critic_losses).mean()
+        critic_loss_val: float | str = ""
+        if opt_critic is not None and all_critic:
+            critic_loss = torch.stack(all_critic).mean()
             opt_critic.zero_grad(set_to_none=True)
             critic_loss.backward()
             opt_critic.step()
-            ep_critic_loss = float(critic_loss.item())
+            critic_loss_val = float(critic_loss.item())
 
+        update_idx += 1
         ep_actor_loss = float(actor_loss.item())
         ep_entropy    = float(entropy_bonus.item())
-        accepted += 1
-        pbar.update(1)
+        mean_return_raw    = float(np.mean([rs[0] for rs in batch_returns])) if batch_returns else 0.0
+        mean_return_shaped = float(np.mean([rs[0] for rs in batch_returns_shaped])) if batch_returns_shaped else 0.0
 
         metrics.append({
             "phase": "pg_train",
+            "iteration": it + 1,
+            "update": update_idx,
             "episode": accepted,
-            "formula": env.terminal_formula,
-            "return": episode_return,
-            "return_shaped": returns_shaped[0] if returns_shaped else 0.0,
-            "repeat_penalty": repeat_penalty,
-            "visit_count_before": n_visits_before,
+            "batch_eps": int(batch_eps),
+            "return": mean_return_raw,
+            "return_raw": mean_return_raw,
+            "return_shaped": mean_return_shaped,
+            "repeat_penalty": float(np.mean(batch_repeat_penalties)) if batch_repeat_penalties else 0.0,
+            "visit_count_before": int(np.max(batch_visits_before)) if batch_visits_before else 0,
             "unique_comps_seen": len(visit_counts),
+            "max_visit_count": max(visit_counts.values()) if visit_counts else 0,
+            "terminal_comp_key": str(batch_terminal_keys[-1]) if batch_terminal_keys else "",
             "actor_loss": ep_actor_loss,
             "entropy": ep_entropy,
-            "critic_loss": ep_critic_loss,
+            "critic_loss": critic_loss_val,
         })
 
-        _roll_returns.append(episode_return)
-        _roll_actor.append(ep_actor_loss)
-        _roll_entropy.append(ep_entropy)
-        if ep_critic_loss != "":
-            _roll_critic.append(float(ep_critic_loss))
+        outer_pbar.set_postfix(
+            ret=f"{mean_return_raw:.3f}",
+            actor=f"{ep_actor_loss:.3f}",
+            ent=f"{ep_entropy:.3f}",
+            upd=update_idx,
+        )
 
-        for lst in (_roll_returns, _roll_actor, _roll_entropy):
-            if len(lst) > _PRINT_INTERVAL:
-                lst.pop(0)
-        if _roll_critic and len(_roll_critic) > _PRINT_INTERVAL:
-            _roll_critic.pop(0)
-
-        if accepted % _PRINT_INTERVAL == 0:
-            mean_ret = float(np.mean(_roll_returns))
-            mean_al  = float(np.mean(_roll_actor))
-            mean_ent = float(np.mean(_roll_entropy))
-            pbar.set_postfix(ret=f"{mean_ret:.3f}", actor=f"{mean_al:.3f}", ent=f"{mean_ent:.3f}")
-            suffix = (
-                f" | critic_loss={float(np.mean(_roll_critic)):.4f}" if _roll_critic else ""
-            )
-            tqdm.write(
-                f"[{rl_method.upper()}] ep={accepted}/{n_episodes} | "
-                f"return={mean_ret:.3f} | actor_loss={mean_al:.3f} | entropy={mean_ent:.3f}{suffix}"
-            )
-
-    pbar.close()
-    print(f"[INFO] PG training: accepted {accepted}/{n_episodes} in {attempted} attempts.")
+    outer_pbar.close()
+    print(f"[INFO] PG training: {update_idx} updates over {accepted} episodes, {attempted} attempts.")
     return metrics
 
 

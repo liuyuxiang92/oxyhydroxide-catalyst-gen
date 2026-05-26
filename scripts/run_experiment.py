@@ -137,8 +137,24 @@ def build_predictor(cfg: dict, seed: int = None):
 
         return _DummyPredictor()
 
+    elif kind == "ooh":
+        from rl_matdesign.predictors.ooh import OOHCatalystPredictor
+        return OOHCatalystPredictor(
+            base_poscar=cfg["base_poscar"],
+            dp_models=cfg["dp_models"],
+            objective=cfg.get("objective", "mean_minus_kstd"),
+            k=float(cfg.get("k", 1.0)),
+            n_random_configs=int(cfg.get("n_random_configs", 10)),
+            ads_height=float(cfg.get("ads_height", 1.9)),
+            ads_dz=float(cfg.get("ads_dz", 1.0)),
+            geo_opt=bool(cfg.get("geo_opt", False)),
+            geo_opt_model=str(cfg.get("geo_opt_model", "./DPA-3.1-3M_1.pt")),
+            rng_seed=seed if seed is not None else 123,
+            uncertainty=cfg.get("uncertainty", "models"),
+        )
+
     else:
-        raise ValueError(f"Unknown predictor type '{kind}'. Options: hea, perovskite, sinter_calcine, dummy.")
+        raise ValueError(f"Unknown predictor type '{kind}'. Options: hea, perovskite, sinter_calcine, ooh, dummy.")
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +271,6 @@ def main() -> None:
     print(f"[INFO] state_dim={state_dim}, step_dim={step_dim}, "
           f"elem_dim(Magpie)={elem_dim}, frac_dim={frac_dim}")
 
-    hidden_dim = int(cfg.get("hidden_dim", 128))
     metrics = RunMetrics()
 
     # Generation strategy (unified across DQN and PG).
@@ -272,7 +287,6 @@ def main() -> None:
             elem_feats_scaled=elem_feats_scaled,
             fraction_set=fraction_set,
             device=device,
-            hidden_dim=hidden_dim,
             n_warmup_eps=int(cfg.get("dqn_warmup_eps", cfg.get("pg_warmup_eps", 500))),
             n_train_eps=int(cfg.get("num_train_eps", 20000)),
             buffer_size=int(cfg.get("buffer_size", 50000)),
@@ -311,13 +325,14 @@ def main() -> None:
     # PG paths (REINFORCE / A2C)
     # ------------------------------------------------------------------
     else:
-        pg_warmup           = int(cfg.get("pg_warmup_eps", 200))
-        pg_train            = int(cfg.get("pg_train_eps", 1000))
-        lr_actor            = float(cfg.get("pg_lr_actor", 1e-3))
-        lr_critic           = float(cfg.get("pg_lr_critic", 1e-3))
-        entropy_coef        = float(cfg.get("entropy_coef", 0.01))
-        gamma               = float(cfg.get("pg_gamma", cfg.get("gamma", 0.99)))
-        repeat_penalty_coef = float(cfg.get("repeat_penalty_coef", 0.0))
+        pg_warmup            = int(cfg.get("pg_warmup_eps", 200))
+        pg_num_iters         = int(cfg.get("pg_num_iters", 1000))
+        pg_batch_eps         = int(cfg.get("pg_batch_eps", 15))
+        lr_actor             = float(cfg.get("pg_lr_actor", 1e-3))
+        lr_critic            = float(cfg.get("pg_lr_critic", 1e-3))
+        entropy_coef         = float(cfg.get("entropy_coef", 0.01))
+        gamma                = float(cfg.get("pg_gamma", cfg.get("gamma", 0.9)))
+        repeat_penalty_coef  = float(cfg.get("repeat_penalty_coef", 0.0))
         repeat_penalty_shape = cfg.get("repeat_penalty_shape", "log")
 
         scaler = _fit_scaler_from_warmup(env, pg_warmup)
@@ -325,12 +340,12 @@ def main() -> None:
 
         policy = PolicyNet(
             state_dim=state_dim, step_dim=step_dim,
-            elem_dim=elem_dim, frac_dim=frac_dim, hidden_dim=hidden_dim,
+            elem_dim=elem_dim, frac_dim=frac_dim,
         ).to(device)
         value_net = None
         if method == "a2c":
             value_net = ValueNet(
-                state_dim=state_dim, step_dim=step_dim, hidden_dim=hidden_dim,
+                state_dim=state_dim, step_dim=step_dim,
             ).to(device)
 
         train_rows = train_pg(
@@ -341,7 +356,8 @@ def main() -> None:
             elem_feats_scaled=elem_feats_scaled,
             fraction_set=fraction_set,
             device=device,
-            n_episodes=pg_train,
+            num_iters=pg_num_iters,
+            batch_eps=pg_batch_eps,
             gamma=gamma,
             lr_actor=lr_actor,
             lr_critic=lr_critic,
@@ -349,7 +365,6 @@ def main() -> None:
             rl_method=method,
             repeat_penalty_coef=repeat_penalty_coef,
             repeat_penalty_shape=repeat_penalty_shape,
-            normalise_returns=bool(cfg.get("normalise_returns", True)),
         )
         for r in train_rows:
             metrics.log(**r)

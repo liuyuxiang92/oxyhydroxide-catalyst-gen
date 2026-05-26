@@ -101,7 +101,8 @@ k: 0.0
 
 method: a2c
 pg_warmup_eps: 5
-pg_train_eps: 10
+pg_num_iters: 2
+pg_batch_eps: 5
 pg_lr_actor: 0.001
 pg_lr_critic: 0.001
 entropy_coef: 0.01
@@ -109,8 +110,6 @@ gen_temperature: 1.0
 gen_top_frac: 0.0
 gen_epsilon: 0.0
 gamma: 0.99
-hidden_dim: 128
-normalise_returns: true
 
 repeat_penalty_coef: 0.1
 repeat_penalty_shape: log

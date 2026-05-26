@@ -36,3 +36,18 @@ Not stuck — removing SQS mode across 5 files in one session. Multiple edits to
 ### EARS — Progress (2026-05-26 15:54)
 <!-- concepts: structure-generation, reproducibility -->
 User decided to remove SQS mode entirely and keep only random structure generation. Removes sqsgenerator dependency and all seeding complexity around it. Removing from: structure.py (drop `_sqs_config`, `sqs_iterations` param, SQS branch), hea.py + perovskite.py (drop `structure_mode` param, hardcode `mode="random"`), run_experiment.py (drop `structure_mode` from build_predictor calls), configs (drop `structure_mode` key).
+
+### EARS — Progress (2026-05-26 17:08)
+<!-- concepts: pg-training, general-framework, classical-dqn-parity -->
+Discovered that general-framework's `train_pg` was the old per-episode version, not the batch version from feat/classical-dqn. Classical-dqn uses `num_iters × batch_eps` (collect batch_eps episodes, one gradient step per batch). Ported the batch `train_pg` to `src/rl_matdesign/training.py`: added `_episode_pg_terms` helper, replaced `n_episodes` loop with `num_iters × batch_eps` outer loop. Updated `run_experiment.py` to read `pg_num_iters` and `pg_batch_eps` from YAML. Also removed `normalise_returns` (not in classical-dqn) and corrected gamma default to 0.9 (was 0.99). Now updating all YAML configs to replace `pg_train_eps` with `pg_num_iters` + `pg_batch_eps`.
+
+### EARS — Stuck (2026-05-26 16:54)
+<!-- concepts: general-framework, hidden-dim, pg-training -->
+Not stuck — making multiple edits to run_experiment.py in one session. Removing `hidden_dim` from YAML/config (it's hardcoded at 128 in both classical-dqn branches, never a user flag). Also clarified batch PG vs per-episode PG: user confirmed general-framework should match feat/classical-dqn (per-episode), which it already does.
+
+### EARS — Progress (2026-05-26 16:34)
+<!-- concepts: ooh-catalyst, predictor-factory, general-framework -->
+Adding OOH catalyst support to general-framework so experiments can run via run_experiment.py + YAML instead of the OOH-specific script. Three changes:
+1. Created `src/rl_matdesign/predictors/ooh.py` — `OOHCatalystPredictor` wraps `abcde_ooh.dp_predictor.DeepMDOverpotentialPredictor`. Negates mean overpotential before `objective_from_mean_std` (same sign convention as HEA/perovskite predictors). Exposes `uncertainty` mode ("models"/"configs"/"total").
+2. Updated `build_predictor()` in `run_experiment.py` — added `"ooh"` branch reading `base_poscar`, `dp_models`, `ads_height`, `ads_dz`, `geo_opt`, `uncertainty` from YAML cfg.
+3. Created `configs/ooh.yaml` — 28-cation set (matching DEFAULT_CATION_SET from abcde_ooh), 16 fractions (0.05–0.80), `anion_formula: "O2H1"`, full DQN-online + PG hyperparameters.
