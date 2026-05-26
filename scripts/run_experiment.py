@@ -95,6 +95,12 @@ def parse_args() -> argparse.Namespace:
                    help="Path to saved std_scaler.bin (default: <out>/std_scaler.bin).")
     p.add_argument("--load-value-net", type=str, default=None,
                    help="Path to saved value_net.pt state dict (default: <out>/value_net.pt).")
+    p.add_argument("--dqn-loss", choices=["mse", "smoothl1"], default=None,
+                   dest="dqn_loss",
+                   help="Loss function for DQN training (default: from config or smoothl1).")
+    p.add_argument("--max-gen-attempts", type=int, default=None,
+                   dest="max_gen_attempts",
+                   help="Max generation attempts before stopping. Default: 10 × num_gen_eps.")
     return p.parse_args()
 
 
@@ -332,6 +338,7 @@ def main() -> None:
         else:
             if args.resume_training:
                 print("[WARN] --resume-training is not supported for DQN; starting fresh training.", flush=True)
+            _dqn_loss = args.dqn_loss or cfg.get("dqn_loss", "smoothl1")
             qnet, scaler, train_rows = train_dqn_online(
                 env=env,
                 elem_feats_scaled=elem_feats_scaled,
@@ -347,6 +354,7 @@ def main() -> None:
                 eps_min=float(cfg.get("eps_min", 0.05)),
                 gamma=float(cfg.get("dqn_gamma", cfg.get("gamma", 0.9))),
                 lr=float(cfg.get("dqn_lr", 1e-3)),
+                loss_name=_dqn_loss,
                 checkpoint_cfg=checkpoint_cfg,
             )
             for r in train_rows:
@@ -357,17 +365,20 @@ def main() -> None:
         if not args.skip_generation:
             np.random.seed(gen_seed)
             random.seed(gen_seed)
+            _n_exploit = int(cfg.get("num_gen_eps", 200))
+            _max_attempts = args.max_gen_attempts if args.max_gen_attempts is not None else 10 * _n_exploit
             gen_rows = generate_candidates(
                 env=env, predictor=predictor, scaler=scaler, device=device,
                 qnet=qnet,
                 elem_feats_scaled=elem_feats_scaled,
                 fraction_set=fraction_set,
-                n_exploit=int(cfg.get("num_gen_eps", 200)),
+                n_exploit=_n_exploit,
                 n_explore=int(cfg.get("exploration_gen_eps", 0)),
                 gen_temperature=gen_temperature,
                 gen_top_frac=gen_top_frac,
                 gen_epsilon=gen_epsilon_gen,
                 k=float(cfg.get("k", 1.0)),
+                max_attempts=_max_attempts,
             )
             for r in gen_rows:
                 metrics.log(phase="generate", **r)
@@ -495,18 +506,21 @@ def main() -> None:
         if not args.skip_generation:
             np.random.seed(gen_seed)
             random.seed(gen_seed)
+            _n_exploit = int(cfg.get("num_gen_eps", 200))
+            _max_attempts = args.max_gen_attempts if args.max_gen_attempts is not None else 10 * _n_exploit
             gen_rows = generate_candidates(
                 env=env, predictor=predictor, scaler=scaler, device=device,
                 policy=policy,
                 elem_feats_scaled=elem_feats_scaled,
                 fraction_set=fraction_set,
-                n_exploit=int(cfg.get("num_gen_eps", 200)),
+                n_exploit=_n_exploit,
                 n_explore=int(cfg.get("exploration_gen_eps", 0)),
                 gen_temperature=gen_temperature,
                 gen_top_frac=gen_top_frac,
                 gen_epsilon=gen_epsilon_gen,
                 k=float(cfg.get("k", 1.0)),
                 exploit_objective=cfg.get("objective", "mean_minus_kstd"),
+                max_attempts=_max_attempts,
             )
             for r in gen_rows:
                 metrics.log(phase="generate", **r)

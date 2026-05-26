@@ -44,6 +44,19 @@ from .predictors.base import PropertyPredictor
 
 
 # ---------------------------------------------------------------------------
+# Loss function factory
+# ---------------------------------------------------------------------------
+
+def _make_loss_fn(name: str) -> torch.nn.Module:
+    name = (name or "smoothl1").lower()
+    if name == "mse":
+        return torch.nn.MSELoss()
+    if name in ("smoothl1", "huber"):
+        return torch.nn.SmoothL1Loss()
+    raise ValueError(f"Unknown DQN loss: {name!r} (expected 'mse' or 'smoothl1')")
+
+
+# ---------------------------------------------------------------------------
 # Checkpoint helpers
 # ---------------------------------------------------------------------------
 
@@ -255,6 +268,7 @@ def train_dqn_online(
     eps_min: float = 0.05,
     gamma: float = 0.9,
     lr: float = 1e-3,
+    loss_name: str = "smoothl1",
     checkpoint_cfg: Optional[dict] = None,
 ) -> Tuple[torch.nn.Module, StandardScaler, List[dict]]:
     """Classical online DQN with FIFO replay buffer and TD targets.
@@ -303,7 +317,7 @@ def train_dqn_online(
     target_net = copy.deepcopy(qnet)
     target_net.eval()
     optimizer = torch.optim.Adam(qnet.parameters(), lr=lr)
-    loss_fn = torch.nn.SmoothL1Loss()
+    loss_fn = _make_loss_fn(loss_name)
 
     ckpt_path: Optional[str] = None
     ckpt_freq: int = 0
