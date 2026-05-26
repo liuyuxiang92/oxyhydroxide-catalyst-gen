@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import sys
 import warnings
 
@@ -181,7 +182,7 @@ def main() -> None:
     train_seed = args.train_seed if args.train_seed is not None else args.seed
     gen_seed   = args.gen_seed   if args.gen_seed   is not None else args.seed
 
-    set_global_seed(args.seed)
+    set_global_seed(train_seed, deterministic=(args.train_seed is not None))
     os.makedirs(args.out, exist_ok=True)
 
     run_config = {
@@ -291,7 +292,8 @@ def main() -> None:
         torch.save(qnet.state_dict(), os.path.join(args.out, "qnet.pt"))
         joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"))
 
-        set_global_seed(gen_seed)
+        np.random.seed(gen_seed)
+        random.seed(gen_seed)
         gen_rows = generate_candidates(
             env=env, predictor=predictor, scaler=scaler, device=device,
             qnet=qnet,
@@ -359,7 +361,8 @@ def main() -> None:
         if value_net is not None:
             torch.save(value_net.state_dict(), os.path.join(args.out, "value_net.pt"))
 
-        set_global_seed(gen_seed)
+        np.random.seed(gen_seed)
+        random.seed(gen_seed)
         gen_rows = generate_candidates(
             env=env, predictor=predictor, scaler=scaler, device=device,
             policy=policy,
