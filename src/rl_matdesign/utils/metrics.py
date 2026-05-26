@@ -38,19 +38,20 @@ class RunMetrics:
     # Persistence
     # ------------------------------------------------------------------
 
-    def to_csv(self, path: str | Path) -> None:
-        """Write all rows to a CSV file."""
+    def to_csv(self, path: str | Path, mode: str = "w") -> None:
+        """Write all rows to a CSV file. Use mode='a' to append (e.g. resume)."""
         if not self.rows:
             return
         fieldnames = list(self.rows[0].keys())
-        # Collect any extra keys that appeared in later rows.
         for row in self.rows[1:]:
             for k in row:
                 if k not in fieldnames:
                     fieldnames.append(k)
-        with open(path, "w", newline="") as f:
+        write_header = mode == "w" or not Path(path).exists()
+        with open(path, mode, newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-            writer.writeheader()
+            if write_header:
+                writer.writeheader()
             writer.writerows(self.rows)
 
     # ------------------------------------------------------------------

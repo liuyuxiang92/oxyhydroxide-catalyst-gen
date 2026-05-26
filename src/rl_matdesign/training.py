@@ -752,10 +752,17 @@ def train_pg(
     if checkpoint_cfg:
         ckpt_path = checkpoint_cfg.get("path")
         ckpt_freq = int(checkpoint_cfg.get("freq", 0))
+        if checkpoint_cfg.get("opt_actor_state") is not None:
+            opt_actor.load_state_dict(checkpoint_cfg["opt_actor_state"])
+        if opt_critic is not None and checkpoint_cfg.get("opt_critic_state") is not None:
+            opt_critic.load_state_dict(checkpoint_cfg["opt_critic_state"])
 
     visit_counts: Counter = Counter()
+    if checkpoint_cfg and checkpoint_cfg.get("visit_counts"):
+        visit_counts = Counter(checkpoint_cfg["visit_counts"])
+
     metrics: List[dict] = []
-    accepted = 0
+    accepted = int(checkpoint_cfg.get("start_episode", 0)) if checkpoint_cfg else 0
     attempted = 0
     update_idx = 0
 

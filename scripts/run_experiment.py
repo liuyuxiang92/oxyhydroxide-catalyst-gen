@@ -77,6 +77,24 @@ def parse_args() -> argparse.Namespace:
                    dest="save_checkpoint_freq",
                    help="Save mid-training checkpoint every N episodes (DQN) or N iterations (PG). 0 disables. "
                         "Saved atomically to <out>/checkpoint.pt.")
+    p.add_argument("--only-generate", action="store_true",
+                   help="Skip training; load saved model + scaler and generate candidates only. "
+                        "Defaults to loading <out>/policy.pt (PG) or <out>/qnet.pt (DQN) and <out>/std_scaler.bin.")
+    p.add_argument("--resume-training", action="store_true",
+                   help="Load an existing model/checkpoint and continue training. "
+                        "For PG: loads std_scaler.bin + checkpoint.pt (or policy.pt) and runs more iterations. "
+                        "For DQN: not supported (warns and starts fresh). "
+                        "Cannot be combined with --only-generate.")
+    p.add_argument("--skip-generation", action="store_true",
+                   help="Run training but skip candidate generation.")
+    p.add_argument("--load-qnet", type=str, default=None,
+                   help="Path to saved qnet.pt state dict (default: <out>/qnet.pt).")
+    p.add_argument("--load-policy", type=str, default=None,
+                   help="Path to saved policy.pt state dict (default: <out>/policy.pt).")
+    p.add_argument("--load-scaler", type=str, default=None,
+                   help="Path to saved std_scaler.bin (default: <out>/std_scaler.bin).")
+    p.add_argument("--load-value-net", type=str, default=None,
+                   help="Path to saved value_net.pt state dict (default: <out>/value_net.pt).")
     return p.parse_args()
 
 
@@ -196,6 +214,10 @@ def build_constraint_filter(cfg: dict):
 
 def main() -> None:
     args = parse_args()
+
+    if args.only_generate and args.resume_training:
+        raise SystemExit("--only-generate and --resume-training are mutually exclusive.")
+
     cfg = load_config(args.config)
 
     method = args.method or cfg.get("method", "a2c")
@@ -289,45 +311,66 @@ def main() -> None:
     # DQN path — classical online DQN
     # ------------------------------------------------------------------
     if method == "dqn":
-        qnet, scaler, train_rows = train_dqn_online(
-            env=env,
-            elem_feats_scaled=elem_feats_scaled,
-            fraction_set=fraction_set,
-            device=device,
-            n_warmup_eps=int(cfg.get("dqn_warmup_eps", cfg.get("pg_warmup_eps", 500))),
-            n_train_eps=int(cfg.get("num_train_eps", 20000)),
-            buffer_size=int(cfg.get("buffer_size", 50000)),
-            batch_size=int(cfg.get("dqn_batch_size", 256)),
-            grad_steps_per_ep=int(cfg.get("grad_steps_per_ep", 5)),
-            target_update_freq=int(cfg.get("target_update_freq", 100)),
-            eps_anneal_eps=int(cfg.get("eps_anneal_eps", 10000)),
-            eps_min=float(cfg.get("eps_min", 0.05)),
-            gamma=float(cfg.get("dqn_gamma", cfg.get("gamma", 0.9))),
-            lr=float(cfg.get("dqn_lr", 1e-3)),
-            checkpoint_cfg=checkpoint_cfg,
-        )
-        for r in train_rows:
-            metrics.log(**r)
+        scaler_path = args.load_scaler or os.path.join(args.out, "std_scaler.bin")
+        qnet_path   = args.load_qnet   or os.path.join(args.out, "qnet.pt")
 
-        torch.save(qnet.state_dict(), os.path.join(args.out, "qnet.pt"))
-        joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"))
+        if args.only_generate:
+            if not os.path.exists(scaler_path):
+                raise SystemExit(f"--only-generate requires {scaler_path} (use --load-scaler to override)")
+            if not os.path.exists(qnet_path):
+                raise SystemExit(f"--only-generate requires {qnet_path} (use --load-qnet to override)")
+            scaler = joblib.load(scaler_path)
+            state_dim = int(getattr(scaler, "n_features_in_", scaler.mean_.shape[0]))
+            from rl_matdesign.model import QRegressor
+            qnet = QRegressor(
+                state_dim=state_dim, step_dim=step_dim,
+                elem_dim=elem_dim, frac_dim=1,
+            ).to(device)
+            _raw = torch.load(qnet_path, map_location=device)
+            qnet.load_state_dict(_raw["qnet_state"] if isinstance(_raw, dict) and "qnet_state" in _raw else _raw)
+            print(f"[INFO] Loaded qnet from {qnet_path}", flush=True)
+        else:
+            if args.resume_training:
+                print("[WARN] --resume-training is not supported for DQN; starting fresh training.", flush=True)
+            qnet, scaler, train_rows = train_dqn_online(
+                env=env,
+                elem_feats_scaled=elem_feats_scaled,
+                fraction_set=fraction_set,
+                device=device,
+                n_warmup_eps=int(cfg.get("dqn_warmup_eps", cfg.get("pg_warmup_eps", 500))),
+                n_train_eps=int(cfg.get("num_train_eps", 20000)),
+                buffer_size=int(cfg.get("buffer_size", 50000)),
+                batch_size=int(cfg.get("dqn_batch_size", 256)),
+                grad_steps_per_ep=int(cfg.get("grad_steps_per_ep", 5)),
+                target_update_freq=int(cfg.get("target_update_freq", 100)),
+                eps_anneal_eps=int(cfg.get("eps_anneal_eps", 10000)),
+                eps_min=float(cfg.get("eps_min", 0.05)),
+                gamma=float(cfg.get("dqn_gamma", cfg.get("gamma", 0.9))),
+                lr=float(cfg.get("dqn_lr", 1e-3)),
+                checkpoint_cfg=checkpoint_cfg,
+            )
+            for r in train_rows:
+                metrics.log(**r)
+            torch.save(qnet.state_dict(), os.path.join(args.out, "qnet.pt"))
+            joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"))
 
-        np.random.seed(gen_seed)
-        random.seed(gen_seed)
-        gen_rows = generate_candidates(
-            env=env, predictor=predictor, scaler=scaler, device=device,
-            qnet=qnet,
-            elem_feats_scaled=elem_feats_scaled,
-            fraction_set=fraction_set,
-            n_exploit=int(cfg.get("num_gen_eps", 200)),
-            n_explore=int(cfg.get("exploration_gen_eps", 0)),
-            gen_temperature=gen_temperature,
-            gen_top_frac=gen_top_frac,
-            gen_epsilon=gen_epsilon_gen,
-            k=float(cfg.get("k", 1.0)),
-        )
-        for r in gen_rows:
-            metrics.log(phase="generate", **r)
+        if not args.skip_generation:
+            np.random.seed(gen_seed)
+            random.seed(gen_seed)
+            gen_rows = generate_candidates(
+                env=env, predictor=predictor, scaler=scaler, device=device,
+                qnet=qnet,
+                elem_feats_scaled=elem_feats_scaled,
+                fraction_set=fraction_set,
+                n_exploit=int(cfg.get("num_gen_eps", 200)),
+                n_explore=int(cfg.get("exploration_gen_eps", 0)),
+                gen_temperature=gen_temperature,
+                gen_top_frac=gen_top_frac,
+                gen_epsilon=gen_epsilon_gen,
+                k=float(cfg.get("k", 1.0)),
+            )
+            for r in gen_rows:
+                metrics.log(phase="generate", **r)
 
     # ------------------------------------------------------------------
     # PG paths (REINFORCE / A2C)
@@ -343,67 +386,138 @@ def main() -> None:
         repeat_penalty_coef  = float(cfg.get("repeat_penalty_coef", 0.0))
         repeat_penalty_shape = cfg.get("repeat_penalty_shape", "log")
 
-        scaler = _fit_scaler_from_warmup(env, pg_warmup)
-        joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"))
+        scaler_path  = args.load_scaler    or os.path.join(args.out, "std_scaler.bin")
+        policy_path  = args.load_policy    or os.path.join(args.out, "policy.pt")
+        vnet_path    = args.load_value_net or os.path.join(args.out, "value_net.pt")
+        ckpt_path_pg = os.path.join(args.out, "checkpoint.pt")
 
-        policy = PolicyNet(
-            state_dim=state_dim, step_dim=step_dim,
-            elem_dim=elem_dim, frac_dim=frac_dim,
-        ).to(device)
-        value_net = None
-        if method == "a2c":
-            value_net = ValueNet(
-                state_dim=state_dim, step_dim=step_dim,
+        if args.only_generate:
+            if not os.path.exists(scaler_path):
+                raise SystemExit(f"--only-generate requires {scaler_path} (use --load-scaler to override)")
+            if not os.path.exists(policy_path):
+                raise SystemExit(f"--only-generate requires {policy_path} (use --load-policy to override)")
+            scaler = joblib.load(scaler_path)
+            state_dim_loaded = int(getattr(scaler, "n_features_in_", scaler.mean_.shape[0]))
+            policy = PolicyNet(
+                state_dim=state_dim_loaded, step_dim=step_dim,
+                elem_dim=elem_dim, frac_dim=frac_dim,
             ).to(device)
+            _raw = torch.load(policy_path, map_location=device)
+            policy.load_state_dict(_raw["policy_state"] if isinstance(_raw, dict) and "policy_state" in _raw else _raw)
+            print(f"[INFO] Loaded policy from {policy_path}", flush=True)
+            value_net = None
 
-        train_rows = train_pg(
-            policy=policy,
-            value_net=value_net,
-            env=env,
-            scaler=scaler,
-            elem_feats_scaled=elem_feats_scaled,
-            fraction_set=fraction_set,
-            device=device,
-            num_iters=pg_num_iters,
-            batch_eps=pg_batch_eps,
-            gamma=gamma,
-            lr_actor=lr_actor,
-            lr_critic=lr_critic,
-            entropy_coef=entropy_coef,
-            rl_method=method,
-            repeat_penalty_coef=repeat_penalty_coef,
-            repeat_penalty_shape=repeat_penalty_shape,
-            checkpoint_cfg=checkpoint_cfg,
-        )
-        for r in train_rows:
-            metrics.log(**r)
+        elif args.resume_training:
+            if not os.path.exists(scaler_path):
+                raise SystemExit(f"--resume-training requires {scaler_path} (use --load-scaler to override)")
+            scaler = joblib.load(scaler_path)
+            print(f"[INFO] Loaded scaler from {scaler_path}", flush=True)
+            state_dim_loaded = int(getattr(scaler, "n_features_in_", scaler.mean_.shape[0]))
+            policy = PolicyNet(
+                state_dim=state_dim_loaded, step_dim=step_dim,
+                elem_dim=elem_dim, frac_dim=frac_dim,
+            ).to(device)
+            value_net = ValueNet(state_dim=state_dim_loaded, step_dim=step_dim).to(device) if method == "a2c" else None
 
-        torch.save(policy.state_dict(), os.path.join(args.out, "policy.pt"))
-        if value_net is not None:
-            torch.save(value_net.state_dict(), os.path.join(args.out, "value_net.pt"))
+            # Prefer mid-training checkpoint.pt; fall back to policy.pt.
+            _mid_ckpt = None
+            _resume_src = args.load_policy if args.load_policy else ckpt_path_pg
+            if os.path.exists(_resume_src):
+                _raw = torch.load(_resume_src, map_location=device)
+                if isinstance(_raw, dict) and _raw.get("type") == "pg":
+                    _mid_ckpt = _raw
+                    policy.load_state_dict(_raw["policy_state"])
+                    if value_net is not None and _raw.get("value_net_state") is not None:
+                        value_net.load_state_dict(_raw["value_net_state"])
+                    print(f"[INFO] Resuming from mid-training checkpoint ({_raw['episodes_completed']} eps) → {_resume_src}", flush=True)
+                else:
+                    _type_str = _raw.get("type") if isinstance(_raw, dict) else "raw"
+                    print(f"[WARN] {_resume_src} type={_type_str!r}, expected 'pg'; falling back to policy.pt", flush=True)
+            elif args.load_policy:
+                raise SystemExit(f"--load-policy path not found: {args.load_policy}")
 
-        np.random.seed(gen_seed)
-        random.seed(gen_seed)
-        gen_rows = generate_candidates(
-            env=env, predictor=predictor, scaler=scaler, device=device,
-            policy=policy,
-            elem_feats_scaled=elem_feats_scaled,
-            fraction_set=fraction_set,
-            n_exploit=int(cfg.get("num_gen_eps", 200)),
-            n_explore=int(cfg.get("exploration_gen_eps", 0)),
-            gen_temperature=gen_temperature,
-            gen_top_frac=gen_top_frac,
-            gen_epsilon=gen_epsilon_gen,
-            k=float(cfg.get("k", 1.0)),
-            exploit_objective=cfg.get("objective", "mean_minus_kstd"),
-        )
-        for r in gen_rows:
-            metrics.log(phase="generate", **r)
+            if _mid_ckpt is None:
+                if not os.path.exists(policy_path):
+                    raise SystemExit(f"--resume-training requires {policy_path} (use --load-policy to override)")
+                policy.load_state_dict(torch.load(policy_path, map_location=device))
+                print(f"[INFO] Loaded policy from {policy_path}", flush=True)
+                if value_net is not None:
+                    if not os.path.exists(vnet_path):
+                        raise SystemExit(f"--resume-training (a2c) requires {vnet_path} (use --load-value-net to override)")
+                    value_net.load_state_dict(torch.load(vnet_path, map_location=device))
+                    print(f"[INFO] Loaded value_net from {vnet_path}", flush=True)
+
+            # Build checkpoint_cfg with resume data so train_pg restores optimizer + visit_counts.
+            checkpoint_cfg = {
+                "path": ckpt_path_pg,
+                "freq": args.save_checkpoint_freq,
+                "start_episode": _mid_ckpt["episodes_completed"] if _mid_ckpt else 0,
+                "opt_actor_state": _mid_ckpt.get("opt_actor_state") if _mid_ckpt else None,
+                "opt_critic_state": _mid_ckpt.get("opt_critic_state") if _mid_ckpt else None,
+                "visit_counts": _mid_ckpt.get("visit_counts") if _mid_ckpt else None,
+            }
+
+        else:
+            scaler = _fit_scaler_from_warmup(env, pg_warmup)
+            joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"))
+            policy = PolicyNet(
+                state_dim=state_dim, step_dim=step_dim,
+                elem_dim=elem_dim, frac_dim=frac_dim,
+            ).to(device)
+            value_net = ValueNet(state_dim=state_dim, step_dim=step_dim).to(device) if method == "a2c" else None
+
+        if not args.only_generate:
+            train_rows = train_pg(
+                policy=policy,
+                value_net=value_net,
+                env=env,
+                scaler=scaler,
+                elem_feats_scaled=elem_feats_scaled,
+                fraction_set=fraction_set,
+                device=device,
+                num_iters=pg_num_iters,
+                batch_eps=pg_batch_eps,
+                gamma=gamma,
+                lr_actor=lr_actor,
+                lr_critic=lr_critic,
+                entropy_coef=entropy_coef,
+                rl_method=method,
+                repeat_penalty_coef=repeat_penalty_coef,
+                repeat_penalty_shape=repeat_penalty_shape,
+                checkpoint_cfg=checkpoint_cfg,
+            )
+            for r in train_rows:
+                metrics.log(**r)
+            torch.save(policy.state_dict(), os.path.join(args.out, "policy.pt"))
+            if value_net is not None:
+                torch.save(value_net.state_dict(), os.path.join(args.out, "value_net.pt"))
+
+        if not args.skip_generation:
+            np.random.seed(gen_seed)
+            random.seed(gen_seed)
+            gen_rows = generate_candidates(
+                env=env, predictor=predictor, scaler=scaler, device=device,
+                policy=policy,
+                elem_feats_scaled=elem_feats_scaled,
+                fraction_set=fraction_set,
+                n_exploit=int(cfg.get("num_gen_eps", 200)),
+                n_explore=int(cfg.get("exploration_gen_eps", 0)),
+                gen_temperature=gen_temperature,
+                gen_top_frac=gen_top_frac,
+                gen_epsilon=gen_epsilon_gen,
+                k=float(cfg.get("k", 1.0)),
+                exploit_objective=cfg.get("objective", "mean_minus_kstd"),
+            )
+            for r in gen_rows:
+                metrics.log(phase="generate", **r)
 
     # ------------------------------------------------------------------
     # Write outputs
     # ------------------------------------------------------------------
-    metrics.to_csv(os.path.join(args.out, "training_log.csv"))
+    _log_path = os.path.join(args.out, "training_log.csv")
+    _log_mode = "a" if args.resume_training else "w"
+    metrics.to_csv(_log_path, mode=_log_mode)
+    print(f"[INFO] Training log {'appended to' if _log_mode == 'a' else 'written to'} {_log_path}", flush=True)
 
     gen_rows_only = [r for r in metrics.rows if r.get("phase") == "generate"]
     if gen_rows_only:
