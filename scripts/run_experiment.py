@@ -35,6 +35,7 @@ warnings.filterwarnings(
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 
+import joblib
 import numpy as np
 import torch
 import yaml
@@ -44,11 +45,11 @@ from rl_matdesign.env_integer import IntegerRatioEnv
 from rl_matdesign.model import PolicyNet, QRegressor, ValueNet
 from rl_matdesign.training import (
     _fit_scaler_from_warmup,
+    _precompute_elem_features,
     _rollout_random_episode,
-    extract_mc_q_targets,
     generate_candidates,
+    train_dqn_online,
     train_pg,
-    train_q,
 )
 from rl_matdesign.utils.metrics import RunMetrics
 from rl_matdesign.utils.seeding import set_global_seed
@@ -64,7 +65,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--method", choices=["dqn", "reinforce", "a2c"], default=None,
                    help="RL method (overrides config 'method' field)")
     p.add_argument("--out", required=True, help="Output directory")
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--seed", type=int, default=0,
+                   help="Global RNG seed (used for training and generation unless overridden)")
+    p.add_argument("--train-seed", type=int, default=None,
+                   help="RNG seed set immediately before training (overrides --seed)")
+    p.add_argument("--gen-seed", type=int, default=None,
+                   help="RNG seed set immediately before generation (overrides --seed)")
     p.add_argument("--device", default=None, help="torch device (default: auto)")
     return p.parse_args()
 
@@ -119,7 +125,6 @@ def build_predictor(cfg: dict):
         )
 
     elif kind == "dummy":
-        # For testing without a real DPA model.
         import random as _random
 
         class _DummyPredictor:
@@ -132,7 +137,7 @@ def build_predictor(cfg: dict):
         return _DummyPredictor()
 
     else:
-        raise ValueError(f"Unknown predictor type '{kind}'. Options: hea, perovskite, dummy.")
+        raise ValueError(f"Unknown predictor type '{kind}'. Options: hea, perovskite, sinter_calcine, dummy.")
 
 
 # ---------------------------------------------------------------------------
@@ -145,8 +150,6 @@ def build_constraint_filter(cfg: dict):
         return None
     if kind == "smact_charge":
         from rl_matdesign.constraints.smact_filter import SMACTChargeFilter
-        # New syntax: smact_anions is a list of {symbol, charge, stoich} dicts.
-        # Backward-compat: single smact_anion / smact_anion_charge / smact_anion_stoich.
         if "smact_anions" in cfg:
             anions = cfg["smact_anions"]
         else:
@@ -175,34 +178,34 @@ def main() -> None:
     cfg = load_config(args.config)
 
     method = args.method or cfg.get("method", "a2c")
-    set_global_seed(args.seed)
+    train_seed = args.train_seed if args.train_seed is not None else args.seed
+    gen_seed   = args.gen_seed   if args.gen_seed   is not None else args.seed
 
+    set_global_seed(args.seed)
     os.makedirs(args.out, exist_ok=True)
 
-    # Save full run config for reproducibility.
-    run_config = {"config_file": args.config, "method": method, "seed": args.seed, **cfg}
+    run_config = {
+        "config_file": args.config, "method": method,
+        "seed": args.seed, "train_seed": train_seed, "gen_seed": gen_seed,
+        **cfg,
+    }
     with open(os.path.join(args.out, "run_config.json"), "w") as f:
         json.dump(run_config, f, indent=2)
 
     device_str = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(device_str)
-    print(f"[INFO] device={device}, method={method}, seed={args.seed}")
+    print(f"[INFO] device={device}, method={method}, seed={args.seed}, "
+          f"train_seed={train_seed}, gen_seed={gen_seed}")
 
-    # Build predictor and constraint filter.
-    predictor = build_predictor(cfg)
+    predictor    = build_predictor(cfg)
     phase_filter = build_constraint_filter(cfg)
+    env_type     = cfg.get("env_type", "fraction")
 
-    env_type = cfg.get("env_type", "fraction")
-
-    # Build environment.
     def reward_fn(formula: str) -> float:
-        # Parse terminal formula back to composition dict.
         if env_type == "integer_ratio":
-            # Raw empirical formula like "Fe3Ti2O5" — let pymatgen normalise.
             from pymatgen.core.composition import Composition
             try:
                 comp = dict(Composition(formula).fractional_composition.as_dict())
-                # Ensure plain str keys.
                 comp = {str(k): float(v) for k, v in comp.items()}
             except Exception:
                 return -2000.0
@@ -210,13 +213,9 @@ def main() -> None:
             import re
             parts = re.findall(r"([A-Z][a-z]?)([0-9]*\.?[0-9]+)", formula)
             comp = {el: float(frac) for el, frac in parts}
-            # Strip anion from composition if present.
             anion_formula = cfg.get("anion_formula", "")
             if anion_formula:
-                anion_parts = re.findall(
-                    r"([A-Z][a-z]?)([0-9]*\.?[0-9]+)", anion_formula
-                )
-                for el, _ in anion_parts:
+                for el, _ in re.findall(r"([A-Z][a-z]?)([0-9]*\.?[0-9]+)", anion_formula):
                     comp.pop(el, None)
         mean, _ = predictor.predict(comp)
         return mean
@@ -239,71 +238,70 @@ def main() -> None:
             phase_filter=phase_filter,
         )
 
-    # Determine feature and action dims.
+    # Probe dims with one random episode.
     _rollout_random_episode(env)
     state_dim = len(env.path[0].state_material_features)
-    step_dim = env.n_components
-    elem_dim = len(env.cation_set)
-    frac_dim = len(env.fraction_set)
-    print(f"[INFO] state_dim={state_dim}, step_dim={step_dim}, "
-          f"elem_dim={elem_dim}, frac_dim={frac_dim}")
+    step_dim  = env.n_components
+    fraction_set = list(env.fraction_set)
 
+    # Precompute Magpie element features (replaces one-hot element encoding).
+    elem_feats_scaled, _elem_scaler = _precompute_elem_features(
+        env.cation_set, env.state_featurizer
+    )
+    elem_dim = int(elem_feats_scaled.shape[1])
+    frac_dim = 1
+
+    print(f"[INFO] state_dim={state_dim}, step_dim={step_dim}, "
+          f"elem_dim(Magpie)={elem_dim}, frac_dim={frac_dim}")
+
+    hidden_dim = int(cfg.get("hidden_dim", 128))
     metrics = RunMetrics()
 
+    # Generation strategy (unified across DQN and PG).
+    gen_temperature = float(cfg.get("gen_temperature", 1.0))
+    gen_top_frac    = float(cfg.get("gen_top_frac", 0.0))
+    gen_epsilon_gen = float(cfg.get("gen_epsilon", 0.0))
+
     # ------------------------------------------------------------------
-    # DQN path
+    # DQN path — classical online DQN
     # ------------------------------------------------------------------
     if method == "dqn":
-        from torch.utils.data import TensorDataset, DataLoader
-        import joblib
+        set_global_seed(train_seed)
 
-        n_random_eps = int(cfg.get("num_random_eps", 500))
-        dqn_epochs = int(cfg.get("dqn_epochs", 50))
-        dqn_lr = float(cfg.get("dqn_lr", 1e-3))
-        dqn_batch = int(cfg.get("dqn_batch_size", 256))
-        gamma = float(cfg.get("gamma", 0.99))
-        hidden_dim = int(cfg.get("hidden_dim", 128))
-
-        # Random buffer.
-        print(f"[INFO] Collecting {n_random_eps} random episodes...")
-        all_inputs, all_targets = [], []
-        for i in range(n_random_eps):
-            _rollout_random_episode(env)
-            inp, tgt = extract_mc_q_targets(env.path, gamma=gamma)
-            all_inputs.extend(inp)
-            all_targets.extend(tgt)
-
-        # Fit scaler.
-        from sklearn.preprocessing import StandardScaler
-        s_mat_all = np.asarray([x[0] for x in all_inputs], dtype=float)
-        scaler = StandardScaler().fit(s_mat_all)
-
-        # Scale and build dataset.
-        s_mat_t = torch.tensor(scaler.transform(s_mat_all), dtype=torch.float32)
-        s_step_t = torch.tensor(np.asarray([x[1] for x in all_inputs], dtype=float), dtype=torch.float32)
-        a_elem_t = torch.tensor(np.asarray([x[2] for x in all_inputs], dtype=float), dtype=torch.float32)
-        a_comp_t = torch.tensor(np.asarray([x[3] for x in all_inputs], dtype=float), dtype=torch.float32)
-        y_t = torch.tensor(np.asarray(all_targets, dtype=float), dtype=torch.float32).unsqueeze(1)
-
-        dataset = TensorDataset(s_mat_t, s_step_t, a_elem_t, a_comp_t, y_t)
-        loader = DataLoader(dataset, batch_size=dqn_batch, shuffle=True)
-
-        qnet = QRegressor(state_dim=state_dim, step_dim=step_dim, elem_dim=elem_dim, frac_dim=frac_dim, hidden_dim=hidden_dim).to(device)
-        train_rows = train_q(model=qnet, loader=loader, device=device, epochs=dqn_epochs, lr=dqn_lr)
+        qnet, scaler, train_rows = train_dqn_online(
+            env=env,
+            elem_feats_scaled=elem_feats_scaled,
+            fraction_set=fraction_set,
+            device=device,
+            hidden_dim=hidden_dim,
+            n_warmup_eps=int(cfg.get("dqn_warmup_eps", cfg.get("pg_warmup_eps", 500))),
+            n_train_eps=int(cfg.get("num_train_eps", 20000)),
+            buffer_size=int(cfg.get("buffer_size", 50000)),
+            batch_size=int(cfg.get("dqn_batch_size", 256)),
+            grad_steps_per_ep=int(cfg.get("grad_steps_per_ep", 5)),
+            target_update_freq=int(cfg.get("target_update_freq", 100)),
+            eps_anneal_eps=int(cfg.get("eps_anneal_eps", 10000)),
+            eps_min=float(cfg.get("eps_min", 0.05)),
+            gamma=float(cfg.get("dqn_gamma", cfg.get("gamma", 0.9))),
+            lr=float(cfg.get("dqn_lr", 1e-3)),
+        )
         for r in train_rows:
             metrics.log(**r)
 
-        # Save.
         torch.save(qnet.state_dict(), os.path.join(args.out, "qnet.pt"))
         joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"))
 
-        # Generate.
+        set_global_seed(gen_seed)
         gen_rows = generate_candidates(
             env=env, predictor=predictor, scaler=scaler, device=device,
             qnet=qnet,
+            elem_feats_scaled=elem_feats_scaled,
+            fraction_set=fraction_set,
             n_exploit=int(cfg.get("num_gen_eps", 200)),
             n_explore=int(cfg.get("exploration_gen_eps", 0)),
-            stochastic_top_frac=float(cfg.get("stochastic_top_frac", 0.0)),
+            gen_temperature=gen_temperature,
+            gen_top_frac=gen_top_frac,
+            gen_epsilon=gen_epsilon_gen,
             k=float(cfg.get("k", 1.0)),
         )
         for r in gen_rows:
@@ -313,39 +311,42 @@ def main() -> None:
     # PG paths (REINFORCE / A2C)
     # ------------------------------------------------------------------
     else:
-        pg_warmup = int(cfg.get("pg_warmup_eps", 200))
-        pg_train = int(cfg.get("pg_train_eps", 1000))
-        lr_actor = float(cfg.get("pg_lr_actor", 1e-3))
-        lr_critic = float(cfg.get("pg_lr_critic", 1e-3))
-        entropy_coef = float(cfg.get("entropy_coef", 0.01))
-        pg_epsilon = float(cfg.get("pg_epsilon", 0.0))
-        gamma = float(cfg.get("gamma", 0.99))
-        hidden_dim = int(cfg.get("hidden_dim", 128))
+        pg_warmup           = int(cfg.get("pg_warmup_eps", 200))
+        pg_train            = int(cfg.get("pg_train_eps", 1000))
+        lr_actor            = float(cfg.get("pg_lr_actor", 1e-3))
+        lr_critic           = float(cfg.get("pg_lr_critic", 1e-3))
+        entropy_coef        = float(cfg.get("entropy_coef", 0.01))
+        gamma               = float(cfg.get("pg_gamma", cfg.get("gamma", 0.99)))
         repeat_penalty_coef = float(cfg.get("repeat_penalty_coef", 0.0))
         repeat_penalty_shape = cfg.get("repeat_penalty_shape", "log")
 
         scaler = _fit_scaler_from_warmup(env, pg_warmup)
-
-        import joblib
         joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"))
 
-        policy = PolicyNet(state_dim=state_dim, step_dim=step_dim, elem_dim=elem_dim, frac_dim=frac_dim, hidden_dim=hidden_dim).to(device)
+        policy = PolicyNet(
+            state_dim=state_dim, step_dim=step_dim,
+            elem_dim=elem_dim, frac_dim=frac_dim, hidden_dim=hidden_dim,
+        ).to(device)
         value_net = None
         if method == "a2c":
-            value_net = ValueNet(state_dim=state_dim, step_dim=step_dim, hidden_dim=hidden_dim).to(device)
+            value_net = ValueNet(
+                state_dim=state_dim, step_dim=step_dim, hidden_dim=hidden_dim,
+            ).to(device)
 
+        set_global_seed(train_seed)
         train_rows = train_pg(
             policy=policy,
             value_net=value_net,
             env=env,
             scaler=scaler,
+            elem_feats_scaled=elem_feats_scaled,
+            fraction_set=fraction_set,
             device=device,
             n_episodes=pg_train,
             gamma=gamma,
             lr_actor=lr_actor,
             lr_critic=lr_critic,
             entropy_coef=entropy_coef,
-            pg_epsilon=pg_epsilon,
             rl_method=method,
             repeat_penalty_coef=repeat_penalty_coef,
             repeat_penalty_shape=repeat_penalty_shape,
@@ -358,13 +359,17 @@ def main() -> None:
         if value_net is not None:
             torch.save(value_net.state_dict(), os.path.join(args.out, "value_net.pt"))
 
+        set_global_seed(gen_seed)
         gen_rows = generate_candidates(
             env=env, predictor=predictor, scaler=scaler, device=device,
             policy=policy,
+            elem_feats_scaled=elem_feats_scaled,
+            fraction_set=fraction_set,
             n_exploit=int(cfg.get("num_gen_eps", 200)),
             n_explore=int(cfg.get("exploration_gen_eps", 0)),
-            stochastic=bool(cfg.get("pg_gen_stochastic", True)),
-            temperature=float(cfg.get("temperature", 1.0)),
+            gen_temperature=gen_temperature,
+            gen_top_frac=gen_top_frac,
+            gen_epsilon=gen_epsilon_gen,
             k=float(cfg.get("k", 1.0)),
             exploit_objective=cfg.get("objective", "mean_minus_kstd"),
         )
@@ -385,12 +390,12 @@ def main() -> None:
             writer.writeheader()
             writer.writerows(gen_rows_only)
 
-    # Print summary.
-    top10 = metrics.top_k("dp_mean", k=10, phase="generate")
+    top10     = metrics.top_k("dp_mean", k=10, phase="generate")
     diversity = metrics.diversity(phase="generate")
-    pareto = metrics.pareto_front(phase="generate")
-    print(f"\n[SUMMARY] diversity={diversity} | top-10 mean dp_mean="
-          f"{float(np.mean([float(r['dp_mean']) for r in top10])):.4f}")
+    pareto    = metrics.pareto_front(phase="generate")
+    if top10:
+        print(f"\n[SUMMARY] diversity={diversity} | top-10 mean dp_mean="
+              f"{float(np.mean([float(r['dp_mean']) for r in top10])):.4f}")
     print(f"[SUMMARY] Pareto front size: {len(pareto)} candidates")
     print(f"[INFO] Results saved to {args.out}")
 

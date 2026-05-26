@@ -10,9 +10,9 @@ pg_train_eps: 50
 pg_lr_actor: 0.001
 pg_lr_critic: 0.001
 entropy_coef: 0.01
-pg_epsilon: 0.0
-pg_gen_stochastic: true
-temperature: 1.0
+gen_temperature: 1.0
+gen_top_frac: 0.0
+gen_epsilon: 0.0
 gamma: 0.99
 hidden_dim: 64
 normalise_returns: true
@@ -24,3 +24,11 @@ num_random_eps: 50
 dqn_epochs: 5
 dqn_lr: 0.001
 dqn_batch_size: 32
+# Classical online DQN (used when --method dqn with general-framework)
+dqn_warmup_eps: 20
+num_train_eps: 100
+buffer_size: 1000
+grad_steps_per_ep: 5
+target_update_freq: 20
+eps_anneal_eps: 50
+eps_min: 0.05

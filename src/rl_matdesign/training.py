@@ -1,30 +1,37 @@
-"""RL training functions extracted from the monolithic experiment script.
+"""RL training functions for rl_matdesign experiments.
 
 All functions are domain-agnostic: they operate on a :class:`CompositionEnv`
 and a :class:`~rl_matdesign.predictors.base.PropertyPredictor` and contain
 no material-system-specific logic.
 
-Key improvements over the original implementation
---------------------------------------------------
-- ``predictor: PropertyPredictor`` parameter replaces the hardcoded
-  ``dp_predictor.predict_overpotential()`` call.
-- Return normalisation in ``train_pg``: per-batch ``(G - mean) / (std + ε)``
-  before computing the policy gradient reduces gradient variance, especially
-  when the reward scale is unknown at the start of training.
-- Dual-phase generation in ``generate_candidates``: a single call can produce
-  both exploitation candidates (``mean_minus_kstd`` objective) and exploration
-  candidates (``mean_plus_kstd`` objective, high model uncertainty → DFT
-  validation targets).  Both pools are tagged with a ``purpose`` column.
-- ``_comp_key`` is a module-level utility so it can be shared by both training
-  and generation without re-definition.
+Key improvements
+----------------
+- Classical online DQN (``train_dqn_online``): FIFO replay buffer, TD Bellman
+  targets, hard target-network copy, SmoothL1 loss.  Replaces offline MC
+  Q-learning.
+- Magpie element features: ``_precompute_elem_features`` computes per-element
+  Magpie feature vectors (separately scaled), replacing one-hot element
+  encoding everywhere.  Fraction encoding is a scalar float, replacing
+  one-hot fraction encoding.
+- Unified generation flags (``gen_temperature / gen_top_frac / gen_epsilon``):
+  same three-mode exploration strategy for DQN and PG generation.  Default
+  Boltzmann T=1.0 prevents pure-greedy composition collapse.
+- ``pg_epsilon`` removed from PG rollout: epsilon-greedy is off-policy
+  contamination in an on-policy method; removed entirely.
+- Return normalisation in ``train_pg`` (default True): per-episode
+  ``(G - mean) / (std + ε)`` reduces gradient variance.
+- Dual-phase generation in ``generate_candidates``: exploitation + exploration
+  candidates from one call, tagged with ``purpose`` column.
 """
 from __future__ import annotations
 
+import collections
+import copy
 import math
 import random
 import warnings
 from collections import Counter
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -41,11 +48,7 @@ from .predictors.base import PropertyPredictor
 # ---------------------------------------------------------------------------
 
 def _comp_key(comp: Dict[str, float], total_units: int = 20) -> tuple:
-    """Canonical hashable key for a terminal cation composition dict.
-
-    Quantises each fraction to integer units, drops zero-unit elements, and
-    sorts alphabetically.  Used for deduplication and visit-count tracking.
-    """
+    """Canonical hashable key for a terminal cation composition dict."""
     items = []
     for el, frac in comp.items():
         units = int(round(float(frac) * total_units))
@@ -57,18 +60,7 @@ def _comp_key(comp: Dict[str, float], total_units: int = 20) -> tuple:
 def objective_from_mean_std(
     mean: float, std: float, objective: str = "mean", k: float = 1.0
 ) -> float:
-    """Compute scalar reward from predictor (mean, std) output.
-
-    Parameters
-    ----------
-    mean, std:
-        Output of ``PropertyPredictor.predict()``.
-    objective:
-        One of ``"mean"``, ``"mean_minus_kstd"`` (exploitation),
-        ``"mean_plus_kstd"`` (exploration / uncertainty-driven).
-    k:
-        Coefficient for the std term.
-    """
+    """Compute scalar reward from predictor (mean, std) output."""
     if objective == "mean":
         return mean
     elif objective == "mean_minus_kstd":
@@ -80,30 +72,294 @@ def objective_from_mean_std(
 
 
 # ---------------------------------------------------------------------------
-# Replay buffer helpers (DQN)
+# Element feature precomputation (Magpie)
+# ---------------------------------------------------------------------------
+
+def _precompute_elem_features(
+    cation_set: List[str],
+    featurizer: Callable,
+) -> Tuple[np.ndarray, StandardScaler]:
+    """Precompute and scale Magpie feature vectors for each cation.
+
+    Uses a separate scaler from s_mat because single-element statistics differ
+    from composite material statistics (some features have zero variance for
+    single elements).
+
+    Returns
+    -------
+    (elem_feats_scaled, elem_scaler):
+        ``elem_feats_scaled`` has shape ``(n_elements, feature_dim)``.
+        Index ``i`` corresponds to ``cation_set[i]``.
+    """
+    raw = np.asarray([featurizer(el + "1.00") for el in cation_set], dtype=float)
+    elem_scaler = StandardScaler()
+    elem_scaler.fit(raw)
+    return elem_scaler.transform(raw), elem_scaler
+
+
+# ---------------------------------------------------------------------------
+# Replay buffer helpers (classical DQN)
+# ---------------------------------------------------------------------------
+
+def add_episode_to_buffer(
+    path: list,
+    buffer: collections.deque,
+    elem_feats_scaled: np.ndarray,
+    fraction_set: List[str],
+) -> None:
+    """Convert a completed episode path into buffer rows and append.
+
+    Each row stores:
+    - Raw (unscaled) s_mat and s_mat_next for lazy scaling at batch time.
+    - Element index and comp scalar value instead of one-hot vectors.
+    - ``next_allowed_idx``: list of (elem_idx, comp_idx) pairs for the next
+      step, used to compute the max-Q bootstrap target.
+    """
+    for k, step in enumerate(path):
+        done = k == len(path) - 1
+        next_step = path[k + 1] if not done else None
+        next_allowed_idx: List[Tuple[int, int]] = []
+        if not done:
+            for (elem_oh, comp_oh) in next_step.allowed_actions:
+                next_allowed_idx.append(
+                    (int(np.argmax(elem_oh)), int(np.argmax(comp_oh)))
+                )
+        buffer.append({
+            "s_mat_raw":       np.asarray(step.state_material_features, dtype=float),
+            "s_step":          np.asarray(step.state_step_onehot, dtype=float),
+            "a_elem_idx":      int(np.argmax(step.action_elem_onehot)),
+            "a_comp_val":      float(fraction_set[int(np.argmax(step.action_comp_onehot))]),
+            "reward":          float(step.reward),
+            "s_mat_next_raw":  np.asarray(next_step.state_material_features, dtype=float)
+                               if not done else np.zeros(len(step.state_material_features), dtype=float),
+            "s_step_next":     np.asarray(next_step.state_step_onehot, dtype=float)
+                               if not done else np.zeros(len(step.state_step_onehot), dtype=float),
+            "next_allowed_idx": next_allowed_idx,
+            "done":            done,
+        })
+
+
+def _compute_td_target(
+    row: dict,
+    target_net: torch.nn.Module,
+    s_mat_scaler: StandardScaler,
+    elem_feats_scaled: np.ndarray,
+    fraction_set: List[str],
+    device: torch.device,
+    gamma: float,
+) -> float:
+    """TD target for one buffer row: r if done, else r + γ·max_a' Q_target(s', a')."""
+    if row["done"] or not row["next_allowed_idx"]:
+        return float(row["reward"])
+    next_idxs = row["next_allowed_idx"]
+    n = len(next_idxs)
+    ns_mat = s_mat_scaler.transform(row["s_mat_next_raw"].reshape(1, -1))[0]
+    a_e = np.asarray([elem_feats_scaled[ei] for ei, _ in next_idxs], dtype=float)
+    a_c = np.asarray([[float(fraction_set[fi])] for _, fi in next_idxs], dtype=float)
+    ns_mat_b = np.repeat(ns_mat.reshape(1, -1), n, axis=0)
+    ns_step_b = np.repeat(row["s_step_next"].reshape(1, -1), n, axis=0)
+    with torch.no_grad():
+        q_next = target_net(
+            torch.tensor(ns_mat_b,  dtype=torch.float32, device=device),
+            torch.tensor(ns_step_b, dtype=torch.float32, device=device),
+            torch.tensor(a_e,       dtype=torch.float32, device=device),
+            torch.tensor(a_c,       dtype=torch.float32, device=device),
+        ).reshape(-1)
+    return float(row["reward"]) + gamma * float(q_next.max().item())
+
+
+def _dqn_gradient_step(
+    qnet: torch.nn.Module,
+    batch: list,
+    target_net: torch.nn.Module,
+    s_mat_scaler: StandardScaler,
+    elem_feats_scaled: np.ndarray,
+    fraction_set: List[str],
+    optimizer: torch.optim.Optimizer,
+    loss_fn: torch.nn.Module,
+    device: torch.device,
+    gamma: float,
+) -> float:
+    """One DQN gradient step: SmoothL1(Q(s,a), TD-target)."""
+    y = [
+        _compute_td_target(r, target_net, s_mat_scaler, elem_feats_scaled,
+                           fraction_set, device, gamma)
+        for r in batch
+    ]
+    s_mat_b  = torch.tensor(
+        s_mat_scaler.transform(np.asarray([r["s_mat_raw"] for r in batch], dtype=float)),
+        dtype=torch.float32, device=device,
+    )
+    s_step_b = torch.tensor(
+        np.asarray([r["s_step"] for r in batch], dtype=float),
+        dtype=torch.float32, device=device,
+    )
+    a_elem_b = torch.tensor(
+        np.asarray([elem_feats_scaled[r["a_elem_idx"]] for r in batch], dtype=float),
+        dtype=torch.float32, device=device,
+    )
+    a_comp_b = torch.tensor(
+        np.asarray([[r["a_comp_val"]] for r in batch], dtype=float),
+        dtype=torch.float32, device=device,
+    )
+    y_t = torch.tensor(y, dtype=torch.float32, device=device).reshape(-1, 1)
+    qnet.train()
+    loss = loss_fn(qnet(s_mat_b, s_step_b, a_elem_b, a_comp_b), y_t)
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+    return float(loss.item())
+
+
+# ---------------------------------------------------------------------------
+# Classical online DQN training
+# ---------------------------------------------------------------------------
+
+def train_dqn_online(
+    *,
+    env: CompositionEnv,
+    elem_feats_scaled: np.ndarray,
+    fraction_set: List[str],
+    device: torch.device,
+    hidden_dim: int = 128,
+    n_warmup_eps: int = 500,
+    n_train_eps: int = 20000,
+    buffer_size: int = 50000,
+    batch_size: int = 256,
+    grad_steps_per_ep: int = 5,
+    target_update_freq: int = 100,
+    eps_anneal_eps: int = 10000,
+    eps_min: float = 0.05,
+    gamma: float = 0.9,
+    lr: float = 1e-3,
+) -> Tuple[torch.nn.Module, StandardScaler, List[dict]]:
+    """Classical online DQN with FIFO replay buffer and TD targets.
+
+    Phase 0 — Warmup:
+        Roll out ``n_warmup_eps`` random episodes with real rewards to pre-fill
+        the buffer and fit the s_mat StandardScaler.
+
+    Phase 1 — Training loop (``n_train_eps`` episodes):
+        Each episode:
+        1. ε-greedy rollout → 5 new buffer rows.
+        2. ``grad_steps_per_ep`` gradient steps, each sampling ``batch_size``
+           rows from the full buffer (SmoothL1 loss on TD targets).
+        3. Hard-copy qnet → target_net every ``target_update_freq`` episodes.
+        4. Linear epsilon anneal: ε = max(eps_min, 1 − ep / eps_anneal_eps).
+
+    Returns
+    -------
+    (qnet, scaler, metrics):
+        Trained Q-network, fitted s_mat scaler, and list of per-episode metric
+        dicts (phase="dqn_train").
+    """
+    from .model import QRegressor
+
+    buffer: collections.deque = collections.deque(maxlen=buffer_size)
+
+    print(f"[INFO] DQN warmup: {n_warmup_eps} random episodes with real rewards...")
+    pbar = tqdm(total=n_warmup_eps, desc="DQN warmup")
+    for _ in range(n_warmup_eps):
+        _rollout_random_episode(env)
+        add_episode_to_buffer(env.path, buffer, elem_feats_scaled, fraction_set)
+        pbar.update(1)
+    pbar.close()
+
+    s_mat_all = np.asarray([r["s_mat_raw"] for r in buffer], dtype=float)
+    scaler = StandardScaler().fit(s_mat_all)
+    state_dim = int(s_mat_all.shape[1])
+    elem_dim  = int(elem_feats_scaled.shape[1])
+    step_dim  = env.n_components
+    print(f"[INFO] s_mat scaler fitted on {len(s_mat_all)} warmup rows.")
+
+    qnet = QRegressor(
+        state_dim=state_dim, step_dim=step_dim,
+        elem_dim=elem_dim, frac_dim=1, hidden_dim=hidden_dim,
+    ).to(device)
+    target_net = copy.deepcopy(qnet)
+    target_net.eval()
+    optimizer = torch.optim.Adam(qnet.parameters(), lr=lr)
+    loss_fn = torch.nn.SmoothL1Loss()
+
+    eps = 1.0
+    metrics: List[dict] = []
+    pbar = tqdm(range(n_train_eps), desc="DQN train")
+
+    for ep in pbar:
+        # 1. Collect one episode with epsilon-greedy policy.
+        qnet.eval()
+        env.initialize()
+        for _t in range(env.n_components):
+            _allowed = env.allowed_actions()
+            _s_mat_sc = scaler.transform(
+                env.state_featurizer(env.state).reshape(1, -1))[0]
+            _s_step = np.zeros(env.n_components, dtype=float)
+            _s_step[env.counter] = 1.0
+            if float(np.random.rand()) < eps:
+                _a = random.choice(_allowed)
+            else:
+                _a = choose_action(
+                    model=qnet, device=device,
+                    s_material=_s_mat_sc, s_step=_s_step,
+                    allowed_actions=_allowed,
+                    elem_feats_scaled=elem_feats_scaled,
+                    fraction_set=fraction_set,
+                    gen_temperature=1.0,
+                )
+            env.step(_a)
+
+        episode_reward = float(env.path[-1].reward)
+        add_episode_to_buffer(env.path, buffer, elem_feats_scaled, fraction_set)
+
+        # 2. Gradient steps.
+        mean_loss = float("nan")
+        if len(buffer) >= batch_size:
+            buf_list = list(buffer)
+            losses = []
+            for _ in range(grad_steps_per_ep):
+                _batch = random.sample(buf_list, batch_size)
+                losses.append(_dqn_gradient_step(
+                    qnet, _batch, target_net, scaler,
+                    elem_feats_scaled, fraction_set, optimizer, loss_fn, device, gamma,
+                ))
+            mean_loss = float(np.mean(losses))
+
+        # 3. Hard target-net copy.
+        if (ep + 1) % target_update_freq == 0:
+            target_net.load_state_dict(qnet.state_dict())
+            target_net.eval()
+
+        # 4. Linear epsilon anneal.
+        eps = max(eps_min, 1.0 - ep / eps_anneal_eps)
+
+        metrics.append({
+            "phase": "dqn_train",
+            "episode": ep + 1,
+            "return": episode_reward,
+            "train_loss": mean_loss,
+            "epsilon": eps,
+            "buffer_rows": len(buffer),
+        })
+        pbar.set_postfix(
+            eps=f"{eps:.3f}",
+            loss=f"{mean_loss:.4f}" if not math.isnan(mean_loss) else "warmup",
+            ret=f"{episode_reward:.3f}",
+        )
+
+    pbar.close()
+    return qnet, scaler, metrics
+
+
+# ---------------------------------------------------------------------------
+# Legacy offline DQN helpers (kept for backward compatibility)
 # ---------------------------------------------------------------------------
 
 def extract_mc_q_targets(
     episode: List, gamma: float = 0.99
 ) -> Tuple[List[Tuple], List[float]]:
-    """Compute Monte-Carlo Q-targets from an episode path.
-
-    Parameters
-    ----------
-    episode:
-        List of :class:`~rl_matdesign.env.EpisodeStep` objects.
-    gamma:
-        Discount factor.
-
-    Returns
-    -------
-    (inputs, q_targets):
-        ``inputs`` is a list of ``(s_mat, s_step, a_elem, a_comp)`` numpy arrays.
-        ``q_targets`` is the corresponding list of scalar Q targets.
-    """
+    """Compute Monte-Carlo Q-targets from an episode path (legacy offline DQN)."""
     inputs = []
     q_targets: List[float] = []
-
     G = 0.0
     for step in reversed(episode):
         G = float(step.reward) + gamma * G
@@ -114,15 +370,10 @@ def extract_mc_q_targets(
             np.asarray(step.action_elem_onehot, dtype=float),
             np.asarray(step.action_comp_onehot, dtype=float),
         ))
-
     inputs.reverse()
     q_targets.reverse()
     return inputs, q_targets
 
-
-# ---------------------------------------------------------------------------
-# DQN training
-# ---------------------------------------------------------------------------
 
 def train_q(
     *,
@@ -133,44 +384,31 @@ def train_q(
     lr: float,
     iteration: int = 0,
 ) -> List[dict]:
-    """Supervised regression on MC Q-targets (MSELoss + Adam)."""
+    """Supervised regression on MC Q-targets (MSELoss + Adam) — legacy offline DQN."""
     model.train()
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = torch.nn.MSELoss()
     metrics: List[dict] = []
-
     pbar = tqdm(range(epochs), desc="Q epochs")
     for epoch_idx in pbar:
         batch_losses: List[float] = []
         for s_mat, s_step, a_elem, a_comp, y in loader:
-            s_mat = s_mat.to(device)
-            s_step = s_step.to(device)
-            a_elem = a_elem.to(device)
-            a_comp = a_comp.to(device)
-            y = y.to(device)
-
             opt.zero_grad(set_to_none=True)
-            pred = model(s_mat, s_step, a_elem, a_comp)
-            loss = loss_fn(pred, y)
+            pred = model(s_mat.to(device), s_step.to(device), a_elem.to(device), a_comp.to(device))
+            loss = loss_fn(pred, y.to(device))
             loss.backward()
             opt.step()
             batch_losses.append(float(loss.item()))
-
         epoch_loss = float(np.mean(batch_losses)) if batch_losses else float("nan")
-        metrics.append({
-            "phase": "dqn_train",
-            "iteration": iteration,
-            "epoch": epoch_idx + 1,
-            "mse_loss": epoch_loss,
-        })
+        metrics.append({"phase": "dqn_train", "iteration": iteration,
+                        "epoch": epoch_idx + 1, "mse_loss": epoch_loss})
         pbar.set_postfix(mse_loss=f"{epoch_loss:.4f}")
-        tqdm.write(
-            f"[DQN train] iter={iteration} epoch={epoch_idx+1}/{epochs} "
-            f"| mse_loss={epoch_loss:.4f}"
-        )
-
     return metrics
 
+
+# ---------------------------------------------------------------------------
+# Action selection (DQN)
+# ---------------------------------------------------------------------------
 
 def choose_action(
     *,
@@ -179,41 +417,64 @@ def choose_action(
     s_material: np.ndarray,
     s_step: np.ndarray,
     allowed_actions: Sequence[Tuple[Tuple[float, ...], Tuple[float, ...]]],
-    stochastic_top_frac: float = 0.0,
+    elem_feats_scaled: np.ndarray,
+    fraction_set: List[str],
+    gen_epsilon: float = 0.0,
+    gen_top_frac: float = 0.0,
+    gen_temperature: float = 0.0,
 ) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
-    """Select an action from *allowed_actions* using a Q-network.
+    """Select action from Q-network using Magpie encoding.
+
+    Priority: ε-greedy > Boltzmann > top-k > ValueError (no pure greedy).
 
     Parameters
     ----------
-    stochastic_top_frac:
-        If > 0, sample uniformly from the top-k fraction of actions by Q-value.
-        If 0 (default), return the greedy argmax action.
+    gen_epsilon:
+        ε-greedy probability. Short-circuits before Q computation.
+    gen_temperature:
+        Boltzmann temperature τ > 0. Ignored if gen_epsilon fires.
+    gen_top_frac:
+        Uniform sample from top-k% by Q-value. Ignored if higher-priority
+        strategy fires.
     """
     if not allowed_actions:
         raise RuntimeError("No allowed actions.")
-
-    a_elem = np.asarray([a[0] for a in allowed_actions], dtype=float)
-    a_comp = np.asarray([a[1] for a in allowed_actions], dtype=float)
     n = len(allowed_actions)
-    s_mat_batch = np.repeat(s_material.reshape(1, -1), n, axis=0)
-    s_step_batch = np.repeat(s_step.reshape(1, -1), n, axis=0)
+
+    if gen_epsilon > 0.0 and float(np.random.rand()) < gen_epsilon:
+        return allowed_actions[int(np.random.randint(n))]
+
+    a_elem = np.asarray(
+        [elem_feats_scaled[int(np.argmax(a[0]))] for a in allowed_actions], dtype=float
+    )
+    a_comp = np.asarray(
+        [[float(fraction_set[int(np.argmax(a[1]))])] for a in allowed_actions], dtype=float
+    )
+    s_mat_b  = np.repeat(s_material.reshape(1, -1), n, axis=0)
+    s_step_b = np.repeat(s_step.reshape(1, -1), n, axis=0)
 
     with torch.no_grad():
         q = model(
-            torch.tensor(s_mat_batch, dtype=torch.float32, device=device),
-            torch.tensor(s_step_batch, dtype=torch.float32, device=device),
-            torch.tensor(a_elem, dtype=torch.float32, device=device),
-            torch.tensor(a_comp, dtype=torch.float32, device=device),
+            torch.tensor(s_mat_b,  dtype=torch.float32, device=device),
+            torch.tensor(s_step_b, dtype=torch.float32, device=device),
+            torch.tensor(a_elem,   dtype=torch.float32, device=device),
+            torch.tensor(a_comp,   dtype=torch.float32, device=device),
         ).reshape(-1)
 
-    order = torch.argsort(q, descending=True).cpu().tolist()
+    if gen_temperature > 0.0:
+        q_np = q.cpu().numpy().astype(float) / gen_temperature
+        q_np -= q_np.max()
+        probs = np.exp(q_np); probs /= probs.sum()
+        return allowed_actions[int(np.random.choice(n, p=probs))]
 
-    if stochastic_top_frac <= 0.0:
-        return allowed_actions[int(order[0])]
+    if gen_top_frac > 0.0:
+        k = max(1, int(round(gen_top_frac * n)))
+        topk = torch.argsort(q, descending=True).cpu().tolist()[:k]
+        return allowed_actions[int(np.random.choice(topk))]
 
-    k = max(1, int(round(stochastic_top_frac * n)))
-    idx = int(np.random.choice(order[:k]))
-    return allowed_actions[idx]
+    raise ValueError(
+        "No generation strategy active: set gen_temperature, gen_top_frac, or gen_epsilon > 0."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -234,10 +495,13 @@ def _rollout_policy_episode(
     qnet: torch.nn.Module,
     scaler: StandardScaler,
     device: torch.device,
-    stochastic_top_frac: float = 0.0,
-    online_epsilon: float = 0.0,
+    elem_feats_scaled: np.ndarray,
+    fraction_set: List[str],
+    gen_epsilon: float = 0.0,
+    gen_top_frac: float = 0.0,
+    gen_temperature: float = 1.0,
 ) -> None:
-    """Roll out one episode guided by a Q-network (with optional ε-greedy)."""
+    """Roll out one episode guided by a Q-network (used during generation)."""
     env.initialize()
     for _ in range(env.n_components):
         allowed = env.allowed_actions()
@@ -245,18 +509,16 @@ def _rollout_policy_episode(
         s_step = np.zeros(env.n_components, dtype=float)
         if env.counter < env.n_components:
             s_step[env.counter] = 1.0
-
-        if online_epsilon > 0.0 and float(np.random.rand()) < online_epsilon:
-            a = random.choice(allowed)
-        else:
-            a = choose_action(
-                model=qnet,
-                device=device,
-                s_material=s_mat,
-                s_step=s_step,
-                allowed_actions=allowed,
-                stochastic_top_frac=(0.0 if online_epsilon > 0.0 else stochastic_top_frac),
-            )
+        a = choose_action(
+            model=qnet, device=device,
+            s_material=s_mat, s_step=s_step,
+            allowed_actions=allowed,
+            elem_feats_scaled=elem_feats_scaled,
+            fraction_set=fraction_set,
+            gen_epsilon=gen_epsilon,
+            gen_top_frac=gen_top_frac,
+            gen_temperature=gen_temperature,
+        )
         env.step(a)
 
 
@@ -264,7 +526,8 @@ def _fit_scaler_from_warmup(env: CompositionEnv, n_warmup_eps: int) -> StandardS
     """Fit a StandardScaler on material features from random warmup episodes.
 
     The reward function is temporarily replaced with a no-op so warmup does not
-    invoke the (potentially expensive) PropertyPredictor.
+    invoke the (potentially expensive) PropertyPredictor.  Used by PG methods
+    only (DQN warmup is handled inside ``train_dqn_online``).
     """
     all_s_mat = []
     original_reward_fn = env.reward_fn
@@ -279,7 +542,6 @@ def _fit_scaler_from_warmup(env: CompositionEnv, n_warmup_eps: int) -> StandardS
     finally:
         env.reward_fn = original_reward_fn
         pbar.close()
-
     scaler = StandardScaler()
     scaler.fit(np.asarray(all_s_mat, dtype=float))
     print(f"[INFO] Scaler fitted on {len(all_s_mat)} warmup states.")
@@ -291,10 +553,11 @@ def _rollout_pg_episode(
     env: CompositionEnv,
     policy: torch.nn.Module,
     scaler: StandardScaler,
+    elem_feats_scaled: np.ndarray,
+    fraction_set: List[str],
     device: torch.device,
-    pg_epsilon: float = 0.0,
 ) -> None:
-    """Roll out one episode using the PolicyNet (softmax sampling)."""
+    """Roll out one episode with pure softmax sampling (on-policy, no pg_epsilon)."""
     env.initialize()
     for _ in range(env.n_components):
         allowed = env.allowed_actions()
@@ -302,27 +565,24 @@ def _rollout_pg_episode(
         s_step = np.zeros(env.n_components, dtype=float)
         if env.counter < env.n_components:
             s_step[env.counter] = 1.0
-
-        if pg_epsilon > 0.0 and float(np.random.rand()) < pg_epsilon:
-            a = random.choice(allowed)
-        else:
-            n = len(allowed)
-            a_elem_batch = np.asarray([a[0] for a in allowed], dtype=float)
-            a_comp_batch = np.asarray([a[1] for a in allowed], dtype=float)
-            s_mat_batch = np.repeat(s_mat.reshape(1, -1), n, axis=0)
-            s_step_batch = np.repeat(s_step.reshape(1, -1), n, axis=0)
-            with torch.no_grad():
-                logits = policy(
-                    torch.tensor(s_mat_batch, dtype=torch.float32, device=device),
-                    torch.tensor(s_step_batch, dtype=torch.float32, device=device),
-                    torch.tensor(a_elem_batch, dtype=torch.float32, device=device),
-                    torch.tensor(a_comp_batch, dtype=torch.float32, device=device),
-                ).reshape(-1)
-            probs = torch.softmax(logits, dim=0).cpu().numpy()
-            idx = int(np.random.choice(n, p=probs))
-            a = allowed[idx]
-
-        env.step(a)
+        n = len(allowed)
+        a_elem_batch = np.asarray(
+            [elem_feats_scaled[int(np.argmax(a[0]))] for a in allowed], dtype=float
+        )
+        a_comp_batch = np.asarray(
+            [[float(fraction_set[int(np.argmax(a[1]))])] for a in allowed], dtype=float
+        )
+        s_mat_batch  = np.repeat(s_mat.reshape(1, -1), n, axis=0)
+        s_step_batch = np.repeat(s_step.reshape(1, -1), n, axis=0)
+        with torch.no_grad():
+            logits = policy(
+                torch.tensor(s_mat_batch,  dtype=torch.float32, device=device),
+                torch.tensor(s_step_batch, dtype=torch.float32, device=device),
+                torch.tensor(a_elem_batch, dtype=torch.float32, device=device),
+                torch.tensor(a_comp_batch, dtype=torch.float32, device=device),
+            ).reshape(-1)
+        probs = torch.softmax(logits, dim=0).cpu().numpy()
+        env.step(allowed[int(np.random.choice(n, p=probs))])
 
 
 # ---------------------------------------------------------------------------
@@ -335,31 +595,29 @@ def train_pg(
     value_net: Optional[torch.nn.Module],
     env: CompositionEnv,
     scaler: StandardScaler,
+    elem_feats_scaled: np.ndarray,
+    fraction_set: List[str],
     device: torch.device,
     n_episodes: int,
     gamma: float = 0.99,
     lr_actor: float = 1e-3,
     lr_critic: float = 1e-3,
     entropy_coef: float = 0.01,
-    pg_epsilon: float = 0.0,
     rl_method: str = "a2c",
     repeat_penalty_coef: float = 0.0,
     repeat_penalty_shape: str = "log",
     normalise_returns: bool = True,
     max_train_attempts: Optional[int] = None,
 ) -> List[dict]:
-    """Online REINFORCE or A2C training loop.
+    """Online REINFORCE or A2C training loop with Magpie action encoding.
 
-    Improvements over the original implementation
-    ----------------------------------------------
-    ``normalise_returns`` (new, default True):
-        Normalise returns per-episode as ``(G - mean(G)) / (std(G) + 1e-8)``
-        before computing the policy gradient.  This reduces gradient variance
-        substantially when the reward scale is unknown at training start and is
-        a standard PG improvement missing from the original script.
+    The actor gradient uses shaped returns (with repeat penalty applied after
+    optional normalisation).  The critic (A2C only) learns on raw returns so
+    V(s) stays stationary.
 
-    The *actor* gradient uses shaped returns (with repeat penalty).
-    The *critic* (A2C only) learns on raw returns so V(s) stays stationary.
+    ``pg_epsilon`` has been removed: epsilon-greedy is off-policy contamination
+    in an on-policy method.  Exploration is handled by softmax temperature
+    during generation.
     """
     policy.train()
     opt_actor = torch.optim.Adam(policy.parameters(), lr=lr_actor)
@@ -383,13 +641,16 @@ def train_pg(
     pbar = tqdm(total=n_episodes, desc=f"{rl_method.upper()} training")
     while accepted < n_episodes and (max_train_attempts is None or attempted < max_train_attempts):
         attempted += 1
-        _rollout_pg_episode(env=env, policy=policy, scaler=scaler, device=device, pg_epsilon=pg_epsilon)
+        _rollout_pg_episode(
+            env=env, policy=policy, scaler=scaler,
+            elem_feats_scaled=elem_feats_scaled, fraction_set=fraction_set,
+            device=device,
+        )
 
         path = env.path
         if not path:
             continue
 
-        # Monte-Carlo returns (backwards pass).
         G = 0.0
         returns: List[float] = []
         for step in reversed(path):
@@ -398,14 +659,12 @@ def train_pg(
         returns.reverse()
         episode_return = returns[0] if returns else 0.0
 
-        # Return normalisation (new): reduces gradient variance.
         if normalise_returns and len(returns) > 1:
             ret_arr = np.asarray(returns, dtype=float)
             returns_norm = ((ret_arr - ret_arr.mean()) / (ret_arr.std() + 1e-8)).tolist()
         else:
             returns_norm = returns
 
-        # Repeat penalty on the terminal composition key.
         terminal_comp_key = env.terminal_comp_key()
         n_visits_before = visit_counts[terminal_comp_key]
         if repeat_penalty_coef > 0.0:
@@ -436,21 +695,24 @@ def train_pg(
             s_step = np.asarray(step.state_step_onehot, dtype=float)
 
             n = len(allowed)
-            a_elem_batch = np.asarray([a[0] for a in allowed], dtype=float)
-            a_comp_batch = np.asarray([a[1] for a in allowed], dtype=float)
-            s_mat_batch = np.repeat(s_mat.reshape(1, -1), n, axis=0)
+            a_elem_batch = np.asarray(
+                [elem_feats_scaled[int(np.argmax(a[0]))] for a in allowed], dtype=float
+            )
+            a_comp_batch = np.asarray(
+                [[float(fraction_set[int(np.argmax(a[1]))])] for a in allowed], dtype=float
+            )
+            s_mat_batch  = np.repeat(s_mat.reshape(1, -1), n, axis=0)
             s_step_batch = np.repeat(s_step.reshape(1, -1), n, axis=0)
 
-            s_mat_t = torch.tensor(s_mat_batch, dtype=torch.float32, device=device)
+            s_mat_t  = torch.tensor(s_mat_batch,  dtype=torch.float32, device=device)
             s_step_t = torch.tensor(s_step_batch, dtype=torch.float32, device=device)
             a_elem_t = torch.tensor(a_elem_batch, dtype=torch.float32, device=device)
             a_comp_t = torch.tensor(a_comp_batch, dtype=torch.float32, device=device)
 
-            logits = policy(s_mat_t, s_step_t, a_elem_t, a_comp_t).reshape(-1)
+            logits   = policy(s_mat_t, s_step_t, a_elem_t, a_comp_t).reshape(-1)
             log_probs = torch.log_softmax(logits, dim=0)
-            probs = torch.softmax(logits, dim=0)
+            probs     = torch.softmax(logits, dim=0)
 
-            # Find index of taken action.
             taken_elem = np.asarray(step.action_elem_onehot)
             taken_comp = np.asarray(step.action_comp_onehot)
             taken_idx = None
@@ -463,14 +725,13 @@ def train_pg(
                 continue
 
             G_shaped_t = torch.tensor(G_t_shaped, dtype=torch.float32, device=device)
-            G_raw_t = torch.tensor(G_t_raw, dtype=torch.float32, device=device)
+            G_raw_t    = torch.tensor(G_t_raw,    dtype=torch.float32, device=device)
 
             if value_net is not None:
-                s_mat_single = torch.tensor(s_mat.reshape(1, -1), dtype=torch.float32, device=device)
+                s_mat_single  = torch.tensor(s_mat.reshape(1, -1),  dtype=torch.float32, device=device)
                 s_step_single = torch.tensor(s_step.reshape(1, -1), dtype=torch.float32, device=device)
                 value = value_net(s_mat_single, s_step_single).reshape(-1)[0]
                 advantage = G_shaped_t - value.detach()
-                # Critic learns on raw returns so V(s) stays stationary.
                 critic_losses.append((value - G_raw_t) ** 2)
             else:
                 advantage = G_shaped_t
@@ -481,8 +742,8 @@ def train_pg(
         if not actor_losses:
             continue
 
-        actor_loss = torch.stack(actor_losses).mean()
-        entropy_bonus = torch.stack(entropy_terms).mean()
+        actor_loss      = torch.stack(actor_losses).mean()
+        entropy_bonus   = torch.stack(entropy_terms).mean()
         total_actor_loss = actor_loss - entropy_coef * entropy_bonus
 
         opt_actor.zero_grad(set_to_none=True)
@@ -498,7 +759,7 @@ def train_pg(
             ep_critic_loss = float(critic_loss.item())
 
         ep_actor_loss = float(actor_loss.item())
-        ep_entropy = float(entropy_bonus.item())
+        ep_entropy    = float(entropy_bonus.item())
         accepted += 1
         pbar.update(1)
 
@@ -530,7 +791,7 @@ def train_pg(
 
         if accepted % _PRINT_INTERVAL == 0:
             mean_ret = float(np.mean(_roll_returns))
-            mean_al = float(np.mean(_roll_actor))
+            mean_al  = float(np.mean(_roll_actor))
             mean_ent = float(np.mean(_roll_entropy))
             pbar.set_postfix(ret=f"{mean_ret:.3f}", actor=f"{mean_al:.3f}", ent=f"{mean_ent:.3f}")
             suffix = (
@@ -547,7 +808,7 @@ def train_pg(
 
 
 # ---------------------------------------------------------------------------
-# Candidate generation (general, dual-phase)
+# Candidate generation (dual-phase, unified generation flags)
 # ---------------------------------------------------------------------------
 
 def _pg_single_episode_generate(
@@ -555,11 +816,18 @@ def _pg_single_episode_generate(
     env: CompositionEnv,
     policy: torch.nn.Module,
     scaler: StandardScaler,
+    elem_feats_scaled: np.ndarray,
+    fraction_set: List[str],
     device: torch.device,
-    stochastic: bool,
-    temperature: float,
+    gen_epsilon: float = 0.0,
+    gen_top_frac: float = 0.0,
+    gen_temperature: float = 1.0,
 ) -> None:
-    """Single generation episode for PG methods."""
+    """Single generation episode for PG methods.
+
+    Priority: ε-greedy > Boltzmann > top-k > ValueError.
+    Default gen_temperature=1.0 prevents pure-greedy composition collapse.
+    """
     env.initialize()
     for _ in range(env.n_components):
         allowed = env.allowed_actions()
@@ -569,23 +837,38 @@ def _pg_single_episode_generate(
             s_step[env.counter] = 1.0
 
         n = len(allowed)
-        a_elem_batch = np.asarray([a[0] for a in allowed], dtype=float)
-        a_comp_batch = np.asarray([a[1] for a in allowed], dtype=float)
-        s_mat_batch = np.repeat(s_mat.reshape(1, -1), n, axis=0)
+        a_elem_batch = np.asarray(
+            [elem_feats_scaled[int(np.argmax(a[0]))] for a in allowed], dtype=float
+        )
+        a_comp_batch = np.asarray(
+            [[float(fraction_set[int(np.argmax(a[1]))])] for a in allowed], dtype=float
+        )
+        s_mat_batch  = np.repeat(s_mat.reshape(1, -1), n, axis=0)
         s_step_batch = np.repeat(s_step.reshape(1, -1), n, axis=0)
+
         with torch.no_grad():
             logits = policy(
-                torch.tensor(s_mat_batch, dtype=torch.float32, device=device),
+                torch.tensor(s_mat_batch,  dtype=torch.float32, device=device),
                 torch.tensor(s_step_batch, dtype=torch.float32, device=device),
                 torch.tensor(a_elem_batch, dtype=torch.float32, device=device),
                 torch.tensor(a_comp_batch, dtype=torch.float32, device=device),
             ).reshape(-1)
 
-        if stochastic:
-            probs = torch.softmax(logits / temperature, dim=0).cpu().numpy()
+        if gen_epsilon > 0.0 and float(np.random.rand()) < gen_epsilon:
+            idx = int(np.random.randint(n))
+        elif gen_temperature > 0.0:
+            lg = logits.cpu().numpy().astype(float) / gen_temperature
+            lg -= lg.max()
+            probs = np.exp(lg); probs /= probs.sum()
             idx = int(np.random.choice(n, p=probs))
+        elif gen_top_frac > 0.0:
+            k = max(1, int(round(gen_top_frac * n)))
+            topk = torch.argsort(logits, descending=True).cpu().tolist()[:k]
+            idx = int(np.random.choice(topk))
         else:
-            idx = int(torch.argmax(logits).item())
+            raise ValueError(
+                "No generation strategy active: set gen_temperature, gen_top_frac, or gen_epsilon > 0."
+            )
         env.step(allowed[idx])
 
 
@@ -595,15 +878,15 @@ def generate_candidates(
     predictor: PropertyPredictor,
     scaler: StandardScaler,
     device: torch.device,
-    # Policy network (PG methods) or Q-network (DQN).
+    elem_feats_scaled: np.ndarray,
+    fraction_set: List[str],
     policy: Optional[torch.nn.Module] = None,
     qnet: Optional[torch.nn.Module] = None,
-    # Generation settings.
     n_exploit: int = 200,
     n_explore: int = 0,
-    stochastic: bool = True,
-    temperature: float = 1.0,
-    stochastic_top_frac: float = 0.0,
+    gen_epsilon: float = 0.0,
+    gen_top_frac: float = 0.0,
+    gen_temperature: float = 1.0,
     exploit_objective: str = "mean_minus_kstd",
     explore_objective: str = "mean_plus_kstd",
     k: float = 1.0,
@@ -611,24 +894,20 @@ def generate_candidates(
 ) -> List[dict]:
     """Generate candidate compositions in dual-phase mode.
 
-    Produces two pools from the same trained policy:
-    - **Exploitation** (``purpose="exploit"``): high predicted reward, good
-      candidates for synthesis.
-    - **Exploration** (``purpose="explore"``): high model uncertainty, good
-      candidates for DFT validation to improve the DPA model.
-
-    Both pools are returned in a single list with a ``purpose`` column.
-    Duplicates are rejected globally across both pools.
+    Produces exploitation and/or exploration candidates from the same trained
+    policy.  Unified generation flags (``gen_temperature``, ``gen_top_frac``,
+    ``gen_epsilon``) apply identically to DQN and PG methods.
 
     Parameters
     ----------
-    n_exploit:
-        Number of exploitation candidates to generate.
-    n_explore:
-        Number of exploration candidates (0 = exploitation only).
-    exploit_objective / explore_objective:
-        Reward objective used to compute the ``reward`` column for each pool.
-        Exploration uses ``"mean_plus_kstd"`` by default (UCB-style).
+    gen_temperature:
+        Boltzmann temperature τ for action sampling.  Default 1.0 prevents
+        pure-greedy composition collapse.  Set to 0 and use gen_top_frac or
+        gen_epsilon for alternative strategies.
+    gen_top_frac:
+        Uniform sample from top-k% of actions by Q/logit.
+    gen_epsilon:
+        ε-greedy probability (highest priority, short-circuits Q computation).
     """
     if policy is None and qnet is None:
         raise ValueError("Provide either policy (PG) or qnet (DQN).")
@@ -661,16 +940,23 @@ def generate_candidates(
 
             if use_pg:
                 _pg_single_episode_generate(
-                    env=env, policy=policy, scaler=scaler, device=device,
-                    stochastic=stochastic, temperature=temperature,
+                    env=env, policy=policy, scaler=scaler,
+                    elem_feats_scaled=elem_feats_scaled, fraction_set=fraction_set,
+                    device=device,
+                    gen_epsilon=gen_epsilon,
+                    gen_top_frac=gen_top_frac,
+                    gen_temperature=gen_temperature,
                 )
             else:
                 _rollout_policy_episode(
                     env=env, qnet=qnet, scaler=scaler, device=device,
-                    stochastic_top_frac=stochastic_top_frac,
+                    elem_feats_scaled=elem_feats_scaled, fraction_set=fraction_set,
+                    gen_epsilon=gen_epsilon,
+                    gen_top_frac=gen_top_frac,
+                    gen_temperature=gen_temperature,
                 )
 
-            comp = env.terminal_cation_fractions()
+            comp     = env.terminal_cation_fractions()
             comp_key = env.terminal_comp_key()
 
             if comp_key in seen_comp_keys:
