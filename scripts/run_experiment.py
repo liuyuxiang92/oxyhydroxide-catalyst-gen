@@ -66,12 +66,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--method", choices=["dqn", "reinforce", "a2c"], default=None,
                    help="RL method (overrides config 'method' field)")
     p.add_argument("--out", required=True, help="Output directory")
-    p.add_argument("--seed", type=int, default=0,
-                   help="Global RNG seed (used for training and generation unless overridden)")
+    p.add_argument("--dp-seed", type=int, default=0,
+                   help="Base RNG seed for the predictor and fallback for --train-seed/--gen-seed")
     p.add_argument("--train-seed", type=int, default=None,
-                   help="RNG seed set immediately before training (overrides --seed)")
+                   help="RNG seed for the training phase. Enables GPU determinism when set. Falls back to --dp-seed.")
     p.add_argument("--gen-seed", type=int, default=None,
-                   help="RNG seed set immediately before generation (overrides --seed)")
+                   help="RNG seed for the generation phase. Falls back to --dp-seed.")
     p.add_argument("--device", default=None, help="torch device (default: auto)")
     return p.parse_args()
 
@@ -179,15 +179,15 @@ def main() -> None:
     cfg = load_config(args.config)
 
     method = args.method or cfg.get("method", "a2c")
-    train_seed = args.train_seed if args.train_seed is not None else args.seed
-    gen_seed   = args.gen_seed   if args.gen_seed   is not None else args.seed
+    train_seed = args.train_seed if args.train_seed is not None else args.dp_seed
+    gen_seed   = args.gen_seed   if args.gen_seed   is not None else args.dp_seed
 
     set_global_seed(train_seed, deterministic=(args.train_seed is not None))
     os.makedirs(args.out, exist_ok=True)
 
     run_config = {
         "config_file": args.config, "method": method,
-        "seed": args.seed, "train_seed": train_seed, "gen_seed": gen_seed,
+        "dp_seed": args.dp_seed, "train_seed": train_seed, "gen_seed": gen_seed,
         **cfg,
     }
     with open(os.path.join(args.out, "run_config.json"), "w") as f:
@@ -195,10 +195,10 @@ def main() -> None:
 
     device_str = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(device_str)
-    print(f"[INFO] device={device}, method={method}, seed={args.seed}, "
+    print(f"[INFO] device={device}, method={method}, dp_seed={args.dp_seed}, "
           f"train_seed={train_seed}, gen_seed={gen_seed}")
 
-    predictor    = build_predictor(cfg, seed=args.seed)
+    predictor    = build_predictor(cfg, seed=args.dp_seed)
     phase_filter = build_constraint_filter(cfg)
     env_type     = cfg.get("env_type", "fraction")
 
@@ -267,8 +267,6 @@ def main() -> None:
     # DQN path — classical online DQN
     # ------------------------------------------------------------------
     if method == "dqn":
-        set_global_seed(train_seed)
-
         qnet, scaler, train_rows = train_dqn_online(
             env=env,
             elem_feats_scaled=elem_feats_scaled,
@@ -335,7 +333,6 @@ def main() -> None:
                 state_dim=state_dim, step_dim=step_dim, hidden_dim=hidden_dim,
             ).to(device)
 
-        set_global_seed(train_seed)
         train_rows = train_pg(
             policy=policy,
             value_net=value_net,

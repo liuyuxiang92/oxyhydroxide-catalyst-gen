@@ -14,6 +14,10 @@ Wiring `--seed` through the structure generation stack. Two gaps found:
 2. `_sqs_config` had no seed param — added `rng_seed`, sets `np.random.seed(rng_seed)` as numpy fallback, then tries `sqsgenerator.run_sqs_iterations(..., random_seed=rng_seed)` with `TypeError` fallback for older sqsgenerator versions that don't accept it
 3. `build_predictor()` never forwarded `rng_seed` to HEA/perovskite predictors — fixing next by adding `seed` param and wiring to call site in `run_experiment.py`
 
+### EARS — Stuck (2026-05-26 16:20)
+<!-- concepts: reproducibility, seeding, argparse -->
+Not stuck — renaming --seed to --dp-seed and aligning seeding behaviour to match feat/classical-dqn exactly. Multiple edits to run_experiment.py are intentional: (1) rename argparse flag, (2) update main() seed references and startup call, (3) remove pre-training set_global_seed calls, (4) remaining generation seed fixes.
+
 ### EARS — Stuck (2026-05-26 16:07)
 <!-- concepts: reproducibility, seeding -->
 Not stuck — aligning seeding behaviour across 3 files in one session. Multiple edits to run_experiment.py are intentional: (1) add `import random`, (2) fix startup seed, (3) fix DQN gen seed, (4) fix PG gen seed.
