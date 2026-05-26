@@ -89,7 +89,7 @@ def load_config(path: str) -> dict:
 # Predictor factory
 # ---------------------------------------------------------------------------
 
-def build_predictor(cfg: dict):
+def build_predictor(cfg: dict, seed: int = None):
     """Instantiate the correct PropertyPredictor from the config."""
     kind = cfg.get("predictor", "dummy").lower()
 
@@ -103,6 +103,7 @@ def build_predictor(cfg: dict):
             n_random_configs=int(cfg.get("n_random_configs", 5)),
             site_symbol=cfg.get("site_symbol", "X"),
             structure_mode=cfg.get("structure_mode", "random"),
+            rng_seed=seed,
         )
 
     elif kind == "perovskite":
@@ -115,6 +116,7 @@ def build_predictor(cfg: dict):
             n_random_configs=int(cfg.get("n_random_configs", 5)),
             site_symbol=cfg.get("site_symbol", "Fe"),
             structure_mode=cfg.get("structure_mode", "random"),
+            rng_seed=seed,
         )
 
     elif kind == "sinter_calcine":
@@ -197,7 +199,7 @@ def main() -> None:
     print(f"[INFO] device={device}, method={method}, seed={args.seed}, "
           f"train_seed={train_seed}, gen_seed={gen_seed}")
 
-    predictor    = build_predictor(cfg)
+    predictor    = build_predictor(cfg, seed=args.seed)
     phase_filter = build_constraint_filter(cfg)
     env_type     = cfg.get("env_type", "fraction")
 

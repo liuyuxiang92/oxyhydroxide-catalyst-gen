@@ -83,7 +83,8 @@ def substitute_sites(
     if mode == "random":
         return _random_configs(template, site_indices, counts, n_configs, rng)
     elif mode == "sqs":
-        return _sqs_config(template, site_indices, counts, sqs_iterations)
+        sqs_seed = int(rng.integers(0, 2**31))
+        return _sqs_config(template, site_indices, counts, sqs_iterations, rng_seed=sqs_seed)
     else:
         raise ValueError(f"Unknown mode '{mode}'. Choose 'random' or 'sqs'.")
 
@@ -147,6 +148,7 @@ def _sqs_config(
     site_indices: List[int],
     counts: Dict[str, int],
     sqs_iterations: int,
+    rng_seed: Optional[int] = None,
 ) -> List["ase.Atoms"]:
     """Generate a single SQS structure via sqsgenerator.
 
@@ -164,12 +166,21 @@ def _sqs_config(
 
     sublattice = template[site_indices]
 
-    # sqsgenerator expects composition as {symbol: count} dict.
-    result = sqsgenerator.run_sqs_iterations(
+    # Set numpy seed as a best-effort fallback (sqsgenerator may use numpy
+    # internally). Also try passing seed directly if the installed version
+    # supports it (sqsgenerator >= 0.2).
+    if rng_seed is not None:
+        np.random.seed(rng_seed)
+
+    sqs_kwargs = dict(
         structure=sublattice,
         target_concentrations={k: v / len(site_indices) for k, v in counts.items()},
         iterations=sqs_iterations,
     )
+    try:
+        result = sqsgenerator.run_sqs_iterations(**sqs_kwargs, random_seed=rng_seed)
+    except TypeError:
+        result = sqsgenerator.run_sqs_iterations(**sqs_kwargs)
 
     # Merge SQS sub-lattice back into the full template.
     best_sqs = result.get_best_structure()
