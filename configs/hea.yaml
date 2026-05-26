@@ -58,7 +58,7 @@ site_symbol: "X"           # Placeholder element in the POSCAR template
 objective: mean_minus_kstd # Exploitation objective (use mean_plus_kstd for exploration)
 k: 1.0
 n_random_configs: 5        # Random configs per composition during RL training
-structure_mode: random     # "random" for training; "sqs" for DFT validation
+structure_mode: random
 
 # ---- RL hyperparameters ----
 method: a2c                # Default method (overridable via --method)

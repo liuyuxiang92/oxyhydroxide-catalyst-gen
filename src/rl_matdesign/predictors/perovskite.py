@@ -34,12 +34,10 @@ class PerovskitePropertyPredictor:
     k:
         Coefficient on the std term.
     n_random_configs:
-        Number of random B-site configurations (for ``structure_mode="random"``).
+        Number of random B-site configurations to generate and average.
     site_symbol:
         Placeholder element in the template marking B-sites to substitute.
         Typically ``"Fe"`` or another single symbol.
-    structure_mode:
-        ``"random"`` or ``"sqs"``.  Use ``"sqs"`` for DFT validation.
     energy_per_atom:
         Normalise energy by number of atoms (default True).
     rng_seed:
@@ -55,7 +53,6 @@ class PerovskitePropertyPredictor:
         k: float = 1.0,
         n_random_configs: int = 5,
         site_symbol: str = "Fe",
-        structure_mode: str = "random",
         energy_per_atom: bool = True,
         rng_seed: Optional[int] = None,
     ) -> None:
@@ -65,7 +62,6 @@ class PerovskitePropertyPredictor:
         self.k = k
         self.n_random_configs = n_random_configs
         self.site_symbol = site_symbol
-        self.structure_mode = structure_mode
         self.energy_per_atom = energy_per_atom
         self._rng = np.random.default_rng(rng_seed)
         self._dp_calculators: Optional[List] = None
@@ -86,7 +82,6 @@ class PerovskitePropertyPredictor:
             template_poscar=self.poscar_template,
             composition=composition,
             site_symbol=self.site_symbol,
-            mode=self.structure_mode,
             n_configs=self.n_random_configs,
             rng=self._rng,
         )

@@ -102,7 +102,6 @@ def build_predictor(cfg: dict, seed: int = None):
             k=float(cfg.get("k", 1.0)),
             n_random_configs=int(cfg.get("n_random_configs", 5)),
             site_symbol=cfg.get("site_symbol", "X"),
-            structure_mode=cfg.get("structure_mode", "random"),
             rng_seed=seed,
         )
 
@@ -115,7 +114,6 @@ def build_predictor(cfg: dict, seed: int = None):
             k=float(cfg.get("k", 1.0)),
             n_random_configs=int(cfg.get("n_random_configs", 5)),
             site_symbol=cfg.get("site_symbol", "Fe"),
-            structure_mode=cfg.get("structure_mode", "random"),
             rng_seed=seed,
         )
 

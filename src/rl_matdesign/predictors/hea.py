@@ -39,12 +39,8 @@ class HEAPropertyPredictor:
         Coefficient on the std term.
     n_random_configs:
         Number of random solid-solution configurations to generate and average.
-        Ignored when ``structure_mode="sqs"``.
     site_symbol:
         Element symbol marking substitution sites in the template.
-    structure_mode:
-        ``"random"`` (fast, for RL training) or ``"sqs"`` (rigorous, for DFT
-        validation).  See :func:`~rl_matdesign.utils.structure.substitute_sites`.
     energy_per_atom:
         If True (default), normalise energies by number of atoms.
     rng_seed:
@@ -60,7 +56,6 @@ class HEAPropertyPredictor:
         k: float = 1.0,
         n_random_configs: int = 5,
         site_symbol: str = "X",
-        structure_mode: str = "random",
         energy_per_atom: bool = True,
         rng_seed: Optional[int] = None,
     ) -> None:
@@ -70,7 +65,6 @@ class HEAPropertyPredictor:
         self.k = k
         self.n_random_configs = n_random_configs
         self.site_symbol = site_symbol
-        self.structure_mode = structure_mode
         self.energy_per_atom = energy_per_atom
         self._rng = np.random.default_rng(rng_seed)
         self._dp_calculators: Optional[List] = None
@@ -94,7 +88,6 @@ class HEAPropertyPredictor:
             template_poscar=self.poscar_template,
             composition=composition,
             site_symbol=self.site_symbol,
-            mode=self.structure_mode,
             n_configs=self.n_random_configs,
             rng=self._rng,
         )

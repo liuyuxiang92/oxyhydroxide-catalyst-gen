@@ -1,16 +1,8 @@
 """Structure substitution utilities for generating alloyed supercells.
 
-Supports two modes:
-- ``"random"``:  Generate *n_configs* random solid-solution structures by
-  randomly assigning elements to sites according to composition fractions.
-  Fast; suitable for DPA evaluation during RL training.
-  This is the Random Solid Solution Approximation (RSA).
-
-- ``"sqs"``:  Generate a single Special Quasi-random Structure (SQS) via
-  ``sqsgenerator``.  SQS minimises the deviation between pair/triplet
-  correlation functions of the supercell and those of a perfectly random
-  infinite alloy.  More physically rigorous; recommended for DFT validation
-  and paper figures.  Requires: ``pip install sqsgenerator``.
+Generates *n_configs* random solid-solution structures by randomly assigning
+elements to sites according to composition fractions (Random Solid Solution
+Approximation).  Fast and suitable for DPA evaluation during RL training.
 
 The logic is extracted from the OOH predictor's
 ``_choose_counts_from_fractions`` and ``_build_dp_inputs_for_one_doped_slab``
@@ -27,9 +19,7 @@ def substitute_sites(
     template_poscar: str,
     composition: Dict[str, float],
     site_symbol: str = "X",
-    mode: str = "random",
     n_configs: int = 5,
-    sqs_iterations: int = 1000,
     rng: Optional[np.random.Generator] = None,
 ) -> List["ase.Atoms"]:
     """Generate ASE Atoms objects with template sites substituted per *composition*.
@@ -44,20 +34,15 @@ def substitute_sites(
         Dict ``{element: fraction}``.  Fractions must sum to 1.0.
     site_symbol:
         Element symbol in the template that marks sites to be substituted.
-    mode:
-        ``"random"`` (default) or ``"sqs"``.
     n_configs:
-        Number of random structures to generate (only used when ``mode="random"``).
-    sqs_iterations:
-        Number of optimisation iterations for SQS generation
-        (only used when ``mode="sqs"``).
+        Number of random structures to generate.
     rng:
         NumPy random generator for reproducibility.  If ``None`` a new default
         generator is created.
 
     Returns
     -------
-    List of ASE Atoms objects (length = *n_configs* for random mode, 1 for SQS).
+    List of *n_configs* ASE Atoms objects.
     """
     try:
         from ase.io import read as ase_read
@@ -79,14 +64,7 @@ def substitute_sites(
 
     n_sites = len(site_indices)
     counts = _fractions_to_counts(composition, n_sites)
-
-    if mode == "random":
-        return _random_configs(template, site_indices, counts, n_configs, rng)
-    elif mode == "sqs":
-        sqs_seed = int(rng.integers(0, 2**31))
-        return _sqs_config(template, site_indices, counts, sqs_iterations, rng_seed=sqs_seed)
-    else:
-        raise ValueError(f"Unknown mode '{mode}'. Choose 'random' or 'sqs'.")
+    return _random_configs(template, site_indices, counts, n_configs, rng)
 
 
 # ---------------------------------------------------------------------------
@@ -141,53 +119,3 @@ def _random_configs(
         atoms.set_chemical_symbols(symbols)
         configs.append(atoms)
     return configs
-
-
-def _sqs_config(
-    template: "ase.Atoms",
-    site_indices: List[int],
-    counts: Dict[str, int],
-    sqs_iterations: int,
-    rng_seed: Optional[int] = None,
-) -> List["ase.Atoms"]:
-    """Generate a single SQS structure via sqsgenerator.
-
-    Requires: ``pip install sqsgenerator``
-    """
-    try:
-        import sqsgenerator
-    except ImportError as exc:
-        raise ImportError(
-            "SQS mode requires sqsgenerator: pip install sqsgenerator"
-        ) from exc
-
-    # Extract the sub-lattice as a separate Atoms object for sqsgenerator.
-    from ase import Atoms as AseAtoms
-
-    sublattice = template[site_indices]
-
-    # Set numpy seed as a best-effort fallback (sqsgenerator may use numpy
-    # internally). Also try passing seed directly if the installed version
-    # supports it (sqsgenerator >= 0.2).
-    if rng_seed is not None:
-        np.random.seed(rng_seed)
-
-    sqs_kwargs = dict(
-        structure=sublattice,
-        target_concentrations={k: v / len(site_indices) for k, v in counts.items()},
-        iterations=sqs_iterations,
-    )
-    try:
-        result = sqsgenerator.run_sqs_iterations(**sqs_kwargs, random_seed=rng_seed)
-    except TypeError:
-        result = sqsgenerator.run_sqs_iterations(**sqs_kwargs)
-
-    # Merge SQS sub-lattice back into the full template.
-    best_sqs = result.get_best_structure()
-    atoms = template.copy()
-    symbols = atoms.get_chemical_symbols()
-    sqs_symbols = best_sqs.get_chemical_symbols()
-    for idx, sym in zip(site_indices, sqs_symbols):
-        symbols[idx] = sym
-    atoms.set_chemical_symbols(symbols)
-    return [atoms]
