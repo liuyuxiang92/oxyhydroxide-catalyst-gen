@@ -44,6 +44,29 @@ from .predictors.base import PropertyPredictor
 
 
 # ---------------------------------------------------------------------------
+# Checkpoint helpers
+# ---------------------------------------------------------------------------
+
+def _save_checkpoint(path: str, data: dict, numbered_path: str | None = None) -> None:
+    """Atomically write a checkpoint dict.
+
+    If *numbered_path* is given, data is written there and *path* is updated
+    as a relative symlink so ``checkpoint.pt`` always resolves to the latest.
+    """
+    import os
+    target = numbered_path if numbered_path else path
+    tmp = target + ".tmp"
+    torch.save(data, tmp)
+    os.replace(tmp, target)
+    if numbered_path:
+        link_tmp = path + ".lnk"
+        if os.path.lexists(link_tmp):
+            os.remove(link_tmp)
+        os.symlink(os.path.basename(numbered_path), link_tmp)
+        os.replace(link_tmp, path)
+
+
+# ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
 
@@ -232,6 +255,7 @@ def train_dqn_online(
     eps_min: float = 0.05,
     gamma: float = 0.9,
     lr: float = 1e-3,
+    checkpoint_cfg: Optional[dict] = None,
 ) -> Tuple[torch.nn.Module, StandardScaler, List[dict]]:
     """Classical online DQN with FIFO replay buffer and TD targets.
 
@@ -280,6 +304,12 @@ def train_dqn_online(
     target_net.eval()
     optimizer = torch.optim.Adam(qnet.parameters(), lr=lr)
     loss_fn = torch.nn.SmoothL1Loss()
+
+    ckpt_path: Optional[str] = None
+    ckpt_freq: int = 0
+    if checkpoint_cfg:
+        ckpt_path = checkpoint_cfg.get("path")
+        ckpt_freq = int(checkpoint_cfg.get("freq", 0))
 
     eps = 1.0
     metrics: List[dict] = []
@@ -345,6 +375,19 @@ def train_dqn_online(
             loss=f"{mean_loss:.4f}" if not math.isnan(mean_loss) else "warmup",
             ret=f"{episode_reward:.3f}",
         )
+
+        # 5. Periodic checkpoint.
+        if ckpt_freq > 0 and ckpt_path and (ep + 1) % ckpt_freq == 0:
+            _numbered = ckpt_path.replace(".pt", f"-ep{ep + 1}.pt")
+            _save_checkpoint(ckpt_path, {
+                "type": "dqn",
+                "episodes_completed": ep + 1,
+                "qnet_state": qnet.state_dict(),
+                "target_net_state": target_net.state_dict(),
+                "opt_state": optimizer.state_dict(),
+                "eps": eps,
+            }, numbered_path=_numbered)
+            tqdm.write(f"[INFO] DQN checkpoint saved at episode {ep + 1} → {_numbered}")
 
     pbar.close()
     return qnet, scaler, metrics
@@ -686,6 +729,7 @@ def train_pg(
     repeat_penalty_coef: float = 0.0,
     repeat_penalty_shape: str = "log",
     max_train_attempts: Optional[int] = None,
+    checkpoint_cfg: Optional[dict] = None,
 ) -> List[dict]:
     """Batched REINFORCE / A2C training loop (matches feat/classical-dqn).
 
@@ -702,6 +746,12 @@ def train_pg(
         opt_critic = torch.optim.Adam(value_net.parameters(), lr=lr_critic)
     else:
         opt_critic = None
+
+    ckpt_path: Optional[str] = None
+    ckpt_freq: int = 0
+    if checkpoint_cfg:
+        ckpt_path = checkpoint_cfg.get("path")
+        ckpt_freq = int(checkpoint_cfg.get("freq", 0))
 
     visit_counts: Counter = Counter()
     metrics: List[dict] = []
@@ -840,6 +890,21 @@ def train_pg(
             ent=f"{ep_entropy:.3f}",
             upd=update_idx,
         )
+
+        if ckpt_freq > 0 and ckpt_path and (it + 1) % ckpt_freq == 0:
+            _numbered = ckpt_path.replace(".pt", f"-iter{it + 1}.pt")
+            _save_checkpoint(ckpt_path, {
+                "type": "pg",
+                "rl_method": rl_method,
+                "episodes_completed": accepted,
+                "iteration": it + 1,
+                "policy_state": policy.state_dict(),
+                "value_net_state": value_net.state_dict() if value_net is not None else None,
+                "opt_actor_state": opt_actor.state_dict(),
+                "opt_critic_state": opt_critic.state_dict() if opt_critic is not None else None,
+                "visit_counts": dict(visit_counts),
+            }, numbered_path=_numbered)
+            tqdm.write(f"[INFO] PG checkpoint saved at iter {it + 1} → {_numbered}")
 
     outer_pbar.close()
     print(f"[INFO] PG training: {update_idx} updates over {accepted} episodes, {attempted} attempts.")

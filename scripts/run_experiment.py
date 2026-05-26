@@ -73,6 +73,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--gen-seed", type=int, default=None,
                    help="RNG seed for the generation phase. Falls back to --dp-seed.")
     p.add_argument("--device", default=None, help="torch device (default: auto)")
+    p.add_argument("--save-checkpoint-freq", type=int, default=0, metavar="N",
+                   dest="save_checkpoint_freq",
+                   help="Save mid-training checkpoint every N episodes (DQN) or N iterations (PG). 0 disables. "
+                        "Saved atomically to <out>/checkpoint.pt.")
     return p.parse_args()
 
 
@@ -273,6 +277,9 @@ def main() -> None:
 
     metrics = RunMetrics()
 
+    ckpt_path = os.path.join(args.out, "checkpoint.pt")
+    checkpoint_cfg = {"path": ckpt_path, "freq": args.save_checkpoint_freq} if args.save_checkpoint_freq > 0 else None
+
     # Generation strategy (unified across DQN and PG).
     gen_temperature = float(cfg.get("gen_temperature", 1.0))
     gen_top_frac    = float(cfg.get("gen_top_frac", 0.0))
@@ -297,6 +304,7 @@ def main() -> None:
             eps_min=float(cfg.get("eps_min", 0.05)),
             gamma=float(cfg.get("dqn_gamma", cfg.get("gamma", 0.9))),
             lr=float(cfg.get("dqn_lr", 1e-3)),
+            checkpoint_cfg=checkpoint_cfg,
         )
         for r in train_rows:
             metrics.log(**r)
@@ -365,6 +373,7 @@ def main() -> None:
             rl_method=method,
             repeat_penalty_coef=repeat_penalty_coef,
             repeat_penalty_shape=repeat_penalty_shape,
+            checkpoint_cfg=checkpoint_cfg,
         )
         for r in train_rows:
             metrics.log(**r)

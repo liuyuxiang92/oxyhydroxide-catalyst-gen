@@ -37,6 +37,14 @@ Not stuck — removing SQS mode across 5 files in one session. Multiple edits to
 <!-- concepts: structure-generation, reproducibility -->
 User decided to remove SQS mode entirely and keep only random structure generation. Removes sqsgenerator dependency and all seeding complexity around it. Removing from: structure.py (drop `_sqs_config`, `sqs_iterations` param, SQS branch), hea.py + perovskite.py (drop `structure_mode` param, hardcode `mode="random"`), run_experiment.py (drop `structure_mode` from build_predictor calls), configs (drop `structure_mode` key).
 
+### EARS — Stuck (2026-05-26 18:05)
+<!-- concepts: checkpoint-saving, general-framework -->
+Not stuck — adding checkpoint support requires multiple sequential edits to training.py: (1) _save_checkpoint helper, (2) checkpoint_cfg param on train_dqn_online, (3) checkpoint saving inside DQN loop, (4) checkpoint_cfg param on train_pg, (5) checkpoint saving inside PG loop. Then run_experiment.py needs --save-checkpoint-freq arg and wiring. All planned, not thrashing.
+
+### EARS — Progress (2026-05-26 18:05)
+<!-- concepts: checkpoint-saving, general-framework, classical-dqn-parity -->
+Porting `--save-checkpoint-freq` from `feat/classical-dqn` to general-framework. Discovered this flag was never ported: classical-dqn has `_save_checkpoint()` (atomic write via tmp+symlink), periodic saves in both `train_pg` (per-iter) and `train_dqn_online` (per-episode). Adding: (1) `_save_checkpoint` helper to `training.py`, (2) `checkpoint_cfg` param to both training functions, (3) `--save-checkpoint-freq` CLI arg to `run_experiment.py`. Training log (`training_log.csv`) was already correct in both branches — written once at end via `RunMetrics.to_csv()`. Also confirmed `feat/classical-dqn` was 3 commits ahead of remote; pushed it.
+
 ### EARS — Progress (2026-05-26 17:08)
 <!-- concepts: pg-training, general-framework, classical-dqn-parity -->
 Discovered that general-framework's `train_pg` was the old per-episode version, not the batch version from feat/classical-dqn. Classical-dqn uses `num_iters × batch_eps` (collect batch_eps episodes, one gradient step per batch). Ported the batch `train_pg` to `src/rl_matdesign/training.py`: added `_episode_pg_terms` helper, replaced `n_episodes` loop with `num_iters × batch_eps` outer loop. Updated `run_experiment.py` to read `pg_num_iters` and `pg_batch_eps` from YAML. Also removed `normalise_returns` (not in classical-dqn) and corrected gamma default to 0.9 (was 0.99). Now updating all YAML configs to replace `pg_train_eps` with `pg_num_iters` + `pg_batch_eps`.
