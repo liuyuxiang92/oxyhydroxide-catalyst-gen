@@ -1205,8 +1205,8 @@ def main() -> None:
     parser.add_argument("--gamma", type=float, default=0.9)
 
     parser.add_argument("--dqn-epochs", dest="dqn_epochs", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--dqn-batch-size", type=int, default=256)
+    parser.add_argument("--dqn-lr", type=float, default=1e-3)
 
     parser.add_argument("--num-gen-eps", type=int, default=500)
     parser.add_argument("--max-gen-attempts", type=int, default=None)
@@ -1351,7 +1351,7 @@ def main() -> None:
     # Classical DQN flags (replace the old Phase-0/Phase-1 flags when --rl-method dqn).
     # Old flags are kept below for backward compat but are ignored in classical DQN mode.
     parser.add_argument(
-        "--warmup-eps",
+        "--dqn-warmup-eps",
         type=int,
         default=500,
         help="Random episodes to collect before training starts; used to fit the s_mat scaler.",
@@ -1941,7 +1941,7 @@ def main() -> None:
             )
 
         # WARMUP: collect random episodes to fill buffer and fit the s_mat scaler.
-        warmup_eps = int(args.warmup_eps)
+        warmup_eps = int(args.dqn_warmup_eps)
         buffer_size = int(args.buffer_size)
         buffer: collections.deque = collections.deque(maxlen=buffer_size)
 
@@ -1969,11 +1969,11 @@ def main() -> None:
         ).to(device)
         target_net = copy.deepcopy(qnet)
         target_net.eval()
-        optimizer = torch.optim.Adam(qnet.parameters(), lr=args.lr)
+        optimizer = torch.optim.Adam(qnet.parameters(), lr=args.dqn_lr)
         loss_fn = _make_loss_fn(args.dqn_loss)
 
         num_train_eps = int(args.num_train_eps)
-        batch_size = int(args.batch_size)
+        batch_size = int(args.dqn_batch_size)
         grad_steps = int(args.grad_steps_per_ep)
         target_update_freq = int(args.target_update_freq)
         eps_anneal_eps = int(args.eps_anneal_eps)
