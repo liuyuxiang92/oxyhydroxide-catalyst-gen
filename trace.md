@@ -1,5 +1,14 @@
 # Trace: oxyhydroxide-catalyst-gen
 
+## 2026-05-27 — environment-gpu.yml fix + editable install
+
+### EARS — Progress (2026-05-27 14:05)
+<!-- concepts: python-packaging, conda, pytorch-cuda -->
+Fixed `environment-gpu.yml` for HPC clusters. Two root causes of the conda solve failure:
+1. `pytorch::pytorch` (pytorch channel) requires MKL BLAS — conflicts with `blas=*=openblas` pin.
+2. HPC cluster provides CUDA system-wide; conda `pytorch-cuda=12.1` needs `libcublas`/`cuda-cudart` as conda packages, which don't exist on this cluster.
+Fix: remove pytorch from conda section entirely, remove `pytorch` channel, install via pip wheel (`torch --index-url https://download.pytorch.org/whl/cu124`). Cluster CUDA confirmed 12.4. Same pattern applied on both branches alongside the editable install (`-e .`) migration.
+
 ## 2026-05-26 — general-framework seeding fix
 
 ### EARS — Session Start (2026-05-26 15:35)

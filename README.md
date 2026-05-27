@@ -31,9 +31,10 @@ Both commands do the full setup in one step: conda installs all base dependencie
 DeepMD-kit. After this, `abcde_ooh` and `rl_matdesign` are importable as regular packages
 from any directory — no `sys.path` manipulation needed.
 
-For a different CUDA version, change `pytorch-cuda=12.1` → `pytorch-cuda=11.8` and
-`deepmd-kit[torch,cu12]` → `deepmd-kit[torch,cu11]` in `environment-gpu.yml` before creating
-the environment.
+PyTorch is installed via a pip wheel (not conda) to avoid BLAS/CUDA solver conflicts on HPC
+clusters where CUDA is provided system-wide. The default targets CUDA 12.4. To change:
+edit the `--index-url` in `environment-gpu.yml` (`cu124` → `cu121` / `cu118`) and change
+`deepmd-kit[torch,cu12]` → `deepmd-kit[torch,cu11]` for CUDA 11.x.
 
 ---
 
