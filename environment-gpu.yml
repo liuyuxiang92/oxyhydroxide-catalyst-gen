@@ -43,7 +43,8 @@ dependencies:
   - pytorch::torchaudio
   - pytorch::torchvision
 
-  # --- DeepMD-kit with CUDA 12 ---
+  # --- Package (editable install) + DeepMD-kit with CUDA 12 ---
   - pip
   - pip:
+    - -e .
     - deepmd-kit[torch,cu12]

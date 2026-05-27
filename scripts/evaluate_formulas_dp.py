@@ -4,6 +4,7 @@ import argparse
 import csv
 import os
 import re
+import sys
 from typing import Dict, Iterable, List, Tuple
 
 
@@ -129,12 +130,6 @@ def main() -> None:
             "model_4.ckpt.pt",
             "model_5.ckpt.pt",
         ]
-
-    # Local imports
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    import sys
-
-    sys.path.insert(0, os.path.join(repo_root, "src"))
 
     from abcde_ooh.dp_predictor import DPConfig, DeepMDOverpotentialPredictor, objective_from_mean_std
 

@@ -12,7 +12,6 @@
 # Usage:
 #   conda env create -f environment.yml
 #   conda activate ooh-catalyst
-#   pip install deepmd-kit[torch]          # CPU build, for smoke tests only
 #
 # For GPU / HPC production: use environment-gpu.yml instead.
 
@@ -48,9 +47,10 @@ dependencies:
   - pytorch::cpuonly
   - pytorch::pytorch
 
-  # --- DeepMD-kit ---
-  # No stable conda package for the PyTorch backend; install via pip.
-  # CPU build is sufficient for local testing without model files.
+  # --- Package (editable install) + DeepMD-kit ---
+  # -e . installs abcde_ooh and rl_matdesign from src/ as regular packages,
+  # eliminating the need for sys.path manipulation in any script.
   - pip
   - pip:
+    - -e .
     - deepmd-kit[torch]

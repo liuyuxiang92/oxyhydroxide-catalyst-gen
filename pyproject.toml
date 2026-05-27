@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ooh-catalyst-gen"
+version = "0.1.0"
+requires-python = ">=3.10"
+# Dependencies are managed by the conda environment files (environment.yml /
+# environment-gpu.yml). Only the package structure is declared here.
+
+[tool.setuptools.packages.find]
+where = ["src"]
