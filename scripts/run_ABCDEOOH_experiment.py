@@ -134,162 +134,6 @@ def _make_loss_fn(name: str) -> torch.nn.Module:
     raise ValueError(f"Unknown DQN loss: {name!r} (expected 'mse' or 'smoothl1')")
 
 
-def _anneal_epsilon(eps: float, eps_min: float, decay: float) -> float:
-    return max(float(eps_min), float(eps) * float(decay))
-
-
-def _fifo_cap_arrays(arrays: dict, max_rows: int) -> dict:
-    """Keep only the last `max_rows` rows of every array in `arrays`."""
-    if max_rows is None or max_rows <= 0:
-        return arrays
-    n = len(next(iter(arrays.values())))
-    if n <= max_rows:
-        return arrays
-    start = n - max_rows
-    return {k: v[start:] for k, v in arrays.items()}
-
-
-def _split_train_val(n_rows: int, val_frac: float, rng: np.random.Generator) -> Tuple[np.ndarray, np.ndarray]:
-    """Random index split. Returns (train_idx, val_idx)."""
-    val_frac = float(val_frac)
-    if val_frac <= 0.0 or n_rows < 2:
-        idx = np.arange(n_rows)
-        return idx, np.array([], dtype=int)
-    n_val = max(1, int(round(n_rows * val_frac)))
-    n_val = min(n_val, n_rows - 1)
-    perm = rng.permutation(n_rows)
-    val_idx = perm[:n_val]
-    train_idx = perm[n_val:]
-    return train_idx, val_idx
-
-
-def _build_train_val_loaders(
-    s_mat_scaled: np.ndarray,
-    s_step: np.ndarray,
-    a_elem: np.ndarray,
-    a_comp: np.ndarray,
-    y: np.ndarray,
-    batch_size: int,
-    val_frac: float,
-    rng: np.random.Generator,
-) -> Tuple[DataLoader, Optional[DataLoader]]:
-    """Random 1-(val_frac) / val_frac split into train/val DataLoaders."""
-    n_rows = int(s_mat_scaled.shape[0])
-    train_idx, val_idx = _split_train_val(n_rows, val_frac, rng)
-
-    def _make_loader(idx: np.ndarray, shuffle: bool) -> Optional[DataLoader]:
-        if idx.size == 0:
-            return None
-        ds = TensorDataset(
-            torch.tensor(s_mat_scaled[idx], dtype=torch.float32),
-            torch.tensor(s_step[idx], dtype=torch.float32),
-            torch.tensor(a_elem[idx], dtype=torch.float32),
-            torch.tensor(a_comp[idx], dtype=torch.float32),
-            torch.tensor(y[idx], dtype=torch.float32),
-        )
-        return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, drop_last=False)
-
-    return _make_loader(train_idx, shuffle=True), _make_loader(val_idx, shuffle=False)
-
-
-def _eval_q_loss(model: torch.nn.Module, loader: DataLoader, loss_fn: torch.nn.Module, device: torch.device) -> float:
-    if loader is None:
-        return float("nan")
-    model.eval()
-    losses: List[float] = []
-    with torch.no_grad():
-        for s_mat, s_step, a_elem, a_comp, y in loader:
-            s_mat = s_mat.to(device)
-            s_step = s_step.to(device)
-            a_elem = a_elem.to(device)
-            a_comp = a_comp.to(device)
-            y = y.to(device)
-            pred = model(s_mat, s_step, a_elem, a_comp)
-            losses.append(float(loss_fn(pred, y).item()))
-    model.train()
-    return float(np.mean(losses)) if losses else float("nan")
-
-
-def train_q(
-    *,
-    model: torch.nn.Module,
-    loader: DataLoader,
-    device: torch.device,
-    epochs: int,
-    lr: float,
-    iteration: int = 0,
-    checkpoint_cfg: Optional[dict] = None,
-    loss_name: str = "smoothl1",
-    val_loader: Optional[DataLoader] = None,
-) -> List[dict]:
-    model.train()
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = _make_loss_fn(loss_name)
-    metrics: List[dict] = []
-
-    ckpt_path: Optional[str] = None
-    ckpt_freq: int = 0
-    start_epoch: int = 0
-    if checkpoint_cfg:
-        ckpt_path = checkpoint_cfg.get("path")
-        ckpt_freq = int(checkpoint_cfg.get("freq", 0))
-        start_epoch = int(checkpoint_cfg.get("start_epoch", 0))
-        if checkpoint_cfg.get("opt_state"):
-            opt.load_state_dict(checkpoint_cfg["opt_state"])
-
-    pbar = tqdm(range(start_epoch, epochs), desc="Q epochs")
-    for epoch_idx in pbar:
-        batch_losses: List[float] = []
-        for s_mat, s_step, a_elem, a_comp, y in loader:
-            s_mat = s_mat.to(device)
-            s_step = s_step.to(device)
-            a_elem = a_elem.to(device)
-            a_comp = a_comp.to(device)
-            y = y.to(device)
-
-            opt.zero_grad(set_to_none=True)
-            pred = model(s_mat, s_step, a_elem, a_comp)
-            loss = loss_fn(pred, y)
-            loss.backward()
-            opt.step()
-            batch_losses.append(float(loss.item()))
-
-        train_loss = float(np.mean(batch_losses)) if batch_losses else float("nan")
-        val_loss = _eval_q_loss(model, val_loader, loss_fn, device) if val_loader is not None else float("nan")
-
-        metrics.append({
-            "phase": "dqn_train",
-            "iteration": iteration,
-            "epoch": epoch_idx + 1,
-            "loss_name": loss_name,
-            "train_loss": train_loss,
-            "val_loss": val_loss,
-            # Back-compat alias so existing plotting scripts that read 'mse_loss' don't break.
-            "mse_loss": train_loss,
-        })
-        if val_loader is not None:
-            pbar.set_postfix(train=f"{train_loss:.4f}", val=f"{val_loss:.4f}")
-            tqdm.write(
-                f"[DQN train] iter={iteration} epoch={epoch_idx + 1}/{epochs} | "
-                f"{loss_name}_train={train_loss:.4f} | {loss_name}_val={val_loss:.4f}"
-            )
-        else:
-            pbar.set_postfix(train=f"{train_loss:.4f}")
-            tqdm.write(f"[DQN train] iter={iteration} epoch={epoch_idx + 1}/{epochs} | {loss_name}_train={train_loss:.4f}")
-
-        if ckpt_freq > 0 and ckpt_path and (epoch_idx + 1) % ckpt_freq == 0:
-            _numbered = ckpt_path.replace(".pt", f"-{epoch_idx + 1}.pt")
-            _save_checkpoint(ckpt_path, {
-                "type": "dqn",
-                "rl_method": "dqn",
-                "epochs_completed": epoch_idx + 1,
-                "dqn_iteration": iteration,
-                "qnet_state": model.state_dict(),
-                "opt_state": opt.state_dict(),
-            }, numbered_path=_numbered)
-            tqdm.write(f"[INFO] Checkpoint saved at epoch {epoch_idx + 1} → {_numbered}")
-
-    return metrics
 
 
 def choose_action(
@@ -1166,8 +1010,8 @@ def main() -> None:
         help=(
             "Load an existing model checkpoint and continue training. "
             "For PG: skips warmup, loads std_scaler.bin + policy.pt (+ value_net.pt for A2C) "
-            "and runs --pg-train-eps more episodes. "
-            "For DQN: loads std_scaler.bin + random_dataset.npz + qnet.pt and runs --dqn-epochs more epochs. "
+            "and runs more iterations. "
+            "For DQN: not supported (warns and starts fresh). "
             "All paths default to <out>/<filename> and can be overridden by "
             "--load-scaler / --load-policy / --load-qnet / --load-value-net. "
             "Cannot be combined with --only-generate."
@@ -1188,11 +1032,8 @@ def main() -> None:
         ),
     )
 
-    parser.add_argument("--num-random-eps", type=int, default=5000)
-    parser.add_argument("--max-random-attempts", type=int, default=None)
     parser.add_argument("--gamma", type=float, default=0.9)
 
-    parser.add_argument("--dqn-epochs", dest="dqn_epochs", type=int, default=50)
     parser.add_argument("--dqn-batch-size", type=int, default=256)
     parser.add_argument("--dqn-lr", type=float, default=1e-3)
 
@@ -1229,98 +1070,11 @@ def main() -> None:
         ),
     )
 
-    # Replay buffer construction
-    parser.add_argument(
-        "--buffer-mode",
-        type=str,
-        default="offline",
-        choices=["offline", "iterative"],
-        help="How to build the replay buffer: offline random only, or iterative (Option B) which adds on-the-fly episodes generated by the current Q network.",
-    )
-    parser.add_argument(
-        "--num-online-eps",
-        type=int,
-        default=0,
-        help="When --buffer-mode iterative, number of additional on-the-fly episodes to add to the buffer using the learned policy.",
-    )
-
-    # Iterative buffer schedule (optional).
-    parser.add_argument(
-        "--iter-num-iters",
-        type=int,
-        default=1,
-        help=(
-            "When --buffer-mode iterative: how many rounds of (collect episodes -> retrain) to run. "
-            "Default 1 matches the current behavior."
-        ),
-    )
-    parser.add_argument(
-        "--iter-online-eps-per-iter",
-        type=int,
-        default=0,
-        help=(
-            "When --buffer-mode iterative: how many accepted online episodes to collect per iteration. "
-            "If 0, it is derived from --num-online-eps / --iter-num-iters."
-        ),
-    )
-    parser.add_argument(
-        "--iter-train-epochs",
-        type=int,
-        default=None,
-        help=(
-            "Training epochs per Phase-1 iteration after adding new episodes. "
-            "If unset, defaults to 100 (the paper-aligned value)."
-        ),
-    )
-
-    # Paper-aligned DQN Phase-1 loop (replaces / extends the older iterative-buffer flags).
-    parser.add_argument(
-        "--dqn-num-iters",
-        type=int,
-        default=500,
-        help="DQN Phase-1 iterations (collect → buffer-cap → sample → train → ε-decay). 0 disables Phase-1.",
-    )
-    parser.add_argument(
-        "--dqn-eps-per-iter",
-        type=int,
-        default=100,
-        help="Episodes collected with ε-greedy policy per Phase-1 iteration.",
-    )
-    parser.add_argument(
-        "--replay-buffer-size",
-        type=int,
-        default=50000,
-        help="Maximum number of step-level rows kept in the replay buffer (FIFO eviction).",
-    )
-    parser.add_argument(
-        "--train-sample-size",
-        type=int,
-        default=100,
-        help="Number of step-level rows uniformly sampled from the replay buffer per Phase-1 iteration.",
-    )
-    parser.add_argument(
-        "--val-frac",
-        type=float,
-        default=0.2,
-        help="Train/val split fraction applied to the per-iteration sample (and to Phase-0 pre-training).",
-    )
-    parser.add_argument(
-        "--eps-start",
-        type=float,
-        default=1.0,
-        help="Initial ε for Phase-1 ε-greedy collection.",
-    )
     parser.add_argument(
         "--eps-min",
         type=float,
         default=0.05,
         help="Floor for the annealed Phase-1 ε.",
-    )
-    parser.add_argument(
-        "--eps-decay",
-        type=float,
-        default=0.99,
-        help="Multiplicative per-iteration decay: ε ← max(eps_min, ε × decay).",
     )
     parser.add_argument(
         "--checkpoint-iter-freq",
@@ -1336,8 +1090,6 @@ def main() -> None:
         help="Loss for DQN training. Defaults to SmoothL1 (Huber).",
     )
 
-    # Classical DQN flags (replace the old Phase-0/Phase-1 flags when --rl-method dqn).
-    # Old flags are kept below for backward compat but are ignored in classical DQN mode.
     parser.add_argument(
         "--dqn-warmup-eps",
         type=int,
@@ -1457,12 +1209,6 @@ def main() -> None:
         type=int,
         default=200,
         help="Random warmup episodes for scaler fitting (PG methods only).",
-    )
-    parser.add_argument(
-        "--pg-train-eps",
-        type=int,
-        default=1000,
-        help="Online PG training episodes.",
     )
     parser.add_argument(
         "--pg-lr-actor",
