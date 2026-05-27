@@ -28,10 +28,10 @@ The `pip:` section in each environment file also runs `pip install -e .` automat
 installing the project's packages (`abcde_ooh`) in editable mode so they are importable
 from any directory without any `sys.path` hacks.
 
-DeepMD-kit is installed automatically via the same `pip:` section.
-For a different CUDA version, change `pytorch-cuda=12.1` → `pytorch-cuda=11.8` and
-`deepmd-kit[torch,cu12]` → `deepmd-kit[torch,cu11]` in `environment-gpu.yml` before creating
-the environment.
+PyTorch is installed via a pip wheel (not conda) to avoid BLAS/CUDA solver conflicts on HPC
+clusters where CUDA is provided system-wide. The default targets CUDA 12.4. To change:
+edit the `--index-url` in `environment-gpu.yml` (`cu124` → `cu121` / `cu118`) and change
+`deepmd-kit[torch,cu12]` → `deepmd-kit[torch,cu11]` for CUDA 11.x.
 
 ---
 

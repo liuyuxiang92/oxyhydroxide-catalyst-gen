@@ -75,6 +75,10 @@ Moved all general-framework files (run_experiment.py, src/rl_matdesign/, configs
 <!-- concepts: python-packaging, editable-install, sys-path -->
 Migrating `feat/classical-dqn` branch to editable install (`pyproject.toml` + `pip install -e .`). Removing all `sys.path.insert(0, src/)` runtime hacks from three scripts: `run_ABCDEOOH_experiment.py`, `summarize_replay_buffer.py`, `evaluate_formulas_dp.py`. Also adding `- -e .` to both environment files. Same changes were already committed on `general-framework` branch — applying identically here.
 
+### EARS — Stuck (2026-05-27 14:06)
+<!-- concepts: git-branching, python-packaging, conda -->
+Not stuck — README.md edits across two branches look like thrashing but are intentional. The same `pytorch-cuda=12.1` stale mention needed fixing on both `general-framework` and `feat/classical-dqn` independently (git branch checkout resets files to their branch state). Each edit is a clean targeted fix.
+
 ### EARS — Progress (2026-05-27 11:36)
 <!-- concepts: environment-management, openmp, documentation -->
 Two sessions of work captured here:

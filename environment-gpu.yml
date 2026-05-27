@@ -1,20 +1,27 @@
 # GPU / HPC production environment (Linux + CUDA 12.x)
 #
 # Applies the same blas=*=openblas fix as environment.yml.
-# PyTorch and DeepMD-kit are installed with CUDA 12.x support.
+#
+# PyTorch is installed via pip (not conda) to avoid BLAS/CUDA solver conflicts:
+#   - The pytorch conda channel builds pytorch against MKL, conflicting with our
+#     blas=*=openblas pin.
+#   - On most HPC clusters, CUDA is provided system-wide (not via conda), so
+#     pytorch-cuda conda packages fail to resolve their libcublas/cuda-cudart deps.
+#   Installing the pre-built pip wheel sidesteps both problems.
 #
 # Usage:
 #   conda env create -f environment-gpu.yml
 #   conda activate ooh-catalyst-gpu
 #
-# If your cluster uses CUDA 11.x, change:
-#   pytorch-cuda=12.1  →  pytorch-cuda=11.8
-#   deepmd-kit[torch,cu12]  →  deepmd-kit[torch,cu11]
+# To target a different CUDA version, change the --index-url in the pip section:
+#   CUDA 12.4:  https://download.pytorch.org/whl/cu124   (default here)
+#   CUDA 12.1:  https://download.pytorch.org/whl/cu121
+#   CUDA 11.8:  https://download.pytorch.org/whl/cu118
+# Also change deepmd-kit[torch,cu12] → deepmd-kit[torch,cu11] for CUDA 11.x.
 
 name: ooh-catalyst-gpu
 
 channels:
-  - pytorch
   - conda-forge
   - nodefaults
 
@@ -22,6 +29,8 @@ dependencies:
   - python=3.10
 
   # --- Core scientific stack ---
+  # blas=*=openblas: forces numpy/scipy/sklearn to link against OpenBLAS (pthreads),
+  # so no OpenMP runtime is loaded — PyTorch's bundled OpenMP is the sole runtime.
   - blas=*=openblas
   - numpy
   - scipy
@@ -37,14 +46,9 @@ dependencies:
   - matminer
   - ase
 
-  # --- PyTorch + CUDA 12.x ---
-  - pytorch::pytorch
-  - pytorch::pytorch-cuda=12.1
-  - pytorch::torchaudio
-  - pytorch::torchvision
-
-  # --- DeepMD-kit with CUDA 12 ---
+  # --- PyTorch (CUDA 12.4) + package (editable) + DeepMD-kit ---
   - pip
   - pip:
     - -e .
+    - torch --index-url https://download.pytorch.org/whl/cu124
     - deepmd-kit[torch,cu12]
