@@ -553,10 +553,14 @@ def main() -> None:
     metrics.to_csv(_log_path, mode=_log_mode)
     print(f"[INFO] Training log {'appended to' if _log_mode == 'a' else 'written to'} {_log_path}", flush=True)
 
-    gen_rows_only = [r for r in metrics.rows if r.get("phase") == "generate"]
+    gen_rows_only = sorted(
+        [r for r in metrics.rows if r.get("phase") == "generate"],
+        key=lambda r: float(r["reward"]),
+        reverse=True,
+    )
     if gen_rows_only:
         import csv
-        fieldnames = list(gen_rows_only[0].keys())
+        fieldnames = [k for k in gen_rows_only[0].keys() if k != "phase"]
         with open(os.path.join(args.out, "generated.csv"), "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
