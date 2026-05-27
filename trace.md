@@ -1,5 +1,30 @@
 # Trace: oxyhydroxide-catalyst-gen
 
+## 2026-05-27 — general-framework vs classical-dqn reproducibility audit
+
+### EARS — Progress (2026-05-27 14:15)
+<!-- concepts: reproducibility, reinforcement-learning, ooh-catalyst -->
+Audited all divergences between `general-framework` and `feat/classical-dqn` that break reproducibility when running the same seeds. Found and fixed 9 bugs across 5 files:
+
+**Training bugs (affect which structures are generated):**
+1. `ooh.yaml` `objective: mean_minus_kstd` → `mean_plus_kstd` — std sign was flipped vs classical-dqn's `-(mean-std)`
+2. `ooh.yaml` `pg_num_iters: 1000`/`num_gen_eps: 2000` → `50`/`50` — YAML values silently override CLI since run_experiment.py has no those flags
+3. `run_experiment.py:285-287` probe episode burned 5 RNG draws before warmup — removed probe, infer state_dim from scaler after warmup
+4. `dp_predictor.py:450` `hash()` (PYTHONHASHSEED-randomized) → `hashlib.md5` for stable composition seed
+5. `constraint_filter: null` → `ooh_phase` + `target_phases: [any]` — classical-dqn uses PhaseActionFilter even with `--target-phase any`
+
+**Generation bugs (affect CSV output values):**
+6. `generate_candidates` applied objective twice to reward; fixed to use `env.path[-1].reward` directly
+7. No shared cache between training and generation; fixed via internal cache in `OOHCatalystPredictor.predict_raw()`
+8. Double DeepMD call per episode (env.step + generate_candidates); fixed via same cache
+9. Missing `primary_ok`/`primary_label` columns; added via `predictor.check_phase()` hook
+
+Key architectural decision: added `predict_raw()` and `check_phase()` to `OOHCatalystPredictor` to expose raw overpotential values and phase labels, keeping the generic `PropertyPredictor.predict()` interface intact for other systems.
+
+### EARS — Stuck (2026-05-27 14:17)
+<!-- concepts: reproducibility, reinforcement-learning, ooh-catalyst -->
+Not stuck — applying a large multi-file patch (9 bugs across 5 files) sequentially. run_experiment.py requires 4 edits because the changes are in separate non-adjacent sections: imports, build_constraint_filter function, env creation block, and the fresh-PG state_dim block. Each edit is a distinct logical fix; no thrashing.
+
 ## 2026-05-27 — environment-gpu.yml fix + editable install
 
 ### EARS — Progress (2026-05-27 14:05)

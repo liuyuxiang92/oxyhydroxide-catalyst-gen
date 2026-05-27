@@ -1033,6 +1033,20 @@ def generate_candidates(
         Uniform sample from top-k% of actions by Q/logit.
     gen_epsilon:
         ε-greedy probability (highest priority, short-circuits Q computation).
+
+    Notes
+    -----
+    ``exploit_objective`` / ``explore_objective`` are kept in the signature for
+    backward compatibility but are no longer used to re-compute the reward here.
+    The reward stored in each row comes directly from ``env.path[-1].reward``
+    (set by ``env.reward_fn`` during the episode), matching classical-dqn
+    ``generate_pg`` behaviour and avoiding double-application of the objective.
+
+    Raw predictor values are fetched via ``predictor.predict_raw()`` when
+    available (OOHCatalystPredictor exposes this), falling back to
+    ``predictor.predict()`` otherwise.  This ensures ``dp_mean`` stores the
+    raw property value (e.g. overpotential in mV for OOH), not a transformed
+    reward scalar.
     """
     if policy is None and qnet is None:
         raise ValueError("Provide either policy (PG) or qnet (DQN).")
@@ -1043,17 +1057,22 @@ def generate_candidates(
     else:
         qnet.eval()
 
-    predictor_cache: Dict[tuple, Tuple[float, float]] = {}
+    use_predict_raw = hasattr(predictor, "predict_raw")
+    use_check_phase = hasattr(predictor, "check_phase")
+
+    # Cache raw (mean, std) values: avoids a second DeepMD call for the same
+    # composition when the first was already made inside env.reward_fn.
+    predictor_raw_cache: Dict[tuple, Tuple[float, float]] = {}
     seen_comp_keys: set = set()
     rows: List[dict] = []
 
     phases = []
     if n_exploit > 0:
-        phases.append(("exploit", n_exploit, exploit_objective))
+        phases.append(("exploit", n_exploit))
     if n_explore > 0:
-        phases.append(("explore", n_explore, explore_objective))
+        phases.append(("explore", n_explore))
 
-    for purpose, n_target, objective in phases:
+    for purpose, n_target in phases:
         accepted = 0
         attempted = 0
         dup_rejected = 0
@@ -1089,23 +1108,33 @@ def generate_candidates(
                 continue
             seen_comp_keys.add(comp_key)
 
-            if comp_key in predictor_cache:
-                mean, std = predictor_cache[comp_key]
+            # Reward from the episode (env.reward_fn already called in env.step).
+            reward = float(env.path[-1].reward) if env.path else 0.0
+
+            # Raw predictor values for CSV columns. OOHCatalystPredictor caches
+            # internally so this is a cache hit when env.reward_fn already ran.
+            if comp_key in predictor_raw_cache:
+                raw_mean, std = predictor_raw_cache[comp_key]
+            elif use_predict_raw:
+                raw_mean, std = predictor.predict_raw(comp)
+                predictor_raw_cache[comp_key] = (raw_mean, std)
             else:
-                mean, std = predictor.predict(comp)
-                predictor_cache[comp_key] = (mean, std)
+                raw_mean, std = predictor.predict(comp)
+                predictor_raw_cache[comp_key] = (raw_mean, std)
 
-            reward = objective_from_mean_std(mean, std, objective, k)
-
-            rows.append({
+            row: dict = {
                 "formula": env.terminal_formula,
-                "purpose": purpose,
                 "reward": reward,
-                "dp_mean": mean,
+                "dp_mean": raw_mean,
                 "dp_std": std,
-                "dp_mean_minus_std": mean - k * std,
-                "dp_mean_plus_std": mean + k * std,
-            })
+                "dp_mean_minus_std": raw_mean - k * std,
+            }
+            if use_check_phase:
+                phase_ok, phase_label = predictor.check_phase(comp)
+                row["primary_ok"] = bool(phase_ok)
+                row["primary_label"] = phase_label or ""
+
+            rows.append(row)
             accepted += 1
             pbar.update(1)
             pbar.set_postfix(attempts=attempted, dups=dup_rejected)

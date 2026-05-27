@@ -42,7 +42,6 @@ from rl_matdesign.model import PolicyNet, QRegressor, ValueNet
 from rl_matdesign.training import (
     _fit_scaler_from_warmup,
     _precompute_elem_features,
-    _rollout_random_episode,
     generate_candidates,
     train_dqn_online,
     train_pg,
@@ -184,7 +183,13 @@ def build_predictor(cfg: dict, seed: int = None):
 # Constraint filter factory
 # ---------------------------------------------------------------------------
 
-def build_constraint_filter(cfg: dict):
+def build_constraint_filter(cfg: dict, env=None):
+    """Build the constraint filter specified in *cfg*.
+
+    ``env`` is required for ``ooh_phase`` (needs ``env._allowed_units`` and
+    ``env._possible_sums_by_k``).  Build the env first without a filter, then
+    call this function and assign the result to ``env.phase_filter``.
+    """
     kind = cfg.get("constraint_filter", None)
     if kind is None:
         return None
@@ -205,6 +210,23 @@ def build_constraint_filter(cfg: dict):
             required_elements=cfg["required_elements"],
             nonzero_ratio=bool(cfg.get("nonzero_ratio_at_last", True)),
             reserve_for_last=bool(cfg.get("reserve_for_last", True)),
+        )
+    if kind == "ooh_phase":
+        # Mirrors --target-phase <phases> in classical-dqn: prunes actions so
+        # every generated composition satisfies at least one of the listed OOH
+        # phase types (Ni, Co, NiFe, CoFe, NiFeCo, any).
+        from abcde_ooh.constraints.phase_sampler import PhaseActionFilter
+        if env is None:
+            raise ValueError(
+                "constraint_filter 'ooh_phase' requires the env to be passed to "
+                "build_constraint_filter() so that _allowed_units and "
+                "_possible_sums_by_k can be read from it."
+            )
+        target_phases = cfg.get("target_phases", ["any"])
+        return PhaseActionFilter(
+            target_phase=target_phases,
+            allowed_units=env._allowed_units,
+            possible_sums_by_k=env._possible_sums_by_k,
         )
     raise ValueError(f"Unknown constraint_filter '{kind}'.")
 
@@ -241,9 +263,8 @@ def main() -> None:
     print(f"[INFO] device={device}, method={method}, dp_seed={args.dp_seed}, "
           f"train_seed={train_seed}, gen_seed={gen_seed}")
 
-    predictor    = build_predictor(cfg, seed=args.dp_seed)
-    phase_filter = build_constraint_filter(cfg)
-    env_type     = cfg.get("env_type", "fraction")
+    predictor = build_predictor(cfg, seed=args.dp_seed)
+    env_type  = cfg.get("env_type", "fraction")
 
     def reward_fn(formula: str) -> float:
         if env_type == "integer_ratio":
@@ -264,13 +285,17 @@ def main() -> None:
         mean, _ = predictor.predict(comp)
         return mean
 
+    # Build env first (without filter), then build the filter using env's
+    # feasibility tables (_allowed_units, _possible_sums_by_k), then attach.
+    # This is required for the ooh_phase filter and avoids the previous probe
+    # episode that burned RNG state before warmup (Bug 3).
     if env_type == "integer_ratio":
         env = IntegerRatioEnv(
             cation_set=cfg["cation_set"],
             ratio_set=cfg.get("ratio_set", None) or _default_digits(),
             n_components=int(cfg.get("n_components", 5)),
             reward_fn=reward_fn,
-            phase_filter=phase_filter,
+            phase_filter=None,
         )
     else:
         env = CompositionEnv(
@@ -279,13 +304,12 @@ def main() -> None:
             anion_formula=cfg.get("anion_formula", ""),
             n_components=int(cfg.get("n_components", 5)),
             reward_fn=reward_fn,
-            phase_filter=phase_filter,
+            phase_filter=None,
         )
 
-    # Probe dims with one random episode.
-    _rollout_random_episode(env)
-    state_dim = len(env.path[0].state_material_features)
-    step_dim  = env.n_components
+    env.phase_filter = build_constraint_filter(cfg, env=env)
+
+    step_dim     = env.n_components
     fraction_set = list(env.fraction_set)
 
     # Precompute Magpie element features (replaces one-hot element encoding).
@@ -295,8 +319,7 @@ def main() -> None:
     elem_dim = int(elem_feats_scaled.shape[1])
     frac_dim = 1
 
-    print(f"[INFO] state_dim={state_dim}, step_dim={step_dim}, "
-          f"elem_dim(Magpie)={elem_dim}, frac_dim={frac_dim}")
+    print(f"[INFO] step_dim={step_dim}, elem_dim(Magpie)={elem_dim}, frac_dim={frac_dim}")
 
     metrics = RunMetrics()
 
@@ -466,6 +489,8 @@ def main() -> None:
         else:
             scaler = _fit_scaler_from_warmup(env, pg_warmup)
             joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"))
+            state_dim = int(scaler.n_features_in_)
+            print(f"[INFO] state_dim={state_dim} (from warmup scaler)")
             policy = PolicyNet(
                 state_dim=state_dim, step_dim=step_dim,
                 elem_dim=elem_dim, frac_dim=frac_dim,
