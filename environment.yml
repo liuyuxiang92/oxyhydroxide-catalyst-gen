@@ -1,0 +1,56 @@
+# CPU / development environment (macOS, Linux without GPU)
+#
+# Root cause of the OpenMP conflict this file solves:
+#   pip-installed numpy/sklearn pull in MKL, which loads Intel's libiomp5.
+#   PyTorch also bundles its own libiomp5. Two versions of the same OpenMP
+#   runtime in one process causes segfaults.
+#
+# Fix: blas=*=openblas forces numpy/scipy/sklearn to link against OpenBLAS,
+#   which uses pthreads — no OpenMP runtime is loaded at all. PyTorch's own
+#   OpenMP becomes the sole runtime in the process. No code workaround needed.
+#
+# Usage:
+#   conda env create -f environment.yml
+#   conda activate ooh-catalyst
+#   pip install deepmd-kit[torch]          # CPU build, for smoke tests only
+#
+# For GPU / HPC production: use environment-gpu.yml instead.
+
+name: ooh-catalyst
+
+channels:
+  - pytorch          # authoritative source for PyTorch CPU/GPU builds
+  - conda-forge      # consistent OpenBLAS + chemistry packages
+  - nodefaults       # exclude Anaconda's default channel; avoids MKL sneaking in
+
+dependencies:
+  - python=3.10
+
+  # --- Core scientific stack ---
+  # blas=*=openblas is the key pin: all conda-forge packages below will link
+  # against OpenBLAS (pthreads-based), not MKL (OpenMP-based).
+  - blas=*=openblas
+  - numpy
+  - scipy
+  - scikit-learn
+
+  # --- Utilities ---
+  - tqdm
+  - joblib
+  - pandas
+
+  # --- Materials chemistry ---
+  - pymatgen
+  - matminer
+  - ase
+
+  # --- PyTorch CPU (local dev / macOS) ---
+  - pytorch::cpuonly
+  - pytorch::pytorch
+
+  # --- DeepMD-kit ---
+  # No stable conda package for the PyTorch backend; install via pip.
+  # CPU build is sufficient for local testing without model files.
+  - pip
+  - pip:
+    - deepmd-kit[torch]

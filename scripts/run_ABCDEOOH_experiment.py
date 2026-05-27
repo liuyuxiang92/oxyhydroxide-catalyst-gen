@@ -12,15 +12,7 @@ from __future__ import annotations
 
 import os
 
-# Mitigation for OpenMP runtime conflicts (common on macOS when numpy/sklearn
-# and torch pull different OpenMP implementations). This is a best-effort guard
-# to avoid segfaults; a clean conda env with consistent BLAS/OpenMP is better.
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
-os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+# Required for torch.use_deterministic_algorithms(True) on CUDA >= 10.2.
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 import argparse
