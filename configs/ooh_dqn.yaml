@@ -1,0 +1,127 @@
+# OOH catalyst configuration — classical online DQN
+# Matches the classical-dqn command:
+#   python -m scripts.run_ABCDEOOH_experiment \
+#       --out <out> \
+#       --dp-n-random-configs 10 --target-phase any \
+#       --dqn-warmup-eps 1000 --buffer-size 50000 --dqn-batch-size 32 \
+#       --target-update-freq 10 --grad-steps-per-ep 5 \
+#       --eps-anneal-eps 15000 --eps-min 0.05 \
+#       --num-train-eps 20000 --num-gen-eps 2000 \
+#       --dp-model 20260514_oc22_[1-5].ckpt.pt \
+#       --train-seed 123 --gen-seed 213 --dp-seed 321 \
+#       --save-checkpoint-freq 1000
+#
+# General-framework equivalent:
+#   python scripts/run_experiment.py --config configs/ooh_dqn.yaml --method dqn \
+#       --out <out> \
+#       --dp-seed 321 --train-seed 123 --gen-seed 213 \
+#       --save-checkpoint-freq 1000
+
+name: ooh_dqn
+description: "5-cation oxyhydroxide (ABCDE-OOH) overpotential optimisation — classical online DQN"
+
+# ---- Environment ----
+cation_set:
+  - Mg
+  - Ca
+  - Sc
+  - Ti
+  - Cu
+  - Sr
+  - Y
+  - Zr
+  - Hf
+  - Bi
+  - La
+  - Ce
+  - Pr
+  - Nd
+  - Sm
+  - Eu
+  - Gd
+  - Tb
+  - Dy
+  - Ho
+  - Er
+  - Tm
+  - Yb
+  - Lu
+  - Co
+  - Ni
+  - Fe
+  - Mn
+
+fraction_set:
+  - "0.05"
+  - "0.10"
+  - "0.15"
+  - "0.20"
+  - "0.25"
+  - "0.30"
+  - "0.35"
+  - "0.40"
+  - "0.45"
+  - "0.50"
+  - "0.55"
+  - "0.60"
+  - "0.65"
+  - "0.70"
+  - "0.75"
+  - "0.80"
+
+anion_formula: "O2H1"
+n_components: 5
+
+constraint_filter: ooh_phase
+target_phases:
+  - any
+
+# ---- Predictor ----
+predictor: ooh
+base_poscar: POSCAR
+dp_models:
+  - 20260514_oc22_1.ckpt.pt
+  - 20260514_oc22_2.ckpt.pt
+  - 20260514_oc22_3.ckpt.pt
+  - 20260514_oc22_4.ckpt.pt
+  - 20260514_oc22_5.ckpt.pt
+objective: mean_plus_kstd
+k: 1.0
+n_random_configs: 10              # --dp-n-random-configs 10
+ads_height: 1.9
+ads_dz: 1.0
+geo_opt: false
+geo_opt_model: "./DPA-3.1-3M_1.pt"
+uncertainty: models
+
+# ---- RL method ----
+method: dqn
+
+# ---- DQN hyperparameters ----
+dqn_warmup_eps: 1000              # --dqn-warmup-eps 1000  (old flag: --warmup-eps)
+num_train_eps: 20000              # --num-train-eps 20000
+buffer_size: 50000                # --buffer-size 50000
+dqn_batch_size: 32                # --dqn-batch-size 32  (old flag: --batch-size)
+grad_steps_per_ep: 5              # --grad-steps-per-ep 5
+target_update_freq: 10            # --target-update-freq 10
+eps_anneal_eps: 15000             # --eps-anneal-eps 15000
+eps_min: 0.05                     # --eps-min 0.05
+gamma: 0.9                        # default
+dqn_lr: 0.001                     # default (--dqn-lr not specified in command)
+
+# ---- Generation ----
+num_gen_eps: 2000                 # --num-gen-eps 2000 (second occurrence overrides first 1000)
+exploration_gen_eps: 0
+
+# ---- PG-specific (unused for DQN, kept for completeness) ----
+pg_warmup_eps: 1000
+pg_num_iters: 50
+pg_batch_eps: 21
+pg_lr_actor: 0.001
+pg_lr_critic: 0.001
+entropy_coef: 0.15
+gen_temperature: 1.0
+gen_top_frac: 0.0
+gen_epsilon: 0.0
+repeat_penalty_coef: 0
+repeat_penalty_shape: log
