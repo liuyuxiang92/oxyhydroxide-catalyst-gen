@@ -83,6 +83,7 @@ uncertainty: models
 
 # ---- RL hyperparameters ----
 method: reinforce
+pg_warmup_eps: 1000               # --pg-warmup-eps 1000
 pg_num_iters: 50                  # --pg-num-iters 50
 pg_batch_eps: 21                  # --pg-batch-eps 21
 pg_lr_actor: 0.001
