@@ -3,11 +3,14 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ooh-catalyst-gen"
+name = "rl-matdesign"
 version = "0.1.0"
 requires-python = ">=3.10"
 # Dependencies are managed by the conda environment files (environment.yml /
 # environment-gpu.yml). Only the package structure is declared here.
+
+[project.scripts]
+rl-matdesign = "abcde_ooh.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
