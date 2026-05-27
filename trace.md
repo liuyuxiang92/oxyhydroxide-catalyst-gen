@@ -70,3 +70,11 @@ Not stuck — renaming three DQN-only argparse flags to add `--dqn-` prefix (`--
 ### EARS — Commit Digest (2026-05-26 14:24)
 <!-- concepts: git-branching, repo-organisation -->
 Moved all general-framework files (run_experiment.py, src/rl_matdesign/, configs/, scripts/baselines/, scripts/run_seeds.py) off feat/classical-dqn and onto the dedicated general-framework branch. The framework was introduced in one commit (32813b0) so cherry-pick onto general-framework was clean with zero conflicts. feat/classical-dqn is now OOH-only; general-framework owns the config-driven multi-system runner. Any future work on the general framework (new configs, rl_matdesign changes) should happen on general-framework, not here.
+
+### EARS — Progress (2026-05-27 11:36)
+<!-- concepts: environment-management, openmp, documentation -->
+Two sessions of work captured here:
+
+1. **OpenMP runtime fix**: The `os.environ.setdefault(OMP_NUM_THREADS=1, ...)` block in both scripts was a band-aid that throttled all threads to 1. Root cause is MKL's `libiomp5` (from pip numpy/sklearn) conflicting with PyTorch's bundled `libiomp5`. Proper fix: `environment.yml` + `environment-gpu.yml` both pin `blas=*=openblas` so numpy/sklearn use OpenBLAS (pthreads-based, loads zero OpenMP runtime). PyTorch's OpenMP then becomes the sole runtime — conflict eliminated at the binary level. Removed the thread-throttle env vars from `run_ABCDEOOH_experiment.py` and `run_experiment.py`; kept only `CUBLAS_WORKSPACE_CONFIG` (unrelated — needed for `torch.use_deterministic_algorithms`).
+
+2. **README rewrite**: Both branches had identical, severely outdated READMEs (wrong flags, broken code blocks, no installation section). Rewrote both: `feat/classical-dqn` README covers installation, all three RL methods with accurate flags, checkpoint/resume, generation diversity flags, DeepMD ensemble, phase constraints, output file table. `general-framework` README (in progress) covers YAML-driven multi-system usage.
