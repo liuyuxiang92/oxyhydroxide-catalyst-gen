@@ -45,14 +45,10 @@ warnings.filterwarnings(
     append=False,
 )
 
-# Allow running without installing the package.
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
-
-from abcde_ooh.env import ABCDEOOHEnv, DEFAULT_CATION_SET, DEFAULT_FRACTIONS  # noqa: E402
-from abcde_ooh.constraints.primary_phase import check_primary_phase  # noqa: E402
-from abcde_ooh.featurization import feature_calculators  # noqa: E402
-from abcde_ooh.model import PolicyNet, QRegressor, ValueNet  # noqa: E402
+from abcde_ooh.env import ABCDEOOHEnv, DEFAULT_CATION_SET, DEFAULT_FRACTIONS
+from abcde_ooh.constraints.primary_phase import check_primary_phase
+from abcde_ooh.featurization import feature_calculators
+from abcde_ooh.model import PolicyNet, QRegressor, ValueNet
 
 
 def _comp_key(comp: dict) -> tuple:

@@ -161,10 +161,6 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Ensure local imports work when invoked as a script.
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    sys.path.insert(0, os.path.join(repo_root, "src"))
-
     run_cfg = _load_run_config(args.run_dir)
 
     anion_formula = run_cfg.get("anion_formula", "O2H1")

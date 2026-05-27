@@ -71,6 +71,10 @@ Not stuck — renaming three DQN-only argparse flags to add `--dqn-` prefix (`--
 <!-- concepts: git-branching, repo-organisation -->
 Moved all general-framework files (run_experiment.py, src/rl_matdesign/, configs/, scripts/baselines/, scripts/run_seeds.py) off feat/classical-dqn and onto the dedicated general-framework branch. The framework was introduced in one commit (32813b0) so cherry-pick onto general-framework was clean with zero conflicts. feat/classical-dqn is now OOH-only; general-framework owns the config-driven multi-system runner. Any future work on the general framework (new configs, rl_matdesign changes) should happen on general-framework, not here.
 
+### EARS — Progress (2026-05-27 11:49)
+<!-- concepts: python-packaging, editable-install, sys-path -->
+Migrating `feat/classical-dqn` branch to editable install (`pyproject.toml` + `pip install -e .`). Removing all `sys.path.insert(0, src/)` runtime hacks from three scripts: `run_ABCDEOOH_experiment.py`, `summarize_replay_buffer.py`, `evaluate_formulas_dp.py`. Also adding `- -e .` to both environment files. Same changes were already committed on `general-framework` branch — applying identically here.
+
 ### EARS — Progress (2026-05-27 11:36)
 <!-- concepts: environment-management, openmp, documentation -->
 Two sessions of work captured here:

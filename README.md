@@ -24,7 +24,11 @@ conda env create -f environment-gpu.yml
 conda activate ooh-catalyst-gpu
 ```
 
-DeepMD-kit is installed automatically via the `pip:` section in each environment file.
+The `pip:` section in each environment file also runs `pip install -e .` automatically,
+installing the project's packages (`abcde_ooh`) in editable mode so they are importable
+from any directory without any `sys.path` hacks.
+
+DeepMD-kit is installed automatically via the same `pip:` section.
 For a different CUDA version, change `pytorch-cuda=12.1` → `pytorch-cuda=11.8` and
 `deepmd-kit[torch,cu12]` → `deepmd-kit[torch,cu11]` in `environment-gpu.yml` before creating
 the environment.

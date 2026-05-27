@@ -46,4 +46,5 @@ dependencies:
   # --- DeepMD-kit with CUDA 12 ---
   - pip
   - pip:
+    - -e .
     - deepmd-kit[torch,cu12]
