@@ -41,6 +41,10 @@ User decided to remove SQS mode entirely and keep only random structure generati
 <!-- concepts: resume-training, only-generate, skip-generation, general-framework -->
 Porting Tier-1 features from classical-dqn to general-framework. Added: --only-generate, --resume-training, --skip-generation, --load-qnet/policy/scaler/value-net flags to run_experiment.py. Full branching logic for DQN (only-generate loads qnet, resume warns + fresh start) and PG (only-generate loads policy, resume loads checkpoint.pt or policy.pt, restores optimizer + visit_counts via checkpoint_cfg). training_log.csv appends when resuming. Also updated train_pg in training.py to restore visit_counts + optimizer states from checkpoint_cfg on resume. Still need: add mode param to RunMetrics.to_csv(), syntax check, commit.
 
+### EARS — Stuck (2026-05-27 09:40)
+<!-- concepts: deterministic-algorithms, cuda, general-framework -->
+Not stuck — fixing runtime crash: `torch.use_deterministic_algorithms(True)` (triggered by --train-seed) causes DeepMD CUDA matmul to fail on CUDA >= 10.2. Fix: set CUBLAS_WORKSPACE_CONFIG=:4096:8 at startup, matching classical-dqn (line 24 of run_ABCDEOOH_experiment.py). One-line change to run_experiment.py.
+
 ### EARS — Stuck (2026-05-26 18:18)
 <!-- concepts: resume-training, only-generate, skip-generation, general-framework -->
 Not stuck — porting three Tier-1 features from classical-dqn to general-framework in sequence: (1) training.py: restore opt states + visit_counts in train_pg when checkpoint_cfg has resume data, (2) run_experiment.py: add --only-generate, --resume-training, --skip-generation, --load-* flags + full PG/DQN branching logic. Multiple edits to training.py are intentional sequential steps.

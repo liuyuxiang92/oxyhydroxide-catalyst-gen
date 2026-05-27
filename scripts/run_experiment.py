@@ -26,6 +26,8 @@ import warnings
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+# Required for torch.use_deterministic_algorithms(True) with CUDA >= 10.2.
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 warnings.filterwarnings(
     "ignore",
