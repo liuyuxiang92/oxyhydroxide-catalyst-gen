@@ -1,5 +1,39 @@
 # Trace: oxyhydroxide-catalyst-gen
 
+## 2026-05-27 — general-framework vs classical-dqn reproducibility audit
+
+### EARS — Progress (2026-05-27 14:15)
+<!-- concepts: reproducibility, reinforcement-learning, ooh-catalyst -->
+Audited all divergences between `general-framework` and `feat/classical-dqn` that break reproducibility when running the same seeds. Found and fixed 9 bugs across 5 files:
+
+**Training bugs (affect which structures are generated):**
+1. `ooh.yaml` `objective: mean_minus_kstd` → `mean_plus_kstd` — std sign was flipped vs classical-dqn's `-(mean-std)`
+2. `ooh.yaml` `pg_num_iters: 1000`/`num_gen_eps: 2000` → `50`/`50` — YAML values silently override CLI since run_experiment.py has no those flags
+3. `run_experiment.py:285-287` probe episode burned 5 RNG draws before warmup — removed probe, infer state_dim from scaler after warmup
+4. `dp_predictor.py:450` `hash()` (PYTHONHASHSEED-randomized) → `hashlib.md5` for stable composition seed
+5. `constraint_filter: null` → `ooh_phase` + `target_phases: [any]` — classical-dqn uses PhaseActionFilter even with `--target-phase any`
+
+**Generation bugs (affect CSV output values):**
+6. `generate_candidates` applied objective twice to reward; fixed to use `env.path[-1].reward` directly
+7. No shared cache between training and generation; fixed via internal cache in `OOHCatalystPredictor.predict_raw()`
+8. Double DeepMD call per episode (env.step + generate_candidates); fixed via same cache
+9. Missing `primary_ok`/`primary_label` columns; added via `predictor.check_phase()` hook
+
+Key architectural decision: added `predict_raw()` and `check_phase()` to `OOHCatalystPredictor` to expose raw overpotential values and phase labels, keeping the generic `PropertyPredictor.predict()` interface intact for other systems.
+
+### EARS — Stuck (2026-05-27 14:17)
+<!-- concepts: reproducibility, reinforcement-learning, ooh-catalyst -->
+Not stuck — applying a large multi-file patch (9 bugs across 5 files) sequentially. run_experiment.py requires 4 edits because the changes are in separate non-adjacent sections: imports, build_constraint_filter function, env creation block, and the fresh-PG state_dim block. Each edit is a distinct logical fix; no thrashing.
+
+## 2026-05-27 — environment-gpu.yml fix + editable install
+
+### EARS — Progress (2026-05-27 14:05)
+<!-- concepts: python-packaging, conda, pytorch-cuda -->
+Fixed `environment-gpu.yml` for HPC clusters. Two root causes of the conda solve failure:
+1. `pytorch::pytorch` (pytorch channel) requires MKL BLAS — conflicts with `blas=*=openblas` pin.
+2. HPC cluster provides CUDA system-wide; conda `pytorch-cuda=12.1` needs `libcublas`/`cuda-cudart` as conda packages, which don't exist on this cluster.
+Fix: remove pytorch from conda section entirely, remove `pytorch` channel, install via pip wheel (`torch --index-url https://download.pytorch.org/whl/cu124`). Cluster CUDA confirmed 12.4. Same pattern applied on both branches alongside the editable install (`-e .`) migration.
+
 ## 2026-05-26 — general-framework seeding fix
 
 ### EARS — Session Start (2026-05-26 15:35)
@@ -71,3 +105,7 @@ Adding OOH catalyst support to general-framework so experiments can run via run_
 1. Created `src/rl_matdesign/predictors/ooh.py` — `OOHCatalystPredictor` wraps `abcde_ooh.dp_predictor.DeepMDOverpotentialPredictor`. Negates mean overpotential before `objective_from_mean_std` (same sign convention as HEA/perovskite predictors). Exposes `uncertainty` mode ("models"/"configs"/"total").
 2. Updated `build_predictor()` in `run_experiment.py` — added `"ooh"` branch reading `base_poscar`, `dp_models`, `ads_height`, `ads_dz`, `geo_opt`, `uncertainty` from YAML cfg.
 3. Created `configs/ooh.yaml` — 28-cation set (matching DEFAULT_CATION_SET from abcde_ooh), 16 fractions (0.05–0.80), `anion_formula: "O2H1"`, full DQN-online + PG hyperparameters.
+
+### EARS — Stuck (2026-05-27 11:43)
+<!-- concepts: python-packaging, sys.path, editable-install -->
+Not stuck — removing `sys.path.insert(0, src/)` from 5 scripts in one session as part of migrating to `pip install -e .` + `pyproject.toml`. Multiple edits to `run_ABCDEOOH_experiment.py` are intentional sequential steps: (1) remove `_REPO_ROOT` + `sys.path.insert` block, (2) remove `# noqa: E402` comments on the imports that followed the hack. Not thrashing.

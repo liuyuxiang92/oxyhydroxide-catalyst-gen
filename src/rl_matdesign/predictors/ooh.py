@@ -67,18 +67,51 @@ class OOHCatalystPredictor:
             geo_opt_model=geo_opt_model,
         )
         self._predictor = DeepMDOverpotentialPredictor(cfg)
+        # Composition cache: comp_key → (raw_mean_overpotential, std)
+        # Shared across predict_raw() calls to avoid redundant DeepMD evaluations.
+        self._cache: Dict[tuple, Tuple[float, float]] = {}
+
+    @staticmethod
+    def _comp_key(composition: Dict[str, float]) -> tuple:
+        """Canonical cache key matching classical-dqn _comp_key (units of 1/20)."""
+        return tuple(sorted(
+            (k, int(round(v * 20)))
+            for k, v in composition.items()
+            if int(round(v * 20)) > 0
+        ))
+
+    def predict_raw(self, composition: Dict[str, float]) -> Tuple[float, float]:
+        """Return (raw_mean_overpotential, std) — untransformed DeepMD values.
+
+        Caches by composition key so repeated calls (e.g. once in env.reward_fn
+        during training/generation and once in generate_candidates for CSV output)
+        never hit DeepMD twice for the same composition.
+        """
+        key = self._comp_key(composition)
+        if key in self._cache:
+            return self._cache[key]
+        raw_mean, std = self._predictor.predict_overpotential(
+            composition, uncertainty=self.uncertainty
+        )
+        self._cache[key] = (raw_mean, std)
+        return raw_mean, std
 
     def predict(self, composition: Dict[str, float]) -> Tuple[float, float]:
         """Return (reward, std) for *composition*.
 
         Lower overpotential is better, so mean_overpotential is negated before
         the objective function, mirroring how HEAPropertyPredictor negates energy.
+        Internally calls predict_raw() so results are cached.
         """
-        mean_overpotential, std = self._predictor.predict_overpotential(
-            composition, uncertainty=self.uncertainty
-        )
-        reward = self._objective_fn(-mean_overpotential, std, self.objective, self.k)
+        raw_mean, std = self.predict_raw(composition)
+        reward = self._objective_fn(-raw_mean, std, self.objective, self.k)
         return reward, std
+
+    def check_phase(self, composition: Dict[str, float]) -> Tuple[bool, str]:
+        """Return (primary_ok, primary_label) matching classical-dqn generate_pg output."""
+        from abcde_ooh.constraints.primary_phase import check_primary_phase
+        ok, label = check_primary_phase(composition)
+        return bool(ok), label or ""
 
     def batch_predict(self, compositions: List[Dict[str, float]]) -> List[Tuple[float, float]]:
         return [self.predict(c) for c in compositions]

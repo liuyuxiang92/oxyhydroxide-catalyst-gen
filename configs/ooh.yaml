@@ -59,7 +59,9 @@ fraction_set:
 anion_formula: "O2H1"
 n_components: 5
 
-constraint_filter: null   # --target-phase any → no phase filter
+constraint_filter: ooh_phase       # matches --target-phase any in classical-dqn
+target_phases:
+  - any
 
 # ---- Predictor ----
 predictor: ooh
@@ -70,7 +72,7 @@ dp_models:
   - 20260514_oc22_3.ckpt.pt
   - 20260514_oc22_4.ckpt.pt
   - 20260514_oc22_5.ckpt.pt
-objective: mean_minus_kstd
+objective: mean_plus_kstd          # matches classical-dqn reward = -(mean - std) = -mean + std
 k: 1.0
 n_random_configs: 10              # --dp-n-random-configs 10
 ads_height: 1.9
@@ -81,8 +83,7 @@ uncertainty: models
 
 # ---- RL hyperparameters ----
 method: reinforce
-pg_warmup_eps: 1000               # --pg-warmup-eps 1000
-pg_num_iters: 50                # --pg-num-iters 1000
+pg_num_iters: 50                  # --pg-num-iters 50
 pg_batch_eps: 21                  # --pg-batch-eps 21
 pg_lr_actor: 0.001
 pg_lr_critic: 0.001
@@ -96,7 +97,7 @@ repeat_penalty_coef: 10           # --repeat-penalty-coef 10
 repeat_penalty_shape: log         # --repeat-penalty-shape log
 
 # ---- Generation ----
-num_gen_eps: 50                 # --num-gen-eps 2000
+num_gen_eps: 50                   # --num-gen-eps 50
 exploration_gen_eps: 0
 
 # ---- DQN-specific (unused for reinforce, kept for completeness) ----
