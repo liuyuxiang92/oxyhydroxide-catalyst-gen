@@ -82,7 +82,7 @@ uncertainty: models
 # ---- RL hyperparameters ----
 method: reinforce
 pg_warmup_eps: 1000               # --pg-warmup-eps 1000
-pg_num_iters: 1000                # --pg-num-iters 1000
+pg_num_iters: 50                # --pg-num-iters 1000
 pg_batch_eps: 21                  # --pg-batch-eps 21
 pg_lr_actor: 0.001
 pg_lr_critic: 0.001
@@ -96,7 +96,7 @@ repeat_penalty_coef: 10           # --repeat-penalty-coef 10
 repeat_penalty_shape: log         # --repeat-penalty-shape log
 
 # ---- Generation ----
-num_gen_eps: 2000                 # --num-gen-eps 2000
+num_gen_eps: 50                 # --num-gen-eps 2000
 exploration_gen_eps: 0
 
 # ---- DQN-specific (unused for reinforce, kept for completeness) ----
