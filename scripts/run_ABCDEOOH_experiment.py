@@ -280,7 +280,8 @@ def _choose_action_dqn(
         topk = torch.argsort(q, descending=True).cpu().tolist()[:k]
         return allowed[int(np.random.choice(topk))]
 
-    raise ValueError("No generation strategy active: set --gen-temperature, --gen-top-frac, or --gen-epsilon.")
+    # Pure greedy argmax — default for DQN training rollouts (no gen strategy set).
+    return allowed[int(torch.argmax(q).item())]
 
 
 def _compute_td_target(
@@ -858,7 +859,8 @@ def generate_pg(
                 topk = torch.argsort(logits, descending=True).cpu().tolist()[:k]
                 idx = int(np.random.choice(topk))
             else:
-                raise ValueError("No generation strategy active: set --gen-temperature, --gen-top-frac, or --gen-epsilon.")
+                # Pure greedy argmax — default when no gen strategy is set.
+                idx = int(torch.argmax(logits).item())
 
             env.step(allowed[idx])
 
