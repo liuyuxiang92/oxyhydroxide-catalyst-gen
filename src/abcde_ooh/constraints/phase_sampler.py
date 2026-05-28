@@ -18,7 +18,7 @@ composition can be completed into *any* of the listed phases.
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Sequence, Set, Tuple, Union
+from typing import Dict, List, Sequence, Set, Tuple, Union
 
 
 class PhaseActionFilter:

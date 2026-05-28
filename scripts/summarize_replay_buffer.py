@@ -4,10 +4,9 @@ import argparse
 import csv
 import json
 import os
-import sys
 import warnings
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 

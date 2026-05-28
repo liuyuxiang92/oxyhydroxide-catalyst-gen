@@ -110,46 +110,6 @@ def _make_loss_fn(name: str) -> torch.nn.Module:
     raise ValueError(f"Unknown DQN loss: {name!r} (expected 'mse' or 'smoothl1')")
 
 
-
-
-def choose_action(
-    *,
-    model: torch.nn.Module,
-    device: torch.device,
-    s_material: np.ndarray,
-    s_step: np.ndarray,
-    allowed_actions: Sequence[Tuple[Tuple[float, ...], Tuple[float, ...]]],
-    stochastic_top_frac: float,
-) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
-    if not allowed_actions:
-        raise RuntimeError("No allowed actions.")
-
-    a_elem = np.asarray([a[0] for a in allowed_actions], dtype=float)
-    a_comp = np.asarray([a[1] for a in allowed_actions], dtype=float)
-
-    s_mat_batch = np.repeat(s_material.reshape(1, -1), repeats=len(allowed_actions), axis=0)
-    s_step_batch = np.repeat(s_step.reshape(1, -1), repeats=len(allowed_actions), axis=0)
-
-    with torch.no_grad():
-        q = model(
-            torch.tensor(s_mat_batch, dtype=torch.float32, device=device),
-            torch.tensor(s_step_batch, dtype=torch.float32, device=device),
-            torch.tensor(a_elem, dtype=torch.float32, device=device),
-            torch.tensor(a_comp, dtype=torch.float32, device=device),
-        ).reshape(-1)
-
-    order_t = torch.argsort(q, descending=True)
-    order = order_t.detach().cpu().tolist()
-
-    if stochastic_top_frac <= 0.0:
-        return allowed_actions[int(order[0])]
-
-    k = max(1, int(round(stochastic_top_frac * len(allowed_actions))))
-    topk = order[:k]
-    idx = int(np.random.choice(topk))
-    return allowed_actions[idx]
-
-
 def _rollout_random_episode(env: ABCDEOOHEnv) -> None:
     env.initialize()
     for _t in range(env.max_steps):

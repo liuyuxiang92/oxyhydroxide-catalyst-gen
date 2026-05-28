@@ -102,3 +102,10 @@ Two sessions of work captured here:
 1. **OpenMP runtime fix**: The `os.environ.setdefault(OMP_NUM_THREADS=1, ...)` block in both scripts was a band-aid that throttled all threads to 1. Root cause is MKL's `libiomp5` (from pip numpy/sklearn) conflicting with PyTorch's bundled `libiomp5`. Proper fix: `environment.yml` + `environment-gpu.yml` both pin `blas=*=openblas` so numpy/sklearn use OpenBLAS (pthreads-based, loads zero OpenMP runtime). PyTorch's OpenMP then becomes the sole runtime — conflict eliminated at the binary level. Removed the thread-throttle env vars from `run_ABCDEOOH_experiment.py` and `run_experiment.py`; kept only `CUBLAS_WORKSPACE_CONFIG` (unrelated — needed for `torch.use_deterministic_algorithms`).
 
 2. **README rewrite**: Both branches had identical, severely outdated READMEs (wrong flags, broken code blocks, no installation section). Rewrote both: `feat/classical-dqn` README covers installation, all three RL methods with accurate flags, checkpoint/resume, generation diversity flags, DeepMD ensemble, phase constraints, output file table. `general-framework` README (in progress) covers YAML-driven multi-system usage.
+
+### EARS — Stuck (2026-05-28 13:55)
+<!-- concepts: dead code removal, rl-matdesign, refactoring -->
+- Context: Dead-code cleanup across feat/classical-dqn and general-framework branches
+- Goal: Remove unused function `choose_action()`, unused imports (`sys`, `Iterable`, `Tuple`) in several files
+- Obstacle: Not stuck — repeated edits to run_ABCDEOOH_experiment.py are from prior refactor commits, not current thrashing
+- Tried: N/A — proceeding with cleanup
