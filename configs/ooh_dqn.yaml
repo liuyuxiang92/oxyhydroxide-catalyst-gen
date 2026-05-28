@@ -112,16 +112,6 @@ dqn_lr: 0.001                     # default (--dqn-lr not specified in command)
 # ---- Generation ----
 num_gen_eps: 2000                 # --num-gen-eps 2000 (second occurrence overrides first 1000)
 exploration_gen_eps: 0
-
-# ---- PG-specific (unused for DQN, kept for completeness) ----
-pg_warmup_eps: 1000
-pg_num_iters: 50
-pg_batch_eps: 21
-pg_lr_actor: 0.001
-pg_lr_critic: 0.001
-entropy_coef: 0.15
 gen_temperature: 1.0
 gen_top_frac: 0.0
 gen_epsilon: 0.0
-repeat_penalty_coef: 0
-repeat_penalty_shape: log

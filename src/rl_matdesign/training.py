@@ -29,14 +29,12 @@ import collections
 import copy
 import math
 import random
-import warnings
 from collections import Counter
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 from sklearn.preprocessing import StandardScaler
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from .env import CompositionEnv
@@ -409,61 +407,6 @@ def train_dqn_online(
 
 
 # ---------------------------------------------------------------------------
-# Legacy offline DQN helpers (kept for backward compatibility)
-# ---------------------------------------------------------------------------
-
-def extract_mc_q_targets(
-    episode: List, gamma: float = 0.99
-) -> Tuple[List[Tuple], List[float]]:
-    """Compute Monte-Carlo Q-targets from an episode path (legacy offline DQN)."""
-    inputs = []
-    q_targets: List[float] = []
-    G = 0.0
-    for step in reversed(episode):
-        G = float(step.reward) + gamma * G
-        q_targets.append(G)
-        inputs.append((
-            np.asarray(step.state_material_features, dtype=float),
-            np.asarray(step.state_step_onehot, dtype=float),
-            np.asarray(step.action_elem_onehot, dtype=float),
-            np.asarray(step.action_comp_onehot, dtype=float),
-        ))
-    inputs.reverse()
-    q_targets.reverse()
-    return inputs, q_targets
-
-
-def train_q(
-    *,
-    model: torch.nn.Module,
-    loader: DataLoader,
-    device: torch.device,
-    epochs: int,
-    lr: float,
-    iteration: int = 0,
-) -> List[dict]:
-    """Supervised regression on MC Q-targets (MSELoss + Adam) — legacy offline DQN."""
-    model.train()
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = torch.nn.MSELoss()
-    metrics: List[dict] = []
-    pbar = tqdm(range(epochs), desc="Q epochs")
-    for epoch_idx in pbar:
-        batch_losses: List[float] = []
-        for s_mat, s_step, a_elem, a_comp, y in loader:
-            opt.zero_grad(set_to_none=True)
-            pred = model(s_mat.to(device), s_step.to(device), a_elem.to(device), a_comp.to(device))
-            loss = loss_fn(pred, y.to(device))
-            loss.backward()
-            opt.step()
-            batch_losses.append(float(loss.item()))
-        epoch_loss = float(np.mean(batch_losses)) if batch_losses else float("nan")
-        metrics.append({"phase": "dqn_train", "iteration": iteration,
-                        "epoch": epoch_idx + 1, "mse_loss": epoch_loss})
-        pbar.set_postfix(mse_loss=f"{epoch_loss:.4f}")
-    return metrics
-
-
 # ---------------------------------------------------------------------------
 # Action selection (DQN)
 # ---------------------------------------------------------------------------
@@ -1011,8 +954,6 @@ def generate_candidates(
     gen_epsilon: float = 0.0,
     gen_top_frac: float = 0.0,
     gen_temperature: float = 1.0,
-    exploit_objective: str = "mean_minus_kstd",
-    explore_objective: str = "mean_plus_kstd",
     k: float = 1.0,
     max_attempts: Optional[int] = None,
 ) -> List[dict]:
@@ -1035,12 +976,6 @@ def generate_candidates(
 
     Notes
     -----
-    ``exploit_objective`` / ``explore_objective`` are kept in the signature for
-    backward compatibility but are no longer used to re-compute the reward here.
-    The reward stored in each row comes directly from ``env.path[-1].reward``
-    (set by ``env.reward_fn`` during the episode), matching classical-dqn
-    ``generate_pg`` behaviour and avoiding double-application of the objective.
-
     Raw predictor values are fetched via ``predictor.predict_raw()`` when
     available (OOHCatalystPredictor exposes this), falling back to
     ``predictor.predict()`` otherwise.  This ensures ``dp_mean`` stores the

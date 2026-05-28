@@ -539,7 +539,6 @@ def main() -> None:
                 gen_top_frac=gen_top_frac,
                 gen_epsilon=gen_epsilon_gen,
                 k=float(cfg.get("k", 1.0)),
-                exploit_objective=cfg.get("objective", "mean_minus_kstd"),
                 max_attempts=_max_attempts,
             )
             for r in gen_rows:
