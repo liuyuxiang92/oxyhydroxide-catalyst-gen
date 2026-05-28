@@ -1,5 +1,15 @@
 # Trace: oxyhydroxide-catalyst-gen
 
+## 2026-05-28 — greedy argmax fallback + DQN algorithm audit
+
+### EARS — Progress (2026-05-28 10:26)
+<!-- concepts: reinforcement-learning, dqn, reproducibility -->
+Full audit of DQN execution path between `feat/classical-dqn` and `general-framework`. Root cause of `_choose_action_dqn` / `choose_action` raising `ValueError`: the "greedy" fallback listed in every docstring was never implemented. This crashed DQN training whenever the greedy branch of ε-greedy was selected (which happens ~6% of episodes by ep=1000 with eps_anneal_eps=15000). Fixed on both branches: replace `raise ValueError` with `argmax(Q)` (DQN) and `argmax(logits)` (PG generation).
+
+Key insight: generation is unaffected — CLI default `--gen-temperature 1.0` fires the Boltzmann branch before reaching the fallback. The argmax fallback only matters for DQN training rollouts (called with no gen args).
+
+Audit confirmed all other aspects match: seeding order, element features, buffer fill, training loop, epsilon schedule, gradient steps, target net copy, generation seeding, generation RNG order, and CSV sort order (ascending dp_mean_minus_std ≡ descending reward since reward = -dp_mean_minus_std).
+
 ## 2026-05-28 — general-framework DQN algorithm bug fix
 
 ### EARS — Progress (2026-05-28 09:45)

@@ -483,7 +483,7 @@ def choose_action(
 ) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
     """Select action from Q-network using Magpie encoding.
 
-    Priority: ε-greedy > Boltzmann > top-k > ValueError (no pure greedy).
+    Priority: ε-greedy > Boltzmann > top-k > greedy argmax (default).
 
     Parameters
     ----------
@@ -950,7 +950,7 @@ def _pg_single_episode_generate(
 ) -> None:
     """Single generation episode for PG methods.
 
-    Priority: ε-greedy > Boltzmann > top-k > ValueError.
+    Priority: ε-greedy > Boltzmann > top-k > greedy argmax (default).
     Default gen_temperature=1.0 prevents pure-greedy composition collapse.
     """
     env.initialize()
@@ -991,9 +991,8 @@ def _pg_single_episode_generate(
             topk = torch.argsort(logits, descending=True).cpu().tolist()[:k]
             idx = int(np.random.choice(topk))
         else:
-            raise ValueError(
-                "No generation strategy active: set gen_temperature, gen_top_frac, or gen_epsilon > 0."
-            )
+            # Pure greedy argmax — default when no gen strategy is set.
+            idx = int(torch.argmax(logits).item())
         env.step(allowed[idx])
 
 
