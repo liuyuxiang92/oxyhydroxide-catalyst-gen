@@ -19,7 +19,6 @@ import argparse
 import json
 import os
 import random
-import sys
 import warnings
 
 # Required for torch.use_deterministic_algorithms(True) with CUDA >= 10.2.
