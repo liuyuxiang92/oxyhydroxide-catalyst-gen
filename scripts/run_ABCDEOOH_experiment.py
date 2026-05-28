@@ -22,7 +22,6 @@ import csv
 import json
 import math
 import random
-import sys
 import warnings
 from collections import Counter
 from typing import Callable, List, Optional, Sequence, Tuple
@@ -31,7 +30,6 @@ import joblib
 import numpy as np
 import torch
 from sklearn.preprocessing import StandardScaler
-from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
 # Matminer can emit a verbose warning like:
@@ -82,28 +80,6 @@ def set_seed(seed: int, deterministic: bool = False) -> None:
 
 def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
-
-
-def extract_mc_q_targets(episode, gamma: float):
-    inputs = []
-    q_targets: List[float] = []
-
-    G = 0.0
-    for step in reversed(episode):
-        G = float(step.reward) + gamma * G
-        q_targets.append(G)
-        inputs.append(
-            (
-                np.asarray(step.state_material_features, dtype=float),
-                np.asarray(step.state_step_onehot, dtype=float),
-                np.asarray(step.action_elem_onehot, dtype=float),
-                np.asarray(step.action_comp_onehot, dtype=float),
-            )
-        )
-
-    inputs.reverse()
-    q_targets.reverse()
-    return inputs, q_targets
 
 
 def _save_checkpoint(path: str, data: dict, numbered_path: Optional[str] = None) -> None:
@@ -359,42 +335,6 @@ def _dqn_gradient_step(
     loss.backward()
     optimizer.step()
     return float(loss.item())
-
-
-def _rollout_policy_episode(
-    *,
-    env: ABCDEOOHEnv,
-    qnet: torch.nn.Module,
-    scaler: StandardScaler,
-    device: torch.device,
-    stochastic_top_frac: float,
-    online_epsilon: float,
-) -> None:
-    env.initialize()
-    for _t in range(env.max_steps):
-        allowed = env.allowed_actions()
-        s_mat = env.state_featurizer(env.state)
-        s_mat = scaler.transform(s_mat.reshape(1, -1))[0]
-
-        step_onehot = np.zeros(env.max_steps, dtype=float)
-        if env.counter < env.max_steps:
-            step_onehot[env.counter] = 1.0
-
-        # Online collection policy:
-        # - If online_epsilon > 0: epsilon-greedy (random with prob epsilon, otherwise greedy-best Q)
-        # - Else: greedy-best Q (classic DQN online collection)
-        if online_epsilon > 0.0 and float(np.random.rand()) < float(online_epsilon):
-            a = random.choice(allowed)
-        else:
-            a = choose_action(
-                model=qnet,
-                device=device,
-                s_material=s_mat,
-                s_step=step_onehot,
-                allowed_actions=allowed,
-                stochastic_top_frac=(0.0 if online_epsilon > 0.0 else stochastic_top_frac),
-            )
-        env.step(a)
 
 
 def _fit_scaler_from_warmup(env: ABCDEOOHEnv, n_warmup_eps: int) -> StandardScaler:
@@ -929,6 +869,13 @@ _DEFAULT_DP_MODELS = [
 ]
 
 
+def _sort_key(r: dict) -> float:
+    try:
+        return float(r.get("dp_mean_minus_std", "inf"))
+    except Exception:
+        return float("inf")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
@@ -1164,12 +1111,6 @@ def main() -> None:
         ),
     )
 
-    parser.add_argument(
-        "--use-saved-random-dataset",
-        action="store_true",
-        help="Load random_dataset.npz from --out instead of regenerating.",
-    )
-
     # DeepMD options
     parser.add_argument("--dp-poscar", type=str, default="POSCAR")
     parser.add_argument(
@@ -1384,7 +1325,7 @@ def main() -> None:
                 raise SystemExit(f"--only-generate requires {scaler_path} (use --load-scaler to override)")
             scaler = joblib.load(scaler_path)
 
-            elem_feats_scaled, _elem_scaler = _precompute_elem_features(env.cation_set, env.state_featurizer)
+            elem_feats_scaled, _ = _precompute_elem_features(env.cation_set, env.state_featurizer)
             elem_dim = int(elem_feats_scaled.shape[1])
             fraction_set = env.fraction_set
 
@@ -1425,13 +1366,7 @@ def main() -> None:
                 max_gen_attempts=args.max_gen_attempts if args.max_gen_attempts is not None else 10 * args.num_gen_eps,
             )
 
-            def _sort_key_pg_only(r: dict) -> float:
-                v = r.get("dp_mean_minus_std", "")
-                try:
-                    return float(v)
-                except Exception:
-                    return float("inf")
-            rows.sort(key=_sort_key_pg_only)
+            rows.sort(key=_sort_key)
 
             _pg_csv_keys = ["formula", "reward", "dp_mean", "dp_std", "dp_mean_minus_std", "primary_ok", "primary_label"]
             with open(os.path.join(args.out, "generated.csv"), "w", newline="") as f:
@@ -1458,7 +1393,7 @@ def main() -> None:
             scaler = joblib.load(scaler_path)
             print(f"[INFO] Loaded scaler from {scaler_path}", flush=True)
 
-            elem_feats_scaled, _elem_scaler = _precompute_elem_features(env.cation_set, env.state_featurizer)
+            elem_feats_scaled, _ = _precompute_elem_features(env.cation_set, env.state_featurizer)
             elem_dim = int(elem_feats_scaled.shape[1])
             fraction_set = env.fraction_set
 
@@ -1521,7 +1456,7 @@ def main() -> None:
             scaler = _fit_scaler_from_warmup(env, args.pg_warmup_eps)
             joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"), compress=True)
 
-            elem_feats_scaled, _elem_scaler = _precompute_elem_features(env.cation_set, env.state_featurizer)
+            elem_feats_scaled, _ = _precompute_elem_features(env.cation_set, env.state_featurizer)
             elem_dim = int(elem_feats_scaled.shape[1])
             fraction_set = env.fraction_set
 
@@ -1621,13 +1556,7 @@ def main() -> None:
                 max_gen_attempts=args.max_gen_attempts if args.max_gen_attempts is not None else 10 * args.num_gen_eps,
             )
 
-            def _sort_key_pg(r: dict) -> float:
-                v = r.get("dp_mean_minus_std", "")
-                try:
-                    return float(v)
-                except Exception:
-                    return float("inf")
-            rows.sort(key=_sort_key_pg)
+            rows.sort(key=_sort_key)
 
             _pg_csv_keys = ["formula", "reward", "dp_mean", "dp_std", "dp_mean_minus_std", "primary_ok", "primary_label"]
             with open(os.path.join(args.out, "generated.csv"), "w", newline="") as f:
@@ -1649,7 +1578,7 @@ def main() -> None:
 
     # Precompute element Magpie feature lookup table — used for both training and generation.
     print("[INFO] Precomputing element Magpie features...", flush=True)
-    elem_feats_scaled, _elem_scaler = _precompute_elem_features(env.cation_set, env.state_featurizer)
+    elem_feats_scaled, _ = _precompute_elem_features(env.cation_set, env.state_featurizer)
     elem_dim = int(elem_feats_scaled.shape[1])
     fraction_set = env.fraction_set
 
@@ -1912,11 +1841,6 @@ def main() -> None:
         if max_gen_attempts is not None and accepted < target_gen:
             print(f"[WARN] Only {accepted}/{target_gen} candidates generated after {attempted} attempts.")
 
-        def _sort_key(r: dict) -> float:
-            try:
-                return float(r.get("dp_mean_minus_std", "inf"))
-            except Exception:
-                return float("inf")
         rows.sort(key=_sort_key)
 
         out_csv = os.path.join(args.out, "generated.csv")

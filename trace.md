@@ -83,6 +83,14 @@ Not stuck — README.md edits across two branches look like thrashing but are in
 <!-- concepts: reinforcement-learning, argparse, dead-code-removal -->
 Not stuck — multiple edits to `run_ABCDEOOH_experiment.py` are intentional sequential removals of 17 dead argparse flags and 6 dead helper functions. Each edit targets a distinct block; no single edit can cover all removals cleanly. This is expected multi-edit refactoring.
 
+### EARS — Progress (2026-05-28 11:35)
+<!-- concepts: reinforcement-learning, dead-code-removal, refactoring -->
+Dead code cleanup on `feat/classical-dqn` and `general-framework`. On `feat/classical-dqn`: removed `import sys`, `DataLoader/TensorDataset`, `extract_mc_q_targets()` (legacy MC-return function), `_rollout_policy_episode()` (unused), `--use-saved-random-dataset` argparse flag, consolidated three identical `_sort_key*()` functions into one module-level `_sort_key()`, and changed `_elem_scaler` → `_` (discarded return value). On `general-framework`: removing `import warnings`, `DataLoader`, `extract_mc_q_targets()`, `train_q()`, and `exploit_objective`/`explore_objective` params from `generate_candidates()`. Also cleaning 8 dead PG-specific keys from `ooh_dqn.yaml`.
+
+### EARS — Stuck (2026-05-28 11:34)
+<!-- concepts: reinforcement-learning, dead-code-removal, refactoring -->
+Not stuck — sequential dead code removals from `run_ABCDEOOH_experiment.py` on `feat/classical-dqn`. Removing: `import sys`, `DataLoader/TensorDataset` imports, `extract_mc_q_targets()`, `_rollout_policy_episode()`, `--use-saved-random-dataset` flag, three redundant `_sort_key*()` functions, and `_elem_scaler` variable assignments. Multiple edits are expected for this cleanup pass.
+
 ### EARS — Progress (2026-05-27 19:09)
 <!-- concepts: reinforcement-learning, argparse, dead-code-removal -->
 Cleaning up dead flags and helper functions from `run_ABCDEOOH_experiment.py` on `feat/classical-dqn`. Root cause: the script accumulated three generations of DQN design — offline-batch (MC regression), Phase-0/Phase-1 iterative, and classical online DQN — but only the classical online DQN is wired up. The others left 17 dead `parser.add_argument` blocks and 6 dead helper functions (`_anneal_epsilon`, `_fifo_cap_arrays`, `_split_train_val`, `_build_train_val_loaders`, `_eval_q_loss`, `train_q`). Removing all of them. `_make_loss_fn` stays — it IS used by the live DQN path. Will apply equivalent cleanup to `general-framework` branch for the 7 flags that are also dead there.
