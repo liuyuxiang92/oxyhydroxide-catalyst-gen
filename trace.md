@@ -1,5 +1,11 @@
 # Trace: oxyhydroxide-catalyst-gen
 
+## 2026-05-28 — QRegressor hidden_dim mismatch (reproducibility root cause)
+
+### EARS — Progress (2026-05-28 12:06)
+<!-- concepts: reinforcement-learning, dqn, reproducibility -->
+Found root cause of classical-dqn vs general-framework output divergence: `QRegressor` default `hidden_dim` is 256 in `feat/classical-dqn` but 128 in `general-framework`. `train_dqn_online` never received `hidden_dim` from the YAML, so it always built a smaller network. Different parameter count → different PyTorch random weight initialization with same seed → different Q-values from episode 1 → completely different training trajectories. Fix: add `dqn_hidden_dim: 256` to `ooh_dqn.yaml` and pass it through `run_experiment.py` → `train_dqn_online`.
+
 ## 2026-05-28 — greedy argmax fallback + DQN algorithm audit
 
 ### EARS — Progress (2026-05-28 10:26)

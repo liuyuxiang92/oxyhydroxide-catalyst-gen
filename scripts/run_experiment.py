@@ -371,6 +371,7 @@ def main() -> None:
                 eps_anneal_eps=int(cfg.get("eps_anneal_eps", 10000)),
                 eps_min=float(cfg.get("eps_min", 0.05)),
                 gamma=float(cfg.get("dqn_gamma", cfg.get("gamma", 0.9))),
+                hidden_dim=int(cfg.get("dqn_hidden_dim", 256)),
                 lr=float(cfg.get("dqn_lr", 1e-3)),
                 loss_name=_dqn_loss,
                 checkpoint_cfg=checkpoint_cfg,

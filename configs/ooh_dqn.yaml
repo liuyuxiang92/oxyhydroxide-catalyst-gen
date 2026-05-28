@@ -108,6 +108,7 @@ eps_anneal_eps: 15000             # --eps-anneal-eps 15000
 eps_min: 0.05                     # --eps-min 0.05
 gamma: 0.9                        # default
 dqn_lr: 0.001                     # default (--dqn-lr not specified in command)
+dqn_hidden_dim: 256               # matches classical-dqn QRegressor default
 
 # ---- Generation ----
 num_gen_eps: 2000                 # --num-gen-eps 2000 (second occurrence overrides first 1000)
