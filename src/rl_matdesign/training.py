@@ -348,7 +348,6 @@ def train_dqn_online(
                     allowed_actions=_allowed,
                     elem_feats_scaled=elem_feats_scaled,
                     fraction_set=fraction_set,
-                    gen_temperature=1.0,
                 )
             env.step(_a)
 
@@ -378,9 +377,11 @@ def train_dqn_online(
 
         metrics.append({
             "phase": "dqn_train",
+            "iteration": ep + 1,
             "episode": ep + 1,
             "return": episode_reward,
             "train_loss": mean_loss,
+            "mse_loss": mean_loss,
             "epsilon": eps,
             "buffer_rows": len(buffer),
         })
@@ -529,9 +530,8 @@ def choose_action(
         topk = torch.argsort(q, descending=True).cpu().tolist()[:k]
         return allowed_actions[int(np.random.choice(topk))]
 
-    raise ValueError(
-        "No generation strategy active: set gen_temperature, gen_top_frac, or gen_epsilon > 0."
-    )
+    # Pure greedy argmax (default for DQN training rollouts).
+    return allowed_actions[int(torch.argmax(q).item())]
 
 
 # ---------------------------------------------------------------------------

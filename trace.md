@@ -1,5 +1,19 @@
 # Trace: oxyhydroxide-catalyst-gen
 
+## 2026-05-28 — general-framework DQN algorithm bug fix
+
+### EARS — Progress (2026-05-28 09:45)
+<!-- concepts: reinforcement-learning, dqn, reproducibility -->
+Found a critical bug in `general-framework`'s classical DQN implementation (`src/rl_matdesign/training.py:train_dqn_online`).
+
+**Root cause**: `choose_action()` had no pure greedy/argmax fallback — it raised `ValueError` if all three strategies (epsilon, temperature, top_frac) were zero. The training loop worked around this by passing `gen_temperature=1.0`, which accidentally triggered **Boltzmann sampling** during ε-greedy training rollouts instead of pure greedy argmax. This made the greedy branch of DQN training stochastic, breaking reproducibility vs `feat/classical-dqn`.
+
+**Fix (two-part)**:
+1. `choose_action()`: replaced the `raise ValueError` fallback with `return allowed_actions[int(torch.argmax(q).item())]` — pure greedy argmax when no strategy is specified.
+2. `train_dqn_online()` training loop: removed `gen_temperature=1.0` argument so the greedy branch now correctly does argmax.
+
+**Architecture clarification from user**: `general-framework` should have NO `run_ABCDEOOH_experiment.py` — only `run_experiment.py` is the intended interface. The DQN/PG algorithms live in `src/rl_matdesign/training.py` and must match `feat/classical-dqn`'s inline implementations exactly (only difference: general-framework works for any system, classical-dqn is OOH-specific). Earlier mistakenly overwrote `run_ABCDEOOH_experiment.py` from classical-dqn — reverted.
+
 ## 2026-05-27 — general-framework vs classical-dqn reproducibility audit
 
 ### EARS — Progress (2026-05-27 14:15)
