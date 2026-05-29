@@ -109,3 +109,14 @@ Two sessions of work captured here:
 - Goal: Remove unused function `choose_action()`, unused imports (`sys`, `Iterable`, `Tuple`) in several files
 - Obstacle: Not stuck — repeated edits to run_ABCDEOOH_experiment.py are from prior refactor commits, not current thrashing
 - Tried: N/A — proceeding with cleanup
+
+### EARS — Progress (2026-05-29 11:42)
+<!-- concepts: DQN checkpointing, exact-state resume, replay buffer serialization -->
+- Context: Adding `--resume-training` support for DQN on both `feat/classical-dqn` and `general-framework`. PG already supports this; DQN warned and started fresh.
+- Design choice (user-confirmed): exact-state resume — checkpoint includes full replay buffer + dp_cache + target_net + optimizer state, not just qnet weights. Larger checkpoints (~100–500 MB) accepted as the cost of bit-equivalent resumption.
+- Pattern: mirror existing PG resume block (classical lines 1346–1414). dp_cache restored via in-place `.update()` so the `dp_reward_fn` closure sees changes. On general-framework the equivalent lives inside the predictor object (`predictor._cache`), not as a free-standing dict.
+- Loop range changes from `range(num_train_eps)` to `range(start_ep, num_train_eps)` — the ε schedule is a pure function of `ep`, so a correct `start_ep` makes ε resume automatic.
+
+### EARS — Progress (2026-05-29 11:49)
+<!-- concepts: DQN resume implementation, planned multi-edit cadence -->
+- Not stuck. Four edits to run_ABCDEOOH_experiment.py are the four planned hunks for classical-dqn resume (help text, save dict, init restructure, CSV append mode) per the approved plan at /Users/liuyuxiang/.claude/plans/harmonic-wiggling-storm.md. Will switch to general-framework branch next.

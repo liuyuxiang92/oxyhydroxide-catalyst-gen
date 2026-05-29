@@ -920,7 +920,10 @@ def main() -> None:
             "Load an existing model checkpoint and continue training. "
             "For PG: skips warmup, loads std_scaler.bin + policy.pt (+ value_net.pt for A2C) "
             "and runs more iterations. "
-            "For DQN: not supported (warns and starts fresh). "
+            "For DQN: skips warmup, loads std_scaler.bin + checkpoint.pt (qnet, target_net, "
+            "optimizer, replay buffer, dp_cache, epsilon, episode counter) for exact-state "
+            "resume; falls back to qnet.pt (weights only — buffer/epsilon/episode reset) "
+            "when no mid-training checkpoint is available. "
             "All paths default to <out>/<filename> and can be overridden by "
             "--load-scaler / --load-policy / --load-qnet / --load-value-net. "
             "Cannot be combined with --only-generate."
@@ -1560,43 +1563,6 @@ def main() -> None:
         print(f"[INFO] Loaded qnet from {qnet_path}", flush=True)
 
     else:
-        if args.resume_training:
-            tqdm.write(
-                "[WARN] --resume-training is not supported in classical DQN mode; starting fresh training."
-            )
-
-        # WARMUP: collect random episodes to fill buffer and fit the s_mat scaler.
-        warmup_eps = int(args.dqn_warmup_eps)
-        buffer_size = int(args.buffer_size)
-        buffer: collections.deque = collections.deque(maxlen=buffer_size)
-
-        # Warmup uses real DeepMD rewards so the buffer is correctly pre-filled.
-        # This matches standard DQN practice and costs the same total DeepMD calls
-        # as clearing the buffer would (early training with ε=1 would re-pay the cost).
-        print(f"[INFO] DQN warmup: {warmup_eps} random episodes with real rewards...", flush=True)
-        pbar = tqdm(total=warmup_eps, desc="DQN warmup")
-        for _ in range(warmup_eps):
-            _rollout_random_episode(env)
-            add_episode_to_buffer(env.path, buffer, elem_feats_scaled, fraction_set)
-            pbar.update(1)
-        pbar.close()
-
-        _warmup_s_mat = np.asarray([row["s_mat_raw"] for row in buffer], dtype=float)
-        scaler = StandardScaler()
-        scaler.fit(_warmup_s_mat)
-        state_dim = int(_warmup_s_mat.shape[1])
-        joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"), compress=True)
-        print(f"[INFO] s_mat scaler fitted on {len(_warmup_s_mat)} warmup rows.", flush=True)
-
-        # INIT: qnet, frozen target net, optimizer.
-        qnet = QRegressor(
-            state_dim=state_dim, step_dim=env.max_steps, elem_dim=elem_dim, frac_dim=1,
-        ).to(device)
-        target_net = copy.deepcopy(qnet)
-        target_net.eval()
-        optimizer = torch.optim.Adam(qnet.parameters(), lr=args.dqn_lr)
-        loss_fn = _make_loss_fn(args.dqn_loss)
-
         num_train_eps = int(args.num_train_eps)
         batch_size = int(args.dqn_batch_size)
         grad_steps = int(args.grad_steps_per_ep)
@@ -1605,20 +1571,146 @@ def main() -> None:
         eps_min = float(args.eps_min)
         gamma = float(args.gamma)
         ckpt_every = int(args.checkpoint_iter_freq)
-        dqn_ep_idx = 0
-        eps = 1.0
+        buffer_size = int(args.buffer_size)
+        _dqn_log_append = False
+
+        if args.resume_training:
+            # === RESUME path: load scaler + checkpoint, skip warmup ===
+            if not os.path.exists(scaler_path):
+                raise SystemExit(
+                    f"--resume-training (dqn) requires {scaler_path} (use --load-scaler to override)"
+                )
+            scaler = joblib.load(scaler_path)
+            state_dim = int(getattr(scaler, "n_features_in_", scaler.mean_.shape[0]))
+            print(f"[INFO] Loaded scaler from {scaler_path}", flush=True)
+
+            qnet = QRegressor(
+                state_dim=state_dim, step_dim=env.max_steps, elem_dim=elem_dim, frac_dim=1,
+            ).to(device)
+            target_net = copy.deepcopy(qnet)
+            target_net.eval()
+            optimizer = torch.optim.Adam(qnet.parameters(), lr=args.dqn_lr)
+            loss_fn = _make_loss_fn(args.dqn_loss)
+            buffer: collections.deque = collections.deque(maxlen=buffer_size)
+
+            # Decide checkpoint source: --load-qnet override, else default checkpoint.pt.
+            _dqn_ckpt_path = os.path.join(args.out, "checkpoint.pt")
+            _resume_src = args.load_qnet if args.load_qnet else _dqn_ckpt_path
+            _mid = None
+            if os.path.exists(_resume_src):
+                _raw_ckpt = torch.load(_resume_src, map_location=device, weights_only=False)
+                if (
+                    isinstance(_raw_ckpt, dict)
+                    and _raw_ckpt.get("type") == "dqn"
+                    and "buffer" in _raw_ckpt
+                ):
+                    _mid = _raw_ckpt
+                else:
+                    print(
+                        f"[WARN] {_resume_src} is not a valid DQN mid-checkpoint "
+                        f"(type={_raw_ckpt.get('type') if isinstance(_raw_ckpt, dict) else type(_raw_ckpt).__name__!r}); "
+                        "falling back to qnet.pt.",
+                        flush=True,
+                    )
+            elif args.load_qnet:
+                raise SystemExit(f"--load-qnet path not found: {args.load_qnet}")
+
+            if _mid is not None:
+                qnet.load_state_dict(_mid["qnet_state"])
+                target_net.load_state_dict(_mid["target_net_state"])
+                optimizer.load_state_dict(_mid["opt_state"])
+                for _row in _mid["buffer"]:
+                    buffer.append(_row)
+                _saved_buf_size = int(_mid.get("buffer_size", buffer_size))
+                if _saved_buf_size != buffer_size:
+                    print(
+                        f"[WARN] buffer_size changed: saved={_saved_buf_size}, "
+                        f"current={buffer_size}; kept loaded rows under new maxlen.",
+                        flush=True,
+                    )
+                dp_cache.update(_mid.get("dp_cache", {}))
+                start_ep = int(_mid["episodes_completed"])
+                eps = float(_mid.get("epsilon", max(eps_min, 1.0 - start_ep / eps_anneal_eps)))
+                _dqn_log_append = True
+                print(
+                    f"[INFO] DQN resume from {_resume_src}: ep={start_ep}, eps={eps:.4f}, "
+                    f"buffer_rows={len(buffer)}, dp_cache_rows={len(dp_cache)}",
+                    flush=True,
+                )
+            else:
+                if not os.path.exists(qnet_path):
+                    raise SystemExit(
+                        f"--resume-training (dqn) requires checkpoint.pt or {qnet_path} "
+                        "(use --load-qnet to override)"
+                    )
+                _raw_q = torch.load(qnet_path, map_location=device)
+                if isinstance(_raw_q, dict) and "qnet_state" in _raw_q:
+                    qnet.load_state_dict(_raw_q["qnet_state"])
+                else:
+                    qnet.load_state_dict(_raw_q)
+                target_net.load_state_dict(qnet.state_dict())
+                start_ep = 0
+                eps = 1.0
+                print(
+                    f"[WARN] DQN resume: no mid-checkpoint; loaded {qnet_path} (weights only) "
+                    "— buffer/eps/episode counter reset.",
+                    flush=True,
+                )
+
+            dqn_ep_idx = start_ep
+        else:
+            # === FRESH path: warmup + fit scaler + init from scratch ===
+            warmup_eps = int(args.dqn_warmup_eps)
+            buffer: collections.deque = collections.deque(maxlen=buffer_size)
+
+            # Warmup uses real DeepMD rewards so the buffer is correctly pre-filled.
+            # This matches standard DQN practice and costs the same total DeepMD calls
+            # as clearing the buffer would (early training with ε=1 would re-pay the cost).
+            print(f"[INFO] DQN warmup: {warmup_eps} random episodes with real rewards...", flush=True)
+            pbar = tqdm(total=warmup_eps, desc="DQN warmup")
+            for _ in range(warmup_eps):
+                _rollout_random_episode(env)
+                add_episode_to_buffer(env.path, buffer, elem_feats_scaled, fraction_set)
+                pbar.update(1)
+            pbar.close()
+
+            _warmup_s_mat = np.asarray([row["s_mat_raw"] for row in buffer], dtype=float)
+            scaler = StandardScaler()
+            scaler.fit(_warmup_s_mat)
+            state_dim = int(_warmup_s_mat.shape[1])
+            joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"), compress=True)
+            print(f"[INFO] s_mat scaler fitted on {len(_warmup_s_mat)} warmup rows.", flush=True)
+
+            qnet = QRegressor(
+                state_dim=state_dim, step_dim=env.max_steps, elem_dim=elem_dim, frac_dim=1,
+            ).to(device)
+            target_net = copy.deepcopy(qnet)
+            target_net.eval()
+            optimizer = torch.optim.Adam(qnet.parameters(), lr=args.dqn_lr)
+            loss_fn = _make_loss_fn(args.dqn_loss)
+
+            start_ep = 0
+            dqn_ep_idx = 0
+            eps = 1.0
 
         print(
-            f"[INFO] Classical DQN: {num_train_eps} episodes, "
-            f"buffer_size={buffer_size}, batch_size={batch_size}, "
+            f"[INFO] Classical DQN: {num_train_eps} episodes "
+            f"(start_ep={start_ep}), buffer_size={buffer_size}, batch_size={batch_size}, "
             f"grad_steps_per_ep={grad_steps}, target_update_freq={target_update_freq}",
             flush=True,
         )
 
+        if start_ep >= num_train_eps:
+            print(
+                f"[WARN] start_ep ({start_ep}) >= num_train_eps ({num_train_eps}); "
+                "skipping training loop.",
+                flush=True,
+            )
+
         # TRAINING LOOP
-        outer_pbar = tqdm(range(num_train_eps), desc="DQN train")
+        outer_pbar = tqdm(range(start_ep, num_train_eps), desc="DQN train")
         for ep in outer_pbar:
-            dqn_ep_idx += 1
+            dqn_ep_idx = ep + 1
 
             # 1. Collect 1 episode with epsilon-greedy policy
             qnet.eval()
@@ -1691,14 +1783,19 @@ def main() -> None:
                     "rl_method": "dqn",
                     "episodes_completed": ep + 1,
                     "qnet_state": qnet.state_dict(),
+                    "target_net_state": target_net.state_dict(),
+                    "opt_state": optimizer.state_dict(),
+                    "buffer": list(buffer),
+                    "buffer_size": buffer_size,
                     "epsilon": eps,
+                    "dp_cache": dict(dp_cache),
                 }, numbered_path=_numbered)
 
         outer_pbar.close()
         torch.save(qnet.state_dict(), os.path.join(args.out, "qnet.pt"))
         print(f"[INFO] qnet saved to {os.path.join(args.out, 'qnet.pt')}", flush=True)
 
-    # Write training log
+    # Write training log (append when resuming so the log stays continuous across runs).
     _log_path = os.path.join(args.out, "training_log.csv")
     _log_cols = [
         "phase", "iteration", "repeat", "update", "episode", "batch_eps", "epoch",
@@ -1709,12 +1806,17 @@ def main() -> None:
         "loss_name", "train_loss", "val_loss", "mse_loss",
         "epsilon", "buffer_rows", "sample_size",
     ]
-    with open(_log_path, "w", newline="") as _f:
+    _log_mode = "a" if (not args.only_generate and locals().get("_dqn_log_append", False)) else "w"
+    with open(_log_path, _log_mode, newline="") as _f:
         _w = csv.DictWriter(_f, fieldnames=_log_cols, extrasaction="ignore")
-        _w.writeheader()
+        if _log_mode == "w":
+            _w.writeheader()
         for _row in all_metrics:
             _w.writerow({c: _row.get(c, "") for c in _log_cols})
-    print(f"[INFO] Training log written to {_log_path}", flush=True)
+    print(
+        f"[INFO] Training log {'appended to' if _log_mode == 'a' else 'written to'} {_log_path}",
+        flush=True,
+    )
 
     if not args.skip_generation:
         # Generate candidates — pure greedy (ε=0)
