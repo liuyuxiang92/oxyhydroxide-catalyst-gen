@@ -212,3 +212,10 @@ Not stuck — removing `sys.path.insert(0, src/)` from 5 scripts in one session 
 - Phase B DONE (commit 1b3ac5f): removed `src/abcde_ooh/{featurization,model}.py` (zero imports). Smoke a2c run passed.
 - Phase C in progress: 5 sequential edits to README.md — (1) added ti_alloy.yaml and ooh_dqn.yaml to configs table, (2) Quickstart prose `entropy_coef → pg_entropy_coef`, (3) REINFORCE YAML example renamed to prefixed names, (4) DQN YAML example renamed to prefixed names, (5) replaced 6-line "Adding a new material system" stub with ~150-line tier-based section (Tier 1/2/3, plug-in surface reference, per-element bounds, flag-naming + alias table). Not thrashing; this is one section rewrite split across 5 atomic edits.
 - Next: verify README renders, commit Phase C, then Phase D (pytest), then Phase E (real Ti DP run).
+
+### EARS — Progress (2026-05-29 19:34)
+<!-- concepts: ti_alloy_user.yaml, multi-output DP indexing, GPU handoff -->
+- Phase D DONE (commit 85798d8): 56 pytest tests, all green. CI-friendly (no DeepMD/ASE needed).
+- Phase E adapted to GPU handoff: user has 5 DP models + POSCAR on a remote GPU machine, will run themselves. Wrote `configs/ti_alloy_user.yaml` as a fill-in-the-blanks template with REQUIRED USER EDITS section for base_poscar/site_symbol/dp_models paths.
+- Decision: multi-output DP (4 properties per structure) handled via the `output_index` YAML key (default 0). User can pick any of {0,1,2,3} by editing the YAML. Alternative `output_aggregator: mean|max` documented inline. No code change needed — `pick_scalar` already supports both modes.
+- Next: validate ti_alloy_user.yaml loads cleanly through `load_config`, smoke-run with `predictor: dummy` override to confirm env builds and rollouts work; then commit + push.
