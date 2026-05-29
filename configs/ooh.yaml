@@ -4,8 +4,6 @@
 #       --out runs/ooh_reinforce_seed0 \
 #       --dp-seed 321 --train-seed 123 --gen-seed 213
 
-name: ooh
-description: "5-cation oxyhydroxide (ABCDE-OOH) overpotential optimisation"
 
 # ---- Environment ----
 cation_set:
@@ -102,8 +100,6 @@ num_gen_eps: 50                   # --num-gen-eps 50
 exploration_gen_eps: 0
 
 # ---- DQN-specific (unused for reinforce, kept for completeness) ----
-num_random_eps: 500
-dqn_epochs: 50
 dqn_lr: 0.001
 dqn_batch_size: 256
 dqn_warmup_eps: 500

@@ -3,8 +3,6 @@
 #   python scripts/run_experiment.py --config configs/perovskite.yaml --method a2c \
 #       --out runs/perovskite_a2c_seed0 --seed 0
 
-name: perovskite
-description: "High-entropy perovskite B-site design (La(ABCDE)O3)"
 
 # ---- Environment ----
 # B-site candidates (transition metals compatible with La3+ A-site and O2- anion)
@@ -66,7 +64,6 @@ site_symbol: "Fe"          # Placeholder for B-site atoms in the template POSCAR
 objective: mean_minus_kstd
 k: 1.0
 n_random_configs: 5
-structure_mode: random
 
 # ---- RL hyperparameters ----
 method: a2c
@@ -89,8 +86,6 @@ num_gen_eps: 200
 exploration_gen_eps: 50    # High-uncertainty candidates for DFT to improve DPA model
 
 # ---- DQN-specific ----
-num_random_eps: 500
-dqn_epochs: 50
 dqn_lr: 0.001
 dqn_batch_size: 256
 # Classical online DQN

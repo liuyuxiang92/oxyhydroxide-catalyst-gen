@@ -145,3 +145,9 @@ Not stuck — removing `sys.path.insert(0, src/)` from 5 scripts in one session 
 - Now on general-framework branch (stashed classical-dqn changes). Extended `train_dqn_online` with a `resume_state` kwarg that bypasses warmup; checkpoint dict now includes buffer + buffer_size + dp_cache (sourced from `checkpoint_cfg["dp_cache"]`).
 - Discovery: on general-framework the DP cache lives inside `predictor._cache` (OOH predictor) rather than as a free-standing dict. Wired via `getattr(predictor, "_cache", None)` so other predictors (HEA, perovskite, dummy) gracefully skip the cache snapshot.
 - Wired run_experiment.py DQN branch to mirror PG resume pattern: load scaler, build qnet/target/optimizer/buffer, look for checkpoint.pt (type="dqn" with "buffer"), fall back to qnet.pt with reset.
+
+### EARS — Progress (2026-05-29 14:13)
+<!-- concepts: dead-code audit, subagent false positives, verification before deletion -->
+- Audit pass on both branches. Subagent reports were unreliable — general-framework agent flagged 6 "dead" functions (`_make_loss_fn`, `objective_from_mean_std`, `choose_action`, `_rollout_random_episode`, `_episode_pg_terms`, `_comp_key`) and 1 "unused" module (`env_integer.py`) — only `_comp_key` (the top-level one in training.py:84) is actually unused. Verified each claim with grep before acting.
+- Lesson: Explore-style subagents are good at locating code but not at proving non-existence of callers. Always re-verify their "dead code" claims directly.
+- Concrete cleanup (in progress): general-framework removes `_comp_key` from training.py and dead YAML keys (`name`, `description`, `num_random_eps`, `dqn_epochs`, `structure_mode`). classical-dqn removes two unused imports (`Sequence`, `feature_calculators`).

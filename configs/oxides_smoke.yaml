@@ -1,6 +1,4 @@
 # Tiny smoke config — end-to-end validation with minimal episode counts.
-name: oxides_smoke
-description: "Smoke test for integer_ratio env + sinter_calcine predictor"
 
 env_type: integer_ratio
 
@@ -117,8 +115,6 @@ repeat_penalty_shape: log
 num_gen_eps: 20
 exploration_gen_eps: 0
 
-num_random_eps: 10
-dqn_epochs: 2
 dqn_lr: 0.001
 dqn_batch_size: 64
 # Classical online DQN

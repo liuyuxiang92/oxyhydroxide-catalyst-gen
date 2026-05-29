@@ -17,8 +17,6 @@
 #       --dp-seed 321 --train-seed 123 --gen-seed 213 \
 #       --save-checkpoint-freq 1000
 
-name: ooh_dqn
-description: "5-cation oxyhydroxide (ABCDE-OOH) overpotential optimisation — classical online DQN"
 
 # ---- Environment ----
 cation_set:

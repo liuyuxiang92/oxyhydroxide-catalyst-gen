@@ -8,8 +8,6 @@
 #   python scripts/run_experiment.py --config configs/oxides_calcine.yaml \
 #       --method a2c --out runs/oxides_calcine_a2c_s0 --seed 0
 
-name: oxides_calcine
-description: "Oxide composition design — minimise calcination temperature (RF predictor)"
 
 # ---- Environment ----
 env_type: integer_ratio
@@ -134,8 +132,6 @@ num_gen_eps: 1000          # 1000 final candidates per run (matches reference)
 exploration_gen_eps: 0
 
 # ---- DQN-specific ----
-num_random_eps: 500
-dqn_epochs: 50
 dqn_lr: 0.001
 dqn_batch_size: 256
 # Classical online DQN

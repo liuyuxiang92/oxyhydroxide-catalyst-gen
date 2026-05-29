@@ -81,16 +81,6 @@ def _save_checkpoint(path: str, data: dict, numbered_path: str | None = None) ->
 # Utility helpers
 # ---------------------------------------------------------------------------
 
-def _comp_key(comp: Dict[str, float], total_units: int = 20) -> tuple:
-    """Canonical hashable key for a terminal cation composition dict."""
-    items = []
-    for el, frac in comp.items():
-        units = int(round(float(frac) * total_units))
-        if units > 0:
-            items.append((str(el), units))
-    return tuple(sorted(items))
-
-
 def objective_from_mean_std(
     mean: float, std: float, objective: str = "mean", k: float = 1.0
 ) -> float:

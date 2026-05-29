@@ -1,5 +1,4 @@
 # Test config using dummy predictor (no ASE/DeepMD required)
-name: test_dummy
 cation_set: [Co, Cr, Fe, Mn, Ni, Al, Ti, Cu, V, Mo]
 anion_formula: ""
 n_components: 5
@@ -19,8 +18,6 @@ repeat_penalty_coef: 0.1
 repeat_penalty_shape: log
 num_gen_eps: 20
 exploration_gen_eps: 10
-num_random_eps: 50
-dqn_epochs: 5
 dqn_lr: 0.001
 dqn_batch_size: 32
 # Classical online DQN (used when --method dqn with general-framework)
