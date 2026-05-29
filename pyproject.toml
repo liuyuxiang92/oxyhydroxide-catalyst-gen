@@ -12,5 +12,14 @@ requires-python = ">=3.10"
 [project.scripts]
 rl-matdesign = "rl_matdesign.cli:main"
 
+[project.optional-dependencies]
+# Lightweight test extras — install via `pip install -e .[dev]`. Tests are
+# designed to run without DeepMD or ASE (uses dummy predictor + pure helpers).
+dev = ["pytest>=7"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
