@@ -24,7 +24,7 @@ import math
 import random
 import warnings
 from collections import Counter
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import joblib
 import numpy as np
@@ -45,7 +45,6 @@ warnings.filterwarnings(
 
 from abcde_ooh.env import ABCDEOOHEnv, DEFAULT_CATION_SET, DEFAULT_FRACTIONS
 from abcde_ooh.constraints.primary_phase import check_primary_phase
-from abcde_ooh.featurization import feature_calculators
 from abcde_ooh.model import PolicyNet, QRegressor, ValueNet
 
 
