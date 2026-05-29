@@ -268,10 +268,11 @@ def train_dqn_online(
     lr: float = 1e-3,
     loss_name: str = "smoothl1",
     checkpoint_cfg: Optional[dict] = None,
+    resume_state: Optional[dict] = None,
 ) -> Tuple[torch.nn.Module, StandardScaler, List[dict]]:
     """Classical online DQN with FIFO replay buffer and TD targets.
 
-    Phase 0 — Warmup:
+    Phase 0 — Warmup (skipped when ``resume_state`` is provided):
         Roll out ``n_warmup_eps`` random episodes with real rewards to pre-fill
         the buffer and fit the s_mat StandardScaler.
 
@@ -283,6 +284,12 @@ def train_dqn_online(
         3. Hard-copy qnet → target_net every ``target_update_freq`` episodes.
         4. Linear epsilon anneal: ε = max(eps_min, 1 − ep / eps_anneal_eps).
 
+    Resume:
+        Pass ``resume_state`` with pre-built ``{scaler, qnet, target_net,
+        optimizer, buffer, start_ep, eps}`` to skip warmup and continue from
+        a prior run. The loop iterates over ``range(start_ep, n_train_eps)``
+        so the ε schedule (function of ``ep``) resumes correctly.
+
     Returns
     -------
     (qnet, scaler, metrics):
@@ -291,41 +298,70 @@ def train_dqn_online(
     """
     from .model import QRegressor
 
-    buffer: collections.deque = collections.deque(maxlen=buffer_size)
+    if resume_state is not None:
+        scaler     = resume_state["scaler"]
+        qnet       = resume_state["qnet"]
+        target_net = resume_state["target_net"]
+        optimizer  = resume_state["optimizer"]
+        buffer     = resume_state["buffer"]
+        start_ep   = int(resume_state.get("start_ep", 0))
+        eps        = float(resume_state.get(
+            "eps", max(eps_min, 1.0 - start_ep / eps_anneal_eps),
+        ))
+        loss_fn    = _make_loss_fn(loss_name)
+        print(
+            f"[INFO] DQN resume: start_ep={start_ep}, eps={eps:.4f}, "
+            f"buffer_rows={len(buffer)}",
+            flush=True,
+        )
+    else:
+        buffer: collections.deque = collections.deque(maxlen=buffer_size)
 
-    print(f"[INFO] DQN warmup: {n_warmup_eps} random episodes with real rewards...")
-    pbar = tqdm(total=n_warmup_eps, desc="DQN warmup")
-    for _ in range(n_warmup_eps):
-        _rollout_random_episode(env)
-        add_episode_to_buffer(env.path, buffer, elem_feats_scaled, fraction_set)
-        pbar.update(1)
-    pbar.close()
+        print(f"[INFO] DQN warmup: {n_warmup_eps} random episodes with real rewards...")
+        pbar = tqdm(total=n_warmup_eps, desc="DQN warmup")
+        for _ in range(n_warmup_eps):
+            _rollout_random_episode(env)
+            add_episode_to_buffer(env.path, buffer, elem_feats_scaled, fraction_set)
+            pbar.update(1)
+        pbar.close()
 
-    s_mat_all = np.asarray([r["s_mat_raw"] for r in buffer], dtype=float)
-    scaler = StandardScaler().fit(s_mat_all)
-    state_dim = int(s_mat_all.shape[1])
-    elem_dim  = int(elem_feats_scaled.shape[1])
-    step_dim  = env.n_components
-    print(f"[INFO] s_mat scaler fitted on {len(s_mat_all)} warmup rows.")
+        s_mat_all = np.asarray([r["s_mat_raw"] for r in buffer], dtype=float)
+        scaler = StandardScaler().fit(s_mat_all)
+        state_dim = int(s_mat_all.shape[1])
+        elem_dim  = int(elem_feats_scaled.shape[1])
+        step_dim  = env.n_components
+        print(f"[INFO] s_mat scaler fitted on {len(s_mat_all)} warmup rows.")
 
-    qnet = QRegressor(
-        state_dim=state_dim, step_dim=step_dim,
-        elem_dim=elem_dim, frac_dim=1, hidden_dim=hidden_dim,
-    ).to(device)
-    target_net = copy.deepcopy(qnet)
-    target_net.eval()
-    optimizer = torch.optim.Adam(qnet.parameters(), lr=lr)
-    loss_fn = _make_loss_fn(loss_name)
+        qnet = QRegressor(
+            state_dim=state_dim, step_dim=step_dim,
+            elem_dim=elem_dim, frac_dim=1, hidden_dim=hidden_dim,
+        ).to(device)
+        target_net = copy.deepcopy(qnet)
+        target_net.eval()
+        optimizer = torch.optim.Adam(qnet.parameters(), lr=lr)
+        loss_fn = _make_loss_fn(loss_name)
+        start_ep = 0
+        eps = 1.0
 
     ckpt_path: Optional[str] = None
     ckpt_freq: int = 0
+    dp_cache_ref: Optional[dict] = None
     if checkpoint_cfg:
-        ckpt_path = checkpoint_cfg.get("path")
-        ckpt_freq = int(checkpoint_cfg.get("freq", 0))
+        ckpt_path    = checkpoint_cfg.get("path")
+        ckpt_freq    = int(checkpoint_cfg.get("freq", 0))
+        dp_cache_ref = checkpoint_cfg.get("dp_cache")
 
-    eps = 1.0
     metrics: List[dict] = []
-    pbar = tqdm(range(n_train_eps), desc="DQN train")
+
+    if start_ep >= n_train_eps:
+        print(
+            f"[WARN] DQN: start_ep ({start_ep}) >= n_train_eps ({n_train_eps}); "
+            "skipping training loop.",
+            flush=True,
+        )
+        return qnet, scaler, metrics
+
+    pbar = tqdm(range(start_ep, n_train_eps), desc="DQN train")
 
     for ep in pbar:
         # 1. Collect one episode with epsilon-greedy policy.
@@ -398,7 +434,10 @@ def train_dqn_online(
                 "qnet_state": qnet.state_dict(),
                 "target_net_state": target_net.state_dict(),
                 "opt_state": optimizer.state_dict(),
+                "buffer": list(buffer),
+                "buffer_size": buffer_size,
                 "eps": eps,
+                "dp_cache": dict(dp_cache_ref) if dp_cache_ref is not None else {},
             }, numbered_path=_numbered)
             tqdm.write(f"[INFO] DQN checkpoint saved at episode {ep + 1} → {_numbered}")
 

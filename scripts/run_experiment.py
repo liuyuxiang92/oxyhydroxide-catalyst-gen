@@ -16,6 +16,8 @@ Usage
 from __future__ import annotations
 
 import argparse
+import collections
+import copy
 import json
 import os
 import random
@@ -76,7 +78,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--resume-training", action="store_true",
                    help="Load an existing model/checkpoint and continue training. "
                         "For PG: loads std_scaler.bin + checkpoint.pt (or policy.pt) and runs more iterations. "
-                        "For DQN: not supported (warns and starts fresh). "
+                        "For DQN: loads std_scaler.bin + checkpoint.pt (qnet, target_net, optimizer, replay "
+                        "buffer, dp_cache, epsilon, episode counter) for exact-state resume; falls back to "
+                        "qnet.pt (weights only — buffer/epsilon/episode reset) when no mid-checkpoint exists. "
                         "Cannot be combined with --only-generate.")
     p.add_argument("--skip-generation", action="store_true",
                    help="Run training but skip candidate generation.")
@@ -353,8 +357,113 @@ def main() -> None:
             qnet.load_state_dict(_raw["qnet_state"] if isinstance(_raw, dict) and "qnet_state" in _raw else _raw)
             print(f"[INFO] Loaded qnet from {qnet_path}", flush=True)
         else:
+            # Resolve hyperparameters early so resume + fresh paths share them.
+            _hidden       = int(cfg.get("dqn_hidden_dim", 256))
+            _lr_dqn       = float(cfg.get("dqn_lr", 1e-3))
+            _buf_size     = int(cfg.get("buffer_size", 50000))
+            _eps_anneal   = int(cfg.get("eps_anneal_eps", 10000))
+            _eps_min      = float(cfg.get("eps_min", 0.05))
+            _n_train_eps  = int(cfg.get("num_train_eps", 20000))
+
+            resume_state = None
             if args.resume_training:
-                print("[WARN] --resume-training is not supported for DQN; starting fresh training.", flush=True)
+                if not os.path.exists(scaler_path):
+                    raise SystemExit(
+                        f"--resume-training (dqn) requires {scaler_path} (use --load-scaler to override)"
+                    )
+                scaler = joblib.load(scaler_path)
+                state_dim_loaded = int(getattr(scaler, "n_features_in_", scaler.mean_.shape[0]))
+                print(f"[INFO] Loaded scaler from {scaler_path}", flush=True)
+
+                qnet = QRegressor(
+                    state_dim=state_dim_loaded, step_dim=step_dim,
+                    elem_dim=elem_dim, frac_dim=1, hidden_dim=_hidden,
+                ).to(device)
+                target_net = copy.deepcopy(qnet)
+                target_net.eval()
+                optimizer = torch.optim.Adam(qnet.parameters(), lr=_lr_dqn)
+                buffer: collections.deque = collections.deque(maxlen=_buf_size)
+
+                _resume_src = args.load_qnet if args.load_qnet else ckpt_path
+                _mid = None
+                if os.path.exists(_resume_src):
+                    _raw_ckpt = torch.load(_resume_src, map_location=device, weights_only=False)
+                    if (
+                        isinstance(_raw_ckpt, dict)
+                        and _raw_ckpt.get("type") == "dqn"
+                        and "buffer" in _raw_ckpt
+                    ):
+                        _mid = _raw_ckpt
+                    else:
+                        _type_str = _raw_ckpt.get("type") if isinstance(_raw_ckpt, dict) else type(_raw_ckpt).__name__
+                        print(
+                            f"[WARN] {_resume_src} is not a valid DQN mid-checkpoint "
+                            f"(type={_type_str!r}); falling back to qnet.pt",
+                            flush=True,
+                        )
+                elif args.load_qnet:
+                    raise SystemExit(f"--load-qnet path not found: {args.load_qnet}")
+
+                _predictor_cache = getattr(predictor, "_cache", None)
+
+                if _mid is not None:
+                    qnet.load_state_dict(_mid["qnet_state"])
+                    target_net.load_state_dict(_mid["target_net_state"])
+                    optimizer.load_state_dict(_mid["opt_state"])
+                    for _row in _mid["buffer"]:
+                        buffer.append(_row)
+                    _saved_size = int(_mid.get("buffer_size", _buf_size))
+                    if _saved_size != _buf_size:
+                        print(
+                            f"[WARN] buffer_size changed: saved={_saved_size}, "
+                            f"current={_buf_size}; kept loaded rows under new maxlen.",
+                            flush=True,
+                        )
+                    if _predictor_cache is not None:
+                        _predictor_cache.update(_mid.get("dp_cache", {}))
+                    start_ep = int(_mid["episodes_completed"])
+                    eps_val  = float(_mid.get("eps", max(_eps_min, 1.0 - start_ep / _eps_anneal)))
+                    print(
+                        f"[INFO] DQN resume from {_resume_src}: ep={start_ep}, "
+                        f"eps={eps_val:.4f}, buffer_rows={len(buffer)}, "
+                        f"dp_cache_rows={len(_predictor_cache) if _predictor_cache is not None else 0}",
+                        flush=True,
+                    )
+                else:
+                    if not os.path.exists(qnet_path):
+                        raise SystemExit(
+                            f"--resume-training (dqn) requires checkpoint.pt or {qnet_path} "
+                            "(use --load-qnet to override)"
+                        )
+                    _raw_q = torch.load(qnet_path, map_location=device)
+                    qnet.load_state_dict(
+                        _raw_q["qnet_state"] if isinstance(_raw_q, dict) and "qnet_state" in _raw_q else _raw_q
+                    )
+                    target_net.load_state_dict(qnet.state_dict())
+                    start_ep = 0
+                    eps_val  = 1.0
+                    print(
+                        f"[WARN] DQN resume: no mid-checkpoint; loaded {qnet_path} "
+                        "(weights only) — buffer/eps/episode counter reset.",
+                        flush=True,
+                    )
+
+                resume_state = {
+                    "scaler": scaler,
+                    "qnet": qnet,
+                    "target_net": target_net,
+                    "optimizer": optimizer,
+                    "buffer": buffer,
+                    "start_ep": start_ep,
+                    "eps": eps_val,
+                }
+
+            # Thread the predictor cache into checkpoint_cfg so periodic saves include it.
+            if checkpoint_cfg is not None:
+                _pcache = getattr(predictor, "_cache", None)
+                if _pcache is not None:
+                    checkpoint_cfg["dp_cache"] = _pcache
+
             _dqn_loss = args.dqn_loss or cfg.get("dqn_loss", "smoothl1")
             qnet, scaler, train_rows = train_dqn_online(
                 env=env,
@@ -362,18 +471,19 @@ def main() -> None:
                 fraction_set=fraction_set,
                 device=device,
                 n_warmup_eps=int(cfg.get("dqn_warmup_eps", cfg.get("pg_warmup_eps", 500))),
-                n_train_eps=int(cfg.get("num_train_eps", 20000)),
-                buffer_size=int(cfg.get("buffer_size", 50000)),
+                n_train_eps=_n_train_eps,
+                buffer_size=_buf_size,
                 batch_size=int(cfg.get("dqn_batch_size", 256)),
                 grad_steps_per_ep=int(cfg.get("grad_steps_per_ep", 5)),
                 target_update_freq=int(cfg.get("target_update_freq", 100)),
-                eps_anneal_eps=int(cfg.get("eps_anneal_eps", 10000)),
-                eps_min=float(cfg.get("eps_min", 0.05)),
+                eps_anneal_eps=_eps_anneal,
+                eps_min=_eps_min,
                 gamma=float(cfg.get("dqn_gamma", cfg.get("gamma", 0.9))),
-                hidden_dim=int(cfg.get("dqn_hidden_dim", 256)),
-                lr=float(cfg.get("dqn_lr", 1e-3)),
+                hidden_dim=_hidden,
+                lr=_lr_dqn,
                 loss_name=_dqn_loss,
                 checkpoint_cfg=checkpoint_cfg,
+                resume_state=resume_state,
             )
             for r in train_rows:
                 metrics.log(**r)

@@ -139,3 +139,9 @@ Adding OOH catalyst support to general-framework so experiments can run via run_
 ### EARS — Stuck (2026-05-27 11:43)
 <!-- concepts: python-packaging, sys.path, editable-install -->
 Not stuck — removing `sys.path.insert(0, src/)` from 5 scripts in one session as part of migrating to `pip install -e .` + `pyproject.toml`. Multiple edits to `run_ABCDEOOH_experiment.py` are intentional sequential steps: (1) remove `_REPO_ROOT` + `sys.path.insert` block, (2) remove `# noqa: E402` comments on the imports that followed the hack. Not thrashing.
+
+### EARS — Progress (2026-05-29 11:59)
+<!-- concepts: DQN resume on general-framework, predictor cache wiring -->
+- Now on general-framework branch (stashed classical-dqn changes). Extended `train_dqn_online` with a `resume_state` kwarg that bypasses warmup; checkpoint dict now includes buffer + buffer_size + dp_cache (sourced from `checkpoint_cfg["dp_cache"]`).
+- Discovery: on general-framework the DP cache lives inside `predictor._cache` (OOH predictor) rather than as a free-standing dict. Wired via `getattr(predictor, "_cache", None)` so other predictors (HEA, perovskite, dummy) gracefully skip the cache snapshot.
+- Wired run_experiment.py DQN branch to mirror PG resume pattern: load scaler, build qnet/target/optimizer/buffer, look for checkpoint.pt (type="dqn" with "buffer"), fall back to qnet.pt with reset.
