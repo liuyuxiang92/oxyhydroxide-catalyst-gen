@@ -105,133 +105,68 @@ def parse_args() -> argparse.Namespace:
 # Config loading
 # ---------------------------------------------------------------------------
 
-def load_config(path: str) -> dict:
-    with open(path) as f:
-        cfg = yaml.safe_load(f)
+# Old YAML key → new YAML key. Old keys still work but emit a one-time
+# deprecation warning. Conventions:
+#   dqn_*  → used only by train_dqn_online
+#   pg_*   → used only by train_pg (REINFORCE / A2C)
+#   (no prefix) → shared across both methods
+_FLAG_ALIASES = {
+    "buffer_size":          "dqn_buffer_size",
+    "num_train_eps":        "dqn_num_train_eps",
+    "grad_steps_per_ep":    "dqn_grad_steps_per_ep",
+    "target_update_freq":   "dqn_target_update_freq",
+    "eps_anneal_eps":       "dqn_eps_anneal_eps",
+    "eps_min":              "dqn_eps_min",
+    "entropy_coef":         "pg_entropy_coef",
+    "repeat_penalty_coef":  "pg_repeat_penalty_coef",
+    "repeat_penalty_shape": "pg_repeat_penalty_shape",
+}
+
+
+def _apply_flag_aliases(cfg: dict) -> dict:
+    """Map deprecated flag names to their new prefixed forms.
+
+    If both old and new appear, the new value wins and a warning is emitted.
+    """
+    for old, new in _FLAG_ALIASES.items():
+        if old in cfg:
+            if new in cfg:
+                warnings.warn(
+                    f"Config key '{old}' is deprecated (renamed to '{new}'); "
+                    f"both keys are present — using '{new}' and ignoring '{old}'.",
+                    DeprecationWarning, stacklevel=2,
+                )
+            else:
+                warnings.warn(
+                    f"Config key '{old}' is deprecated; rename to '{new}'.",
+                    DeprecationWarning, stacklevel=2,
+                )
+                cfg[new] = cfg[old]
+            del cfg[old]
     return cfg
 
 
+def load_config(path: str) -> dict:
+    with open(path) as f:
+        cfg = yaml.safe_load(f)
+    return _apply_flag_aliases(cfg)
+
+
 # ---------------------------------------------------------------------------
-# Predictor factory
+# Predictor / constraint factories — thin wrappers around the registry.
+# YAML keys 'predictor' and 'constraint_filter' accept either a built-in
+# short name or a fully-qualified 'pkg.module:ClassName' for user plug-ins.
+# See src/rl_matdesign/registry.py for the dispatch logic.
 # ---------------------------------------------------------------------------
 
 def build_predictor(cfg: dict, seed: int = None):
-    """Instantiate the correct PropertyPredictor from the config."""
-    kind = cfg.get("predictor", "dummy").lower()
+    from rl_matdesign.registry import resolve_predictor
+    return resolve_predictor(cfg.get("predictor", "dummy"), cfg, seed=seed)
 
-    if kind == "hea":
-        from rl_matdesign.predictors.hea import HEAPropertyPredictor
-        return HEAPropertyPredictor(
-            poscar_template=cfg["poscar"],
-            dp_models=cfg["dp_models"],
-            objective=cfg.get("objective", "mean_minus_kstd"),
-            k=float(cfg.get("k", 1.0)),
-            n_random_configs=int(cfg.get("n_random_configs", 5)),
-            site_symbol=cfg.get("site_symbol", "X"),
-            rng_seed=seed,
-        )
-
-    elif kind == "perovskite":
-        from rl_matdesign.predictors.perovskite import PerovskitePropertyPredictor
-        return PerovskitePropertyPredictor(
-            poscar_template=cfg["poscar"],
-            dp_models=cfg["dp_models"],
-            objective=cfg.get("objective", "mean_minus_kstd"),
-            k=float(cfg.get("k", 1.0)),
-            n_random_configs=int(cfg.get("n_random_configs", 5)),
-            site_symbol=cfg.get("site_symbol", "Fe"),
-            rng_seed=seed,
-        )
-
-    elif kind == "sinter_calcine":
-        from rl_matdesign.predictors.sinter_calcine import SinterCalcineRFPredictor
-        return SinterCalcineRFPredictor(
-            rf_model_path=cfg["rf_model"],
-            mode=cfg.get("mode", "sinter"),
-        )
-
-    elif kind == "dummy":
-        import random as _random
-
-        class _DummyPredictor:
-            def predict(self, composition):
-                return float(_random.gauss(0.5, 0.1)), float(abs(_random.gauss(0.05, 0.01)))
-
-            def batch_predict(self, compositions):
-                return [self.predict(c) for c in compositions]
-
-        return _DummyPredictor()
-
-    elif kind == "ooh":
-        from rl_matdesign.predictors.ooh import OOHCatalystPredictor
-        return OOHCatalystPredictor(
-            base_poscar=cfg["base_poscar"],
-            dp_models=cfg["dp_models"],
-            objective=cfg.get("objective", "mean_minus_kstd"),
-            k=float(cfg.get("k", 1.0)),
-            n_random_configs=int(cfg.get("n_random_configs", 10)),
-            ads_height=float(cfg.get("ads_height", 1.9)),
-            ads_dz=float(cfg.get("ads_dz", 1.0)),
-            geo_opt=bool(cfg.get("geo_opt", False)),
-            geo_opt_model=str(cfg.get("geo_opt_model", "./DPA-3.1-3M_1.pt")),
-            rng_seed=seed if seed is not None else 123,
-            uncertainty=cfg.get("uncertainty", "models"),
-        )
-
-    else:
-        raise ValueError(f"Unknown predictor type '{kind}'. Options: hea, perovskite, sinter_calcine, ooh, dummy.")
-
-
-# ---------------------------------------------------------------------------
-# Constraint filter factory
-# ---------------------------------------------------------------------------
 
 def build_constraint_filter(cfg: dict, env=None):
-    """Build the constraint filter specified in *cfg*.
-
-    ``env`` is required for ``ooh_phase`` (needs ``env._allowed_units`` and
-    ``env._possible_sums_by_k``).  Build the env first without a filter, then
-    call this function and assign the result to ``env.phase_filter``.
-    """
-    kind = cfg.get("constraint_filter", None)
-    if kind is None:
-        return None
-    if kind == "smact_charge":
-        from rl_matdesign.constraints.smact_filter import SMACTChargeFilter
-        if "smact_anions" in cfg:
-            anions = cfg["smact_anions"]
-        else:
-            anions = [{
-                "symbol": cfg.get("smact_anion", "O"),
-                "charge": int(cfg.get("smact_anion_charge", -2)),
-                "stoich": float(cfg.get("smact_anion_stoich", 1.5)),
-            }]
-        return SMACTChargeFilter(anions=anions)
-    if kind == "last_step_element":
-        from rl_matdesign.constraints.last_step_element import LastStepElementFilter
-        return LastStepElementFilter(
-            required_elements=cfg["required_elements"],
-            nonzero_ratio=bool(cfg.get("nonzero_ratio_at_last", True)),
-            reserve_for_last=bool(cfg.get("reserve_for_last", True)),
-        )
-    if kind == "ooh_phase":
-        # Mirrors --target-phase <phases> in classical-dqn: prunes actions so
-        # every generated composition satisfies at least one of the listed OOH
-        # phase types (Ni, Co, NiFe, CoFe, NiFeCo, any).
-        from abcde_ooh.constraints.phase_sampler import PhaseActionFilter
-        if env is None:
-            raise ValueError(
-                "constraint_filter 'ooh_phase' requires the env to be passed to "
-                "build_constraint_filter() so that _allowed_units and "
-                "_possible_sums_by_k can be read from it."
-            )
-        target_phases = cfg.get("target_phases", ["any"])
-        return PhaseActionFilter(
-            target_phase=target_phases,
-            allowed_units=env._allowed_units,
-            possible_sums_by_k=env._possible_sums_by_k,
-        )
-    raise ValueError(f"Unknown constraint_filter '{kind}'.")
+    from rl_matdesign.registry import resolve_constraint
+    return resolve_constraint(cfg.get("constraint_filter"), cfg, env=env)
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +243,9 @@ def main() -> None:
             n_components=int(cfg.get("n_components", 5)),
             reward_fn=reward_fn,
             phase_filter=None,
+            total_units=int(cfg.get("total_units", 20)),
+            element_bounds=cfg.get("element_bounds"),
+            episode_style=cfg.get("episode_style", "element_then_amount"),
         )
 
     env.phase_filter = build_constraint_filter(cfg, env=env)
@@ -360,10 +298,10 @@ def main() -> None:
             # Resolve hyperparameters early so resume + fresh paths share them.
             _hidden       = int(cfg.get("dqn_hidden_dim", 256))
             _lr_dqn       = float(cfg.get("dqn_lr", 1e-3))
-            _buf_size     = int(cfg.get("buffer_size", 50000))
-            _eps_anneal   = int(cfg.get("eps_anneal_eps", 10000))
-            _eps_min      = float(cfg.get("eps_min", 0.05))
-            _n_train_eps  = int(cfg.get("num_train_eps", 20000))
+            _buf_size     = int(cfg.get("dqn_buffer_size", 50000))
+            _eps_anneal   = int(cfg.get("dqn_eps_anneal_eps", 10000))
+            _eps_min      = float(cfg.get("dqn_eps_min", 0.05))
+            _n_train_eps  = int(cfg.get("dqn_num_train_eps", 20000))
 
             resume_state = None
             if args.resume_training:
@@ -412,10 +350,11 @@ def main() -> None:
                     optimizer.load_state_dict(_mid["opt_state"])
                     for _row in _mid["buffer"]:
                         buffer.append(_row)
-                    _saved_size = int(_mid.get("buffer_size", _buf_size))
+                    # Old checkpoints used "buffer_size"; new use "dqn_buffer_size". Read both.
+                    _saved_size = int(_mid.get("dqn_buffer_size", _mid.get("buffer_size", _buf_size)))
                     if _saved_size != _buf_size:
                         print(
-                            f"[WARN] buffer_size changed: saved={_saved_size}, "
+                            f"[WARN] dqn_buffer_size changed: saved={_saved_size}, "
                             f"current={_buf_size}; kept loaded rows under new maxlen.",
                             flush=True,
                         )
@@ -471,13 +410,13 @@ def main() -> None:
                 fraction_set=fraction_set,
                 device=device,
                 n_warmup_eps=int(cfg.get("dqn_warmup_eps", cfg.get("pg_warmup_eps", 500))),
-                n_train_eps=_n_train_eps,
-                buffer_size=_buf_size,
+                dqn_num_train_eps=_n_train_eps,
+                dqn_buffer_size=_buf_size,
                 batch_size=int(cfg.get("dqn_batch_size", 256)),
-                grad_steps_per_ep=int(cfg.get("grad_steps_per_ep", 5)),
-                target_update_freq=int(cfg.get("target_update_freq", 100)),
-                eps_anneal_eps=_eps_anneal,
-                eps_min=_eps_min,
+                dqn_grad_steps_per_ep=int(cfg.get("dqn_grad_steps_per_ep", 5)),
+                dqn_target_update_freq=int(cfg.get("dqn_target_update_freq", 100)),
+                dqn_eps_anneal_eps=_eps_anneal,
+                dqn_eps_min=_eps_min,
                 gamma=float(cfg.get("dqn_gamma", cfg.get("gamma", 0.9))),
                 hidden_dim=_hidden,
                 lr=_lr_dqn,
@@ -520,10 +459,10 @@ def main() -> None:
         pg_batch_eps         = int(cfg.get("pg_batch_eps", 15))
         lr_actor             = float(cfg.get("pg_lr_actor", 1e-3))
         lr_critic            = float(cfg.get("pg_lr_critic", 1e-3))
-        entropy_coef         = float(cfg.get("entropy_coef", 0.01))
-        gamma                = float(cfg.get("pg_gamma", cfg.get("gamma", 0.9)))
-        repeat_penalty_coef  = float(cfg.get("repeat_penalty_coef", 0.0))
-        repeat_penalty_shape = cfg.get("repeat_penalty_shape", "log")
+        pg_entropy_coef         = float(cfg.get("pg_entropy_coef", 0.01))
+        gamma                   = float(cfg.get("pg_gamma", cfg.get("gamma", 0.9)))
+        pg_repeat_penalty_coef  = float(cfg.get("pg_repeat_penalty_coef", 0.0))
+        pg_repeat_penalty_shape = cfg.get("pg_repeat_penalty_shape", "log")
 
         scaler_path  = args.load_scaler    or os.path.join(args.out, "std_scaler.bin")
         policy_path  = args.load_policy    or os.path.join(args.out, "policy.pt")
@@ -621,10 +560,10 @@ def main() -> None:
                 gamma=gamma,
                 lr_actor=lr_actor,
                 lr_critic=lr_critic,
-                entropy_coef=entropy_coef,
+                pg_entropy_coef=pg_entropy_coef,
                 rl_method=method,
-                repeat_penalty_coef=repeat_penalty_coef,
-                repeat_penalty_shape=repeat_penalty_shape,
+                pg_repeat_penalty_coef=pg_repeat_penalty_coef,
+                pg_repeat_penalty_shape=pg_repeat_penalty_shape,
                 checkpoint_cfg=checkpoint_cfg,
             )
             for r in train_rows:

@@ -247,13 +247,13 @@ def train_dqn_online(
     device: torch.device,
     hidden_dim: int = 128,
     n_warmup_eps: int = 500,
-    n_train_eps: int = 20000,
-    buffer_size: int = 50000,
+    dqn_num_train_eps: int = 20000,
+    dqn_buffer_size: int = 50000,
     batch_size: int = 256,
-    grad_steps_per_ep: int = 5,
-    target_update_freq: int = 100,
-    eps_anneal_eps: int = 10000,
-    eps_min: float = 0.05,
+    dqn_grad_steps_per_ep: int = 5,
+    dqn_target_update_freq: int = 100,
+    dqn_eps_anneal_eps: int = 10000,
+    dqn_eps_min: float = 0.05,
     gamma: float = 0.9,
     lr: float = 1e-3,
     loss_name: str = "smoothl1",
@@ -266,18 +266,18 @@ def train_dqn_online(
         Roll out ``n_warmup_eps`` random episodes with real rewards to pre-fill
         the buffer and fit the s_mat StandardScaler.
 
-    Phase 1 — Training loop (``n_train_eps`` episodes):
+    Phase 1 — Training loop (``dqn_num_train_eps`` episodes):
         Each episode:
         1. ε-greedy rollout → 5 new buffer rows.
-        2. ``grad_steps_per_ep`` gradient steps, each sampling ``batch_size``
+        2. ``dqn_grad_steps_per_ep`` gradient steps, each sampling ``batch_size``
            rows from the full buffer (SmoothL1 loss on TD targets).
-        3. Hard-copy qnet → target_net every ``target_update_freq`` episodes.
-        4. Linear epsilon anneal: ε = max(eps_min, 1 − ep / eps_anneal_eps).
+        3. Hard-copy qnet → target_net every ``dqn_target_update_freq`` episodes.
+        4. Linear epsilon anneal: ε = max(dqn_eps_min, 1 − ep / dqn_eps_anneal_eps).
 
     Resume:
         Pass ``resume_state`` with pre-built ``{scaler, qnet, target_net,
         optimizer, buffer, start_ep, eps}`` to skip warmup and continue from
-        a prior run. The loop iterates over ``range(start_ep, n_train_eps)``
+        a prior run. The loop iterates over ``range(start_ep, dqn_num_train_eps)``
         so the ε schedule (function of ``ep``) resumes correctly.
 
     Returns
@@ -296,7 +296,7 @@ def train_dqn_online(
         buffer     = resume_state["buffer"]
         start_ep   = int(resume_state.get("start_ep", 0))
         eps        = float(resume_state.get(
-            "eps", max(eps_min, 1.0 - start_ep / eps_anneal_eps),
+            "eps", max(dqn_eps_min, 1.0 - start_ep / dqn_eps_anneal_eps),
         ))
         loss_fn    = _make_loss_fn(loss_name)
         print(
@@ -305,7 +305,7 @@ def train_dqn_online(
             flush=True,
         )
     else:
-        buffer: collections.deque = collections.deque(maxlen=buffer_size)
+        buffer: collections.deque = collections.deque(maxlen=dqn_buffer_size)
 
         print(f"[INFO] DQN warmup: {n_warmup_eps} random episodes with real rewards...")
         pbar = tqdm(total=n_warmup_eps, desc="DQN warmup")
@@ -343,15 +343,15 @@ def train_dqn_online(
 
     metrics: List[dict] = []
 
-    if start_ep >= n_train_eps:
+    if start_ep >= dqn_num_train_eps:
         print(
-            f"[WARN] DQN: start_ep ({start_ep}) >= n_train_eps ({n_train_eps}); "
+            f"[WARN] DQN: start_ep ({start_ep}) >= dqn_num_train_eps ({dqn_num_train_eps}); "
             "skipping training loop.",
             flush=True,
         )
         return qnet, scaler, metrics
 
-    pbar = tqdm(range(start_ep, n_train_eps), desc="DQN train")
+    pbar = tqdm(range(start_ep, dqn_num_train_eps), desc="DQN train")
 
     for ep in pbar:
         # 1. Collect one episode with epsilon-greedy policy.
@@ -383,7 +383,7 @@ def train_dqn_online(
         if len(buffer) >= batch_size:
             buf_list = list(buffer)
             losses = []
-            for _ in range(grad_steps_per_ep):
+            for _ in range(dqn_grad_steps_per_ep):
                 _batch = random.sample(buf_list, batch_size)
                 losses.append(_dqn_gradient_step(
                     qnet, _batch, target_net, scaler,
@@ -392,12 +392,12 @@ def train_dqn_online(
             mean_loss = float(np.mean(losses))
 
         # 3. Hard target-net copy.
-        if (ep + 1) % target_update_freq == 0:
+        if (ep + 1) % dqn_target_update_freq == 0:
             target_net.load_state_dict(qnet.state_dict())
             target_net.eval()
 
         # 4. Linear epsilon anneal.
-        eps = max(eps_min, 1.0 - ep / eps_anneal_eps)
+        eps = max(dqn_eps_min, 1.0 - ep / dqn_eps_anneal_eps)
 
         metrics.append({
             "phase": "dqn_train",
@@ -425,7 +425,7 @@ def train_dqn_online(
                 "target_net_state": target_net.state_dict(),
                 "opt_state": optimizer.state_dict(),
                 "buffer": list(buffer),
-                "buffer_size": buffer_size,
+                "dqn_buffer_size": dqn_buffer_size,
                 "eps": eps,
                 "dp_cache": dict(dp_cache_ref) if dp_cache_ref is not None else {},
             }, numbered_path=_numbered)
@@ -710,10 +710,10 @@ def train_pg(
     gamma: float = 0.99,
     lr_actor: float = 1e-3,
     lr_critic: float = 1e-3,
-    entropy_coef: float = 0.01,
+    pg_entropy_coef: float = 0.01,
     rl_method: str = "a2c",
-    repeat_penalty_coef: float = 0.0,
-    repeat_penalty_shape: str = "log",
+    pg_repeat_penalty_coef: float = 0.0,
+    pg_repeat_penalty_shape: str = "log",
     max_train_attempts: Optional[int] = None,
     checkpoint_cfg: Optional[dict] = None,
 ) -> List[dict]:
@@ -790,13 +790,13 @@ def train_pg(
 
             terminal_key = env.terminal_comp_key()
             n_visits_before = visit_counts[terminal_key]
-            if repeat_penalty_coef > 0.0:
-                if repeat_penalty_shape == "log":
-                    repeat_penalty = repeat_penalty_coef * math.log1p(n_visits_before)
-                elif repeat_penalty_shape == "sqrt":
-                    repeat_penalty = repeat_penalty_coef * math.sqrt(n_visits_before)
+            if pg_repeat_penalty_coef > 0.0:
+                if pg_repeat_penalty_shape == "log":
+                    repeat_penalty = pg_repeat_penalty_coef * math.log1p(n_visits_before)
+                elif pg_repeat_penalty_shape == "sqrt":
+                    repeat_penalty = pg_repeat_penalty_coef * math.sqrt(n_visits_before)
                 else:
-                    repeat_penalty = repeat_penalty_coef * float(n_visits_before)
+                    repeat_penalty = pg_repeat_penalty_coef * float(n_visits_before)
             else:
                 repeat_penalty = 0.0
             visit_counts[terminal_key] += 1
@@ -838,7 +838,7 @@ def train_pg(
 
         actor_loss       = torch.stack(all_actor).mean()
         entropy_bonus    = torch.stack(all_entropy).mean()
-        total_actor_loss = actor_loss - entropy_coef * entropy_bonus
+        total_actor_loss = actor_loss - pg_entropy_coef * entropy_bonus
 
         opt_actor.zero_grad(set_to_none=True)
         total_actor_loss.backward()

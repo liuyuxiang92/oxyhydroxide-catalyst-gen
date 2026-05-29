@@ -157,3 +157,45 @@ Not stuck — removing `sys.path.insert(0, src/)` from 5 scripts in one session 
 - On `feat/classical-dqn`, found `src/rl_matdesign/` (bytecode-only — no `.py` tracked on this branch) and `src/rl_matdesign.egg-info/` left behind from a prior `general-framework` checkout + `pip install -e .`. Both untracked. Deleted.
 - Root cause: switching branches removes tracked `.py` files but `__pycache__/*.pyc` and `*.egg-info/` from `pip install -e .` persist as untracked debris and confuse `git status`.
 - Added `*.egg-info/` to `.gitignore` to suppress future regeneration noise. Other dirs (`abcde_ooh/__pycache__`, `data/`, `rf_models/`, `models/sinter_calcine/`) are live or intentional.
+
+### EARS — Progress (2026-05-29 16:30)
+<!-- concepts: yaml-first refactor, flag standardization, back-compat aliases -->
+- Context: Executing approved plan `feat/yaml-first-systems` — section F (flag-naming standardization) first.
+- Goal: Add prefix to DQN-only (`dqn_*`) and PG-only (`pg_*`) YAML keys; keep old names as deprecated aliases.
+- Status: Not stuck. Recent edits to `run_experiment.py` are sequential parts of the same plan step (alias map → load_config wiring → call-site rename). Continuing.
+
+### EARS — Progress (2026-05-29 16:33)
+<!-- concepts: yaml-first refactor, training.py kwarg rename, ε-anneal schedule -->
+- Renaming `train_dqn_online` kwargs to prefixed forms: `buffer_size → dqn_buffer_size`, `num_train_eps → dqn_num_train_eps`, `grad_steps_per_ep → dqn_grad_steps_per_ep`, `target_update_freq → dqn_target_update_freq`, `eps_anneal_eps → dqn_eps_anneal_eps`, `eps_min → dqn_eps_min`.
+- Note: the saved checkpoint dict key `"buffer_size"` at training.py:428 will be renamed to `"dqn_buffer_size"`. Need to also update the read path at run_experiment.py:415 with a fallback so old checkpoints still resume.
+- Next: rename remaining call sites in training.py (lines 395, 400, 428), then PG signature, then run_experiment.py call sites, then YAML configs.
+
+### EARS — Progress (2026-05-29 16:46)
+<!-- concepts: registry dispatch, DPStructurePredictor, dp_eval extractor -->
+- Task #16 (flag rename + back-compat aliases) DONE — smoke-tested: all 8 configs load with zero deprecation warnings; old keys still work with warning.
+- Task #17 (predictor/constraint registry with FQN dispatch) DONE — `src/rl_matdesign/registry.py` written; `scripts/run_experiment.py` `build_predictor`/`build_constraint_filter` collapsed from ~120 LOC to thin 2-line wrappers. Smoke-tested: built-ins resolve; FQN dispatch works; unknown names give helpful errors listing built-ins.
+- Now on Task #18: just wrote `src/rl_matdesign/utils/dp_eval.py` with shared helpers (`load_ase_calculators`, `eval_energy_ase`, `pick_scalar`). Next: write `predictors/dp_structure.py` (cfg-dict constructor), then collapse hea.py and perovskite.py to subclasses, then wire `output_index` through OOH `DPConfig`.
+- Discovery: HEA and perovskite predict() bodies are byte-identical except `site_symbol` default. Confirmed by reading both. The "merge into one parameterized class" is genuinely a no-op for behavior.
+
+### EARS — Progress (2026-05-29 16:50)
+<!-- concepts: DPStructurePredictor merger, output_index plumbing, cache key invariance -->
+- Multiple registry.py edits are intentional sequential steps of Task #18: (1) swap _make_hea/_make_perovskite to cfg-dict constructors, (2) add _make_dp_structure, (3) register "dp_structure" key, (4) thread output_index through OOH factory. All sequential, not thrashing.
+- DPStructurePredictor written; HEA/perovskite collapsed to 5-line subclasses; OOH _eval_models_on_prepared_inputs now uses shared pick_scalar() helper.
+- Decision: did NOT include output_index in OOH cache key — that would break on-disk dp_cache from existing checkpoints. Added docstring caveat instead. Acceptable trade-off since output_index changes are rare.
+- Next: smoke-test registry resolves dp_structure / hea / perovskite cleanly, then move to Task #19 (env per-element bounds).
+
+### EARS — Progress (2026-05-29 16:58)
+<!-- concepts: env per-element bounds, total_units parameterization, latent bug -->
+- Task #19 in progress: extended `CompositionEnv` with `element_bounds` dict + `episode_style="fixed_order_amount"` mode. Default behavior byte-identical when both are omitted (the "for_element_idx is None" branch of `_allowed_fraction_units_now` is the unchanged original).
+- DISCOVERED LATENT BUG: `_format_fraction(units) -> f"{units/20:.2f}"` and `_fractions_to_units(fractions) -> int(round(val*20))` both hardcoded 20. Worked fine for OOH (total_units=20) but would silently produce wrong fractions for any env with total_units != 20 (e.g. Ti alloy needs total_units=100, step=1). Fixed by parameterizing both helpers with `total_units` and threading from self._total_units at all 3 call sites.
+- Validation in __init__: element_bounds with element_then_amount → NotImplementedError; sum(min) <= total <= sum(max) check; per-element lo<=hi; unknown keys warned.
+- step() now also validates per-element bounds AND that elem matches cation_set[counter] in fixed_order_amount mode.
+- Next: smoke-test env (OOH default still works byte-for-byte; Ti-alloy-style config completes a valid episode), then move to Task #20 (phase_pattern).
+
+### EARS — Progress (2026-05-29 17:08)
+<!-- concepts: phase_pattern declarative filter, Tier-1 YAML example, scope choices -->
+- Task #20 (declarative phase_pattern constraint) DONE. PhasePatternFilter supports: required (per-element bounds), forbidden, primary_sum, dopant_sum (with ALL_OTHERS sentinel), ratios. Multi-pattern OR-of-ANDs. Registered as "phase_pattern" in CONSTRAINTS.
+- Scope choice: action filter is THOROUGH at terminal step only (steps_left==0) — at intermediate steps it passes actions through. Reasoning: intermediate-step soundness would require per-subset interval arithmetic (complex), and unmatched trajectories simply yield post-hoc-filtered terminals. Documented in module docstring. The user explicitly accepted that the OOH-style cross-element inequalities (Fe<=max(Ni,Co)) keep their dedicated Python filter.
+- Smoke-tested all rule kinds + multi-pattern OR + terminal-step action filter. All pass.
+- Task #21 in progress: wrote `configs/ti_alloy.yaml` for the user's 11-element Ti alloy case (45-90 Ti, 0-25 Al, …, 0-5 Ta; sum=100, step=1). Uses `predictor: dp_structure`, `episode_style: fixed_order_amount`, `total_units: 100`, `element_bounds`. Zero Python needed.
+- Next: env-loading smoke test against the new ti_alloy.yaml (no DP eval — just confirm env constructs and produces valid actions), then Task #22 verification suite.

@@ -101,6 +101,10 @@ class DPConfig:
     debug_dir: Optional[str] = None
     debug_max_configs: Optional[int] = None
 
+    # Which scalar to read from each DeepProperty model's output vector.
+    # Default 0 preserves historical behaviour. Override for multi-output models.
+    output_index: int = 0
+
 
 class DeepMDOverpotentialPredictor:
     """Predict overpotential for alloyed (M)OOH slabs using an ensemble of DeepMD models.
@@ -423,11 +427,11 @@ class DeepMDOverpotentialPredictor:
         return coords, cells, atom_types
 
     def _eval_models_on_prepared_inputs(self, coords: np.ndarray, cells: np.ndarray, atom_types: np.ndarray) -> List[float]:
+        from rl_matdesign.utils.dp_eval import pick_scalar
         values: List[float] = []
         for dp in self.dp_models:
             res = dp.eval(coords=coords, cells=cells, atom_types=atom_types, mixed_type=True)
-            res = np.asarray(res).reshape(-1)
-            values.append(float(res[0]))
+            values.append(pick_scalar(res, output_index=self.cfg.output_index))
         return values
 
     def predict_overpotential(

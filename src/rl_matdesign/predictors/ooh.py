@@ -47,6 +47,7 @@ class OOHCatalystPredictor:
         geo_opt_model: str = "./DPA-3.1-3M_1.pt",
         rng_seed: int = 123,
         uncertainty: str = "models",
+        output_index: int = 0,
     ) -> None:
         from abcde_ooh.dp_predictor import DPConfig, DeepMDOverpotentialPredictor
         from ..training import objective_from_mean_std
@@ -55,6 +56,7 @@ class OOHCatalystPredictor:
         self.objective = objective
         self.k = k
         self.uncertainty = uncertainty
+        self.output_index = output_index
 
         cfg = DPConfig(
             base_poscar=base_poscar,
@@ -65,6 +67,7 @@ class OOHCatalystPredictor:
             seed=rng_seed,
             geo_opt=geo_opt,
             geo_opt_model=geo_opt_model,
+            output_index=output_index,
         )
         self._predictor = DeepMDOverpotentialPredictor(cfg)
         # Composition cache: comp_key → (raw_mean_overpotential, std)
@@ -73,7 +76,13 @@ class OOHCatalystPredictor:
 
     @staticmethod
     def _comp_key(composition: Dict[str, float]) -> tuple:
-        """Canonical cache key matching classical-dqn _comp_key (units of 1/20)."""
+        """Canonical cache key matching classical-dqn _comp_key (units of 1/20).
+
+        Note: this key is composition-only and does NOT include ``output_index``.
+        If you load a `dp_cache` saved with one ``output_index`` and resume
+        training under a different ``output_index``, the cached values may be
+        stale. Start a fresh run when changing ``output_index``.
+        """
         return tuple(sorted(
             (k, int(round(v * 20)))
             for k, v in composition.items()

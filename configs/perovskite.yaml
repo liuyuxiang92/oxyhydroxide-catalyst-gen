@@ -72,14 +72,14 @@ pg_num_iters: 500
 pg_batch_eps: 15
 pg_lr_actor: 0.001
 pg_lr_critic: 0.001
-entropy_coef: 0.01
+pg_entropy_coef: 0.01
 gen_temperature: 1.0
 gen_top_frac: 0.0
 gen_epsilon: 0.0
 gamma: 0.99
 
-repeat_penalty_coef: 0.1
-repeat_penalty_shape: log
+pg_repeat_penalty_coef: 0.1
+pg_repeat_penalty_shape: log
 
 # ---- Generation ----
 num_gen_eps: 200
@@ -90,9 +90,9 @@ dqn_lr: 0.001
 dqn_batch_size: 256
 # Classical online DQN
 dqn_warmup_eps: 200
-num_train_eps: 20000
-buffer_size: 50000
-grad_steps_per_ep: 5
-target_update_freq: 100
-eps_anneal_eps: 10000
-eps_min: 0.05
+dqn_num_train_eps: 20000
+dqn_buffer_size: 50000
+dqn_grad_steps_per_ep: 5
+dqn_target_update_freq: 100
+dqn_eps_anneal_eps: 10000
+dqn_eps_min: 0.05

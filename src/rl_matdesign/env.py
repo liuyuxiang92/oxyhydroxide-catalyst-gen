@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import random
 import re
+import warnings
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Sequence, Tuple
+from typing import Callable, Dict, List, Literal, Optional, Sequence, Tuple
 
 import numpy as np
 
 from .encoding import decode_one_hot, encode_choice
 from .featurization import featurize_formula
+
+
+EpisodeStyle = Literal["element_then_amount", "fixed_order_amount"]
 
 
 @dataclass
@@ -21,15 +25,18 @@ class EpisodeStep:
     allowed_actions: List = field(default_factory=list)
 
 
-def _format_fraction(units: int) -> str:
-    return f"{units / 20:.2f}"
+def _format_fraction(units: int, total_units: int = 20) -> str:
+    # Two-decimal format matches the canonical fraction_set strings ("0.05", "0.45",
+    # …) for any reasonable total_units (20, 50, 100). Users with a finer grid
+    # should supply fraction_set strings of matching precision.
+    return f"{units / total_units:.2f}"
 
 
-def _fractions_to_units(fractions: Sequence[str]) -> List[int]:
+def _fractions_to_units(fractions: Sequence[str], total_units: int = 20) -> List[int]:
     out: List[int] = []
     for f in fractions:
         val = float(f)
-        out.append(int(round(val * 20)))
+        out.append(int(round(val * total_units)))
     return out
 
 
@@ -94,6 +101,20 @@ class CompositionEnv:
     total_units:
         Internal resolution of the fraction grid.  Default 20 means the grid runs
         in steps of 1/20 = 0.05.
+    element_bounds:
+        Optional ``{element: (min_fraction, max_fraction)}`` overriding the
+        global ``fraction_set`` range on a per-element basis.  Bounds are in
+        the same fractional units as ``fraction_set`` (e.g. ``(0.45, 0.90)``).
+        Elements absent from the dict inherit ``[0, 1]``.  Only meaningful with
+        ``episode_style="fixed_order_amount"`` for now; combining with the
+        default ``"element_then_amount"`` raises ``NotImplementedError``.
+    episode_style:
+        ``"element_then_amount"`` (default, current behavior) — the agent picks
+        both element and amount at each step.  ``"fixed_order_amount"`` — every
+        element in ``cation_set`` appears in that fixed order, and the agent
+        only chooses an amount per step.  ``n_components`` is then forced to
+        ``len(cation_set)`` and the last step's amount is determined by the
+        residual budget.
     """
 
     def __init__(
@@ -107,22 +128,79 @@ class CompositionEnv:
         state_featurizer: Callable[[str], np.ndarray] = featurize_formula,
         phase_filter=None,
         total_units: int = 20,
+        element_bounds: Optional[Dict[str, Tuple[float, float]]] = None,
+        episode_style: EpisodeStyle = "element_then_amount",
     ) -> None:
         self.cation_set = list(cation_set)
         self.fraction_set = list(fraction_set)
         self.anion_formula = anion_formula
-        self.n_components = n_components
-        self.max_steps = n_components  # alias used in existing training code
         self.reward_fn = reward_fn or (lambda _formula: 0.0)
         self.state_featurizer = state_featurizer
         self.phase_filter = phase_filter
+        self.episode_style = episode_style
+
+        if episode_style not in ("element_then_amount", "fixed_order_amount"):
+            raise ValueError(
+                f"episode_style must be 'element_then_amount' or "
+                f"'fixed_order_amount', got {episode_style!r}."
+            )
+        if element_bounds is not None and episode_style == "element_then_amount":
+            raise NotImplementedError(
+                "element_bounds is currently only supported with "
+                "episode_style='fixed_order_amount'. Combining per-element bounds "
+                "with free element choice would require a per-subset feasibility "
+                "search and is not implemented yet."
+            )
+
+        if episode_style == "fixed_order_amount":
+            self.n_components = len(self.cation_set)
+            if n_components != len(self.cation_set):
+                warnings.warn(
+                    f"episode_style='fixed_order_amount' forces n_components="
+                    f"len(cation_set)={len(self.cation_set)}; ignoring requested "
+                    f"n_components={n_components}.",
+                    UserWarning, stacklevel=2,
+                )
+        else:
+            self.n_components = n_components
+        self.max_steps = self.n_components  # alias used in existing training code
 
         self._total_units = total_units
-        self._allowed_units = _fractions_to_units(self.fraction_set)
+        self._allowed_units = _fractions_to_units(self.fraction_set, self._total_units)
         self._possible_sums_by_k: List[set[int]] = [
             _possible_sums(self._allowed_units, k, self._total_units)
             for k in range(self.n_components + 1)
         ]
+
+        # Per-element unit bounds (only used by fixed_order_amount).
+        self._element_unit_bounds: Optional[List[Tuple[int, int]]] = None
+        if element_bounds is not None:
+            unknown = sorted(set(element_bounds) - set(self.cation_set))
+            if unknown:
+                warnings.warn(
+                    f"element_bounds keys not in cation_set are ignored: {unknown}",
+                    UserWarning, stacklevel=2,
+                )
+            bounds: List[Tuple[int, int]] = []
+            for el in self.cation_set:
+                lo, hi = element_bounds.get(el, (0.0, 1.0))
+                lo_u = int(round(float(lo) * self._total_units))
+                hi_u = int(round(float(hi) * self._total_units))
+                if lo_u > hi_u:
+                    raise ValueError(
+                        f"element_bounds[{el!r}] has lower > upper: {lo_u} > {hi_u}."
+                    )
+                bounds.append((lo_u, hi_u))
+            self._element_unit_bounds = bounds
+
+            sum_min = sum(lo for lo, _ in bounds)
+            sum_max = sum(hi for _, hi in bounds)
+            if not (sum_min <= self._total_units <= sum_max):
+                raise ValueError(
+                    f"element_bounds is infeasible: sum(mins)={sum_min}, "
+                    f"sum(maxes)={sum_max}, total_units={self._total_units}. "
+                    "Need sum(mins) <= total_units <= sum(maxes)."
+                )
 
         self.state: str = ""
         self.counter: int = 0
@@ -160,7 +238,7 @@ class CompositionEnv:
 
         # Major cations first; tie-break alphabetically for determinism.
         items.sort(key=lambda t: (-t[1], t[0]))
-        state = "".join(f"{el}{_format_fraction(units)}" for el, units in items)
+        state = "".join(f"{el}{_format_fraction(units, self._total_units)}" for el, units in items)
         return f"{state}{self.anion_formula}"
 
     def cation_fractions(self) -> Dict[str, float]:
@@ -190,11 +268,40 @@ class CompositionEnv:
                 items.append((str(el), units))
         return tuple(sorted(items))
 
-    def _allowed_fraction_units_now(self) -> List[int]:
+    def _allowed_fraction_units_now(self, *, for_element_idx: Optional[int] = None) -> List[int]:
         steps_left = self.n_components - self.counter
         remaining = self.remaining_units
 
-        allowed: List[int] = []
+        # Per-element bounds clamp (only used in fixed_order_amount mode).
+        if self._element_unit_bounds is not None and for_element_idx is not None:
+            lo_u, hi_u = self._element_unit_bounds[for_element_idx]
+            # Range of remaining elements' (sum_min, sum_max) determines feasibility.
+            rest_min = sum(
+                self._element_unit_bounds[j][0]
+                for j in range(for_element_idx + 1, self.n_components)
+            )
+            rest_max = sum(
+                self._element_unit_bounds[j][1]
+                for j in range(for_element_idx + 1, self.n_components)
+            )
+            allowed: List[int] = []
+            for u in self._allowed_units:
+                if u < lo_u or u > hi_u:
+                    continue
+                if u > remaining:
+                    continue
+                rem_after = remaining - u
+                if rem_after < rest_min or rem_after > rest_max:
+                    continue
+                # On a step=1 unit grid every integer in [rest_min, rest_max] is
+                # reachable; the global possible_sums_by_k check is a safety net.
+                if rem_after in self._possible_sums_by_k[steps_left - 1]:
+                    allowed.append(u)
+            return allowed
+
+        # Default global feasibility (current behavior, byte-identical when
+        # element_bounds is None).
+        allowed = []
         for u in self._allowed_units:
             if u > remaining:
                 continue
@@ -208,14 +315,18 @@ class CompositionEnv:
         if self.counter >= self.n_components:
             return []
 
-        elems = [e for e in self.cation_set if e not in self._selected]
-        units = self._allowed_fraction_units_now()
+        if self.episode_style == "fixed_order_amount":
+            elems = [self.cation_set[self.counter]]
+            units = self._allowed_fraction_units_now(for_element_idx=self.counter)
+        else:
+            elems = [e for e in self.cation_set if e not in self._selected]
+            units = self._allowed_fraction_units_now()
 
         actions: List[Tuple[Tuple[float, ...], Tuple[float, ...]]] = []
         for elem in elems:
             elem_oh = tuple(encode_choice(elem, self.cation_set).tolist())
             for u in units:
-                comp = _format_fraction(u)
+                comp = _format_fraction(u, self._total_units)
                 comp_oh = tuple(encode_choice(comp, self.fraction_set).tolist())
                 actions.append((elem_oh, comp_oh))
 
@@ -243,12 +354,27 @@ class CompositionEnv:
         elem = decode_one_hot(elem_oh, self.cation_set)
         comp_str = decode_one_hot(comp_oh, self.fraction_set)
 
-        if elem in self._selected:
+        if self.episode_style == "fixed_order_amount":
+            expected = self.cation_set[self.counter]
+            if elem != expected:
+                raise ValueError(
+                    f"episode_style='fixed_order_amount' expects element "
+                    f"{expected!r} at step {self.counter}, got {elem!r}."
+                )
+        elif elem in self._selected:
             raise ValueError(f"Repeated element '{elem}' is not allowed.")
 
         comp_units = int(round(float(comp_str) * self._total_units))
         if comp_units not in self._allowed_units:
             raise ValueError("Composition not in allowed fraction set.")
+
+        if self._element_unit_bounds is not None:
+            lo_u, hi_u = self._element_unit_bounds[self.counter]
+            if not (lo_u <= comp_units <= hi_u):
+                raise ValueError(
+                    f"Amount {comp_units} for element {elem!r} violates bounds "
+                    f"[{lo_u}, {hi_u}] in units of 1/{self._total_units}."
+                )
 
         steps_left = self.n_components - self.counter
         remaining = self.remaining_units
