@@ -1,0 +1,52 @@
+# Architectural decisions — what was chosen and why
+- name: abcde_ooh_stays_tier3_specialized
+  scope: src/abcde_ooh/, src/rl_matdesign/predictors/ooh.py
+  decision: |
+    Keep OOH-specific code (adsorbate placement, Sabatier overpotential,
+    5-phase rules) in `src/abcde_ooh/` rather than fully unifying into
+    `rl_matdesign/`. Bridge via two adapters: `predictors/ooh.py`
+    (OOHCatalystPredictor → wraps DeepMDOverpotentialPredictor) and
+    `registry.py:_make_ooh` (cfg-dict factory).
+  rationale: |
+    1. OOH physics (place O*, OH*, OOH* adsorbates → 3 binding energies →
+       overpotential) is genuinely domain-specific; collapsing it into the
+       generic `DPStructurePredictor` would lose the structure.
+    2. The 5-phase OOH rules include cross-element inequalities like
+       `Fe <= max(Ni, Co)` that exceed what the declarative `phase_pattern`
+       grammar should encode. Keeping `PhaseActionFilter` in Python is
+       cleaner than building a mini-language.
+    3. Minimal-touch reduces risk of breaking the OOH bit-for-bit parity
+       gate (the `v1.0-parity-with-classical` tag).
+  consequences: |
+    `abcde_ooh/` remains importable; `predictor: ooh` + `constraint_filter:
+    ooh_phase` route to it via registry. Two adapters and a `DPConfig.output_index`
+    field are the only `abcde_ooh/`-adjacent additions.
+  status: confirmed
+
+- name: phase_pattern_scoped_to_simple_rules
+  scope: src/rl_matdesign/constraints/phase_pattern.py
+  decision: |
+    PhasePatternFilter supports `required` / `forbidden` / `primary_sum` /
+    `dopant_sum` (incl. `ALL_OTHERS` sentinel) / `ratios`. Multi-pattern OR.
+    Thorough action filter at terminal step only; intermediate steps pass
+    through.
+  rationale: |
+    Covers ~80% of common phase rules cleanly. Cross-element inequalities
+    and intermediate-step interval arithmetic over remaining-element subsets
+    would balloon the grammar and runtime. For OOH-style complex rules,
+    write a dedicated `ConstraintFilter` subclass instead — that's Tier 3.
+  status: confirmed
+
+- name: branch_safety_pattern
+  scope: refactor workflow
+  decision: |
+    Before any non-trivial refactor: (1) tag the current known-good state
+    (`vX.Y-<short-name>`), (2) work on a `feat/<topic>` branch off the
+    development branch, (3) merge back only after the bit-for-bit regression
+    gate passes. Defer orthogonal changes (e.g., branch reorganisation) to
+    separate sessions.
+  rationale: |
+    Couples one risk per session. The tag is a guaranteed rollback point;
+    the feature branch can be force-pushed/rebased without losing history.
+  reference: tags `v1.0-parity-with-classical`, `v2.0-yaml-first`
+  status: confirmed

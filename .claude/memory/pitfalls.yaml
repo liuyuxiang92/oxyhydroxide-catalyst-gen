@@ -1,0 +1,20 @@
+# Pitfalls — things that broke and how to avoid them
+- name: hardcoded_total_units_in_fraction_helpers
+  area: src/rl_matdesign/env.py
+  what_broke: |
+    `_format_fraction` and `_fractions_to_units` hardcoded `* 20` / `/ 20`,
+    silently producing wrong fractions for any env with `total_units != 20`.
+    Worked invisibly for OOH (total_units=20) until Ti alloy (total_units=100)
+    needed `_fractions_to_units("0.45") == 45`, not 9.
+  root_cause: |
+    The functions were extracted as module-level helpers but the magic constant
+    20 — meant to be the OOH grid resolution — was never parameterised.
+  fix: |
+    Parameterise both helpers with `total_units` and thread `self._total_units`
+    from all three CompositionEnv call sites. Keep precision=2 in the format
+    string (matches "0.05" / "0.45" / "0.85" canonical strings for any
+    reasonable total_units; finer grids need finer fraction_set strings).
+  guardrail: |
+    Any new env grid parameter (step size, total units, etc.) MUST be threaded
+    through every formatting/conversion helper. Search `* 20`, `/ 20`,
+    `* total_units`, `/ total_units` together when changing the grid.

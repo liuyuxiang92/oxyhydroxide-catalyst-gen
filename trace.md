@@ -199,3 +199,16 @@ Not stuck — removing `sys.path.insert(0, src/)` from 5 scripts in one session 
 - Smoke-tested all rule kinds + multi-pattern OR + terminal-step action filter. All pass.
 - Task #21 in progress: wrote `configs/ti_alloy.yaml` for the user's 11-element Ti alloy case (45-90 Ti, 0-25 Al, …, 0-5 Ta; sum=100, step=1). Uses `predictor: dp_structure`, `episode_style: fixed_order_amount`, `total_units: 100`, `element_bounds`. Zero Python needed.
 - Next: env-loading smoke test against the new ti_alloy.yaml (no DP eval — just confirm env constructs and produces valid actions), then Task #22 verification suite.
+
+### EARS — Session End (2026-05-29 19:20)
+<!-- concepts: yaml-first refactor, registry plug-in pattern, ff-merge to general-framework -->
+- Accomplished: YAML-first refactor (`feat/yaml-first-systems` @ fc8a186) merged fast-forward into `general-framework`. Tagged `v2.0-yaml-first` locally. Confirmed OOH bit-for-bit parity with `v1.0-parity-with-classical` (user verified for both DQN and REINFORCE). Plan section A in progress.
+- Next session: (1) push `general-framework` + both tags (`v1.0-parity-with-classical`, `v2.0-yaml-first`) to origin to finish Phase A; (2) Phase B delete `src/abcde_ooh/{featurization,model}.py` (zero-import dead code); (3) Phase C README "Custom material systems" section; (4) Phase D pytest suite under `tests/`; (5) Phase E real-DP-model Ti-alloy run.
+- Open issues: branch rename `general-framework → main` deferred per plan G.2 (needs audit of main's 10 unique commits). `abcde_ooh/env.py` and `encoding.py` still imported by `summarize_replay_buffer.py` and `constraints/phase_sampler.py` — deeper unification deferred.
+
+### EARS — Progress (2026-05-29 19:24)
+<!-- concepts: README tier-based docs, flag-naming convention, registry surface reference -->
+- Phase A DONE: pushed `general-framework` + tags `v1.0-parity-with-classical` and `v2.0-yaml-first` to origin.
+- Phase B DONE (commit 1b3ac5f): removed `src/abcde_ooh/{featurization,model}.py` (zero imports). Smoke a2c run passed.
+- Phase C in progress: 5 sequential edits to README.md — (1) added ti_alloy.yaml and ooh_dqn.yaml to configs table, (2) Quickstart prose `entropy_coef → pg_entropy_coef`, (3) REINFORCE YAML example renamed to prefixed names, (4) DQN YAML example renamed to prefixed names, (5) replaced 6-line "Adding a new material system" stub with ~150-line tier-based section (Tier 1/2/3, plug-in surface reference, per-element bounds, flag-naming + alias table). Not thrashing; this is one section rewrite split across 5 atomic edits.
+- Next: verify README renders, commit Phase C, then Phase D (pytest), then Phase E (real Ti DP run).

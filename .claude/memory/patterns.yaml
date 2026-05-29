@@ -1,0 +1,59 @@
+# Confirmed multi-step workflows / templates
+- name: register_a_new_predictor
+  area: src/rl_matdesign/registry.py + scripts/run_experiment.py
+  use_when: adding a new material-system predictor.
+  steps: |
+    Built-in (lives in this repo):
+      1. Add `src/rl_matdesign/predictors/<name>.py` implementing
+         `__init__(self, cfg, *, seed=None)` + `predict(comp) -> (mean, std)`.
+         For DP-on-structure cases, subclass `DPStructurePredictor` and
+         override `DEFAULT_SITE_SYMBOL` / `_value_sign()`.
+      2. Add `_make_<name>(cfg, *, seed=None, **_)` factory in
+         `src/rl_matdesign/registry.py` and register it in `PREDICTORS`.
+      3. Use `predictor: <name>` in YAML.
+
+    User plug-in (lives in user's package, zero repo edits):
+      1. Write `MyClass(cfg, *, seed=None)` + `predict(comp) -> (mean, std)`.
+      2. In YAML: `predictor: "my_pkg.my_mod:MyClass"`.
+      3. `pip install` user's package or set PYTHONPATH so importlib can
+         find it; `_load_fqn` in registry.py raises a helpful error if not.
+
+- name: register_a_new_constraint_filter
+  area: src/rl_matdesign/registry.py + src/rl_matdesign/constraints/
+  use_when: pruning action space at rollout time with a domain rule.
+  steps: |
+    Built-in: same shape as predictor registration but registers in
+    `CONSTRAINTS`. Factory signature is `_make_<name>(cfg, *, env=None, **_)`
+    — `env` is passed in for filters that need `env._allowed_units`,
+    `env._possible_sums_by_k`, etc.
+
+    For OOH-style cross-element inequalities, write a custom
+    `ConstraintFilter` subclass and register it; the declarative
+    `phase_pattern` filter only handles required/forbidden/sum/ratio rules.
+
+- name: deprecation_alias_workflow
+  area: scripts/run_experiment.py:_apply_flag_aliases
+  use_when: renaming a YAML key without breaking existing user configs.
+  steps: |
+    1. Add the old→new mapping to the `_FLAG_ALIASES` dict in
+       `scripts/run_experiment.py`.
+    2. Update all canonical `configs/*.yaml` to use the new key.
+    3. Update the corresponding kwarg name in `training.py` (or wherever
+       the value is consumed) and all call sites.
+    4. The alias resolver fires a `DeprecationWarning` naming the new key
+       at config-load time; users see it once per run.
+    5. Smoke-test: load a synthetic dict with the old key → confirms
+       warning + value gets remapped. Load all `configs/*.yaml` → confirm
+       zero warnings (regression guard against accidental re-introduction).
+
+- name: bit_for_bit_parity_gate
+  area: regression workflow
+  use_when: any refactor that touches reward computation, env feasibility,
+            RNG seeding, or DP eval path.
+  steps: |
+    1. Tag pre-refactor state (`v<X>-parity-with-classical`).
+    2. Run `configs/ooh.yaml` (REINFORCE and DQN) on both pre- and
+       post-refactor with identical seeds (`--dp-seed 321 --train-seed 123
+       --gen-seed 213`).
+    3. `diff` the two `generated.csv` files — must be byte-identical.
+    4. Only after parity passes: merge feat branch → development branch.
