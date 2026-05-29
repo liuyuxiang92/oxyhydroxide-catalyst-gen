@@ -151,3 +151,9 @@ Not stuck — removing `sys.path.insert(0, src/)` from 5 scripts in one session 
 - Audit pass on both branches. Subagent reports were unreliable — general-framework agent flagged 6 "dead" functions (`_make_loss_fn`, `objective_from_mean_std`, `choose_action`, `_rollout_random_episode`, `_episode_pg_terms`, `_comp_key`) and 1 "unused" module (`env_integer.py`) — only `_comp_key` (the top-level one in training.py:84) is actually unused. Verified each claim with grep before acting.
 - Lesson: Explore-style subagents are good at locating code but not at proving non-existence of callers. Always re-verify their "dead code" claims directly.
 - Concrete cleanup (in progress): general-framework removes `_comp_key` from training.py and dead YAML keys (`name`, `description`, `num_random_eps`, `dqn_epochs`, `structure_mode`). classical-dqn removes two unused imports (`Sequence`, `feature_calculators`).
+
+### EARS — Progress (2026-05-29 14:26)
+<!-- concepts: cross-branch debris, egg-info hygiene, gitignore -->
+- On `feat/classical-dqn`, found `src/rl_matdesign/` (bytecode-only — no `.py` tracked on this branch) and `src/rl_matdesign.egg-info/` left behind from a prior `general-framework` checkout + `pip install -e .`. Both untracked. Deleted.
+- Root cause: switching branches removes tracked `.py` files but `__pycache__/*.pyc` and `*.egg-info/` from `pip install -e .` persist as untracked debris and confuse `git status`.
+- Added `*.egg-info/` to `.gitignore` to suppress future regeneration noise. Other dirs (`abcde_ooh/__pycache__`, `data/`, `rf_models/`, `models/sinter_calcine/`) are live or intentional.
