@@ -123,16 +123,21 @@ def test_weighted_sum_math_objective_mean():
 
 
 def test_weighted_sum_math_objective_mean_minus_kstd():
-    """With objective=mean_minus_kstd, v_k = m_k - k*s_k per child."""
+    """With objective=mean_minus_kstd, v_k = dir*m_k - k*s_k per child.
+
+    Direction is applied to mean BEFORE the std fold so the std term acts as
+    an uncertainty penalty regardless of direction (exploit semantics in
+    both min and max). Matches single-predictor convention.
+    """
     from rl_matdesign.predictors.composite import CompositePredictor
     p = CompositePredictor(_two_objective_cfg(objective="mean_minus_kstd", k=1.0))
-    # v_energy = 4.0 - 1.0*0.1 = 3.9
-    # v_bulk   = 80.0 - 1.0*5.0 = 75.0
-    # contrib_energy = 1.0 * -1 * 3.9 / 2.0 = -1.95
-    # contrib_bulk   = 0.5 * +1 * 75.0 / 100.0 = +0.375
-    # reward = -1.575
+    # v_energy = (-1)*4.0 - 1.0*0.1 = -4.1   (direction: min applied to mean)
+    # v_bulk   = (+1)*80.0 - 1.0*5.0 = 75.0  (direction: max applied to mean)
+    # contrib_energy = 1.0 * -4.1 / 2.0 = -2.05
+    # contrib_bulk   = 0.5 * 75.0 / 100.0 = +0.375
+    # reward = -1.675
     reward, _ = p.predict({"Ti": 1.0})
-    assert reward == pytest.approx(-1.575, rel=1e-9)
+    assert reward == pytest.approx(-1.675, rel=1e-9)
 
 
 def test_predict_raw_skips_std_penalty():

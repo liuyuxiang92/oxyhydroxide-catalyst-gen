@@ -142,15 +142,23 @@ class CompositePredictor:
     # ------------------------------------------------------------------
 
     def predict(self, composition: Dict[str, float]) -> Tuple[float, float]:
-        """Return ``(reward, 0.0)`` — composite has no scalar joint std."""
+        """Return ``(reward, 0.0)`` — composite has no scalar joint std.
+
+        Direction is applied to the raw mean *before* the std term is folded
+        in, matching :class:`DPPropertyPredictor` / :class:`DPStructurePredictor`
+        convention. For ``mean_minus_kstd`` this gives ``dir*m - k*s`` per
+        child, so the std term acts as an uncertainty penalty regardless of
+        whether the child is minimizing or maximizing (exploit semantics in
+        both directions). Switch to ``mean_plus_kstd`` to flip to exploration.
+        """
         from ..training import objective_from_mean_std
 
         stats = self._stats(composition)
         reward = 0.0
         for name, w, d, sc in zip(self.names, self.weights, self.dirs, self.scales):
             m, s = stats[name]
-            v = objective_from_mean_std(m, s, self.objective, self.k)
-            reward += w * d * v / sc
+            v = objective_from_mean_std(d * m, s, self.objective, self.k)
+            reward += w * v / sc
         return float(reward), 0.0
 
     def predict_raw(self, composition: Dict[str, float]) -> Tuple[float, float]:
