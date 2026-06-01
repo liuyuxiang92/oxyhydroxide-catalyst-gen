@@ -34,6 +34,11 @@ def _make_dp_structure(cfg: dict, *, seed: Optional[int] = None, **_):
     return DPStructurePredictor(cfg, seed=seed)
 
 
+def _make_dp_property(cfg: dict, *, seed: Optional[int] = None, **_):
+    from .predictors.dp_property import DPPropertyPredictor
+    return DPPropertyPredictor(cfg, seed=seed)
+
+
 def _make_hea(cfg: dict, *, seed: Optional[int] = None, **_):
     from .predictors.hea import HEAPropertyPredictor
     return HEAPropertyPredictor(cfg, seed=seed)
@@ -85,6 +90,7 @@ def _make_dummy(cfg: dict, **_):
 
 PREDICTORS: Dict[str, Factory] = {
     "dp_structure":   _make_dp_structure,
+    "dp_property":    _make_dp_property,
     "hea":            _make_hea,
     "perovskite":     _make_perovskite,
     "sinter_calcine": _make_sinter_calcine,

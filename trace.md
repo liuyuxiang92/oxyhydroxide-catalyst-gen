@@ -231,3 +231,10 @@ Not stuck — removing `sys.path.insert(0, src/)` from 5 scripts in one session 
 - Root cause: `load_ase_calculators` in src/rl_matdesign/utils/dp_eval.py hard-coded `DPCalculator(model=p)` with no head argument. `DPStructurePredictor` had no cfg key for it either.
 - Fix in progress: (1) added `head: Optional[str] = None` kwarg to `load_ase_calculators`, only passes through when set so single-task models still work. Next: wire `dp_head` config key through `DPStructurePredictor`, document in ti_alloy_user.yaml.
 - Caveat to flag to user: `dp_structure` uses ASE `atoms.get_potential_energy()` → scalar energy only. Works with energy-style head (`Omat24`). The 4-property `property` head returns a vector and would need the DeepProperty path (the one OOH uses), NOT this fix. So `output_index` in ti_alloy_user.yaml is currently a no-op for `dp_structure` — only meaningful for the OOH-style predictor.
+
+### EARS — Progress (2026-06-01 11:44)
+<!-- concepts: dp_property-predictor, multi-head-DP-models, vector-output-reduction -->
+- User confirmed Ti-alloy DP model: use the `property` head, which returns a 4-component vector per structure (not energy). The `dp_structure` ASE path can't read that — ASE only surfaces scalar potential energy.
+- Building new `DPPropertyPredictor` (src/rl_matdesign/predictors/dp_property.py) that mirrors `dp_structure` but uses `deepmd.pt.infer.deep_eval.DeepProperty` (same backend the OOH overpotential predictor uses).
+- Key design decisions: (1) `dp_head` defaults to "property" (vs `dp_structure`'s default of unset); (2) `output_index` / `output_aggregator` now do real work here (they were no-ops in `dp_structure`); (3) added `maximize: bool` cfg knob to flip optimization direction (default False = lower property is better, matches formation-energy convention); (4) derive `elem_to_type` from `dp.get_type_map()` rather than assuming periodic-table order like the OOH predictor does — more robust if the Ti checkpoint uses a custom type ordering.
+- Next: register `dp_property` short name in registry.py, update ti_alloy_user.yaml to switch from `dp_structure` to `dp_property`, run pytest to ensure nothing else broke.
