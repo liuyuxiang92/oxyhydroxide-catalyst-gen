@@ -6,11 +6,16 @@ weighted-signed-scaled sum::
 
     reward = Σ_k  w_k * dir_k * v_k / scale_k
 
-where ``v_k`` is the per-child robust value::
+where ``v_k`` is the per-child robust value (direction applied to mean first,
+then the child's own objective folds in the std term)::
 
-    v_k = m_k                  if objective == "mean"
-    v_k = m_k - k_c * s_k      if objective == "mean_minus_kstd"
-    v_k = m_k + k_c * s_k      if objective == "mean_plus_kstd"
+    v_k = dir_k * m_k                  if obj_k == "mean"
+    v_k = dir_k * m_k - k * s_k        if obj_k == "mean_minus_kstd"  (exploit)
+    v_k = dir_k * m_k + k * s_k        if obj_k == "mean_plus_kstd"   (explore)
+
+Each child picks its own uncertainty handler — exploit-min and explore-max can
+coexist in one run, which is the whole point of per-property control. ``k`` is
+global as the single "overall risk-aversion" dial.
 
 Each child keeps its own model-ensemble std in native physical units; no joint
 ``dp_std`` is computed (mixing eV/atom with GPa would be meaningless).
@@ -25,12 +30,13 @@ Required:
         * ``direction``: ``"min"`` / ``"max"`` (or ``"minimize"`` / ``"maximize"``).
         * Any keys the child predictor needs (e.g. ``dp_models``, ``dp_head``).
       Optional per-objective: ``name`` (default ``obj{i}``), ``weight``
-      (default ``1.0``), ``scale`` (default ``1.0``).
+      (default ``1.0``), ``scale`` (default ``1.0``), ``objective`` (default
+      ``"mean_minus_kstd"``; alternatives ``"mean"``, ``"mean_plus_kstd"``).
 
 Composite-level optional keys (inherited by sub-cfgs that don't override):
     - ``base_poscar``, ``site_symbol``, ``n_random_configs``.
-    - ``objective`` (default ``"mean_minus_kstd"``).
-    - ``k`` (default ``1.0``).
+    - ``k`` (default ``1.0``). NOTE: there is no composite-level ``objective``;
+      it lives per-child.
 
 Per-child RNG seeding
 ---------------------
@@ -57,7 +63,14 @@ class CompositePredictor:
         from ..registry import resolve_predictor
 
         self.cfg = cfg
-        self.objective: str = cfg.get("objective", "mean_minus_kstd")
+        if "objective" in cfg:
+            raise ValueError(
+                "composite predictor no longer accepts a top-level 'objective:' "
+                "key — set 'objective:' per entry in objectives: (default "
+                "'mean_minus_kstd'). Each property can pick its own uncertainty "
+                "treatment: 'mean' (ignore std), 'mean_minus_kstd' (exploit, "
+                "penalize std), or 'mean_plus_kstd' (explore, reward std)."
+            )
         self.k: float = float(cfg.get("k", 1.0))
 
         objectives = cfg.get("objectives")
@@ -75,6 +88,7 @@ class CompositePredictor:
         self.weights: List[float] = []
         self.dirs: List[float] = []
         self.scales: List[float] = []
+        self.objectives: List[str] = []
 
         seen_names: set[str] = set()
         for i, sub in enumerate(objectives):
@@ -107,6 +121,13 @@ class CompositePredictor:
                     f"objectives[{i}].scale must be non-zero (got 0)."
                 )
 
+            child_objective = str(sub_cfg.pop("objective", "mean_minus_kstd"))
+            if child_objective not in ("mean", "mean_minus_kstd", "mean_plus_kstd"):
+                raise ValueError(
+                    f"objectives[{i}].objective = {child_objective!r}; expected one "
+                    "of 'mean', 'mean_minus_kstd', 'mean_plus_kstd'."
+                )
+
             sub_kind = sub_cfg.pop("predictor", None)
             if not sub_kind:
                 raise ValueError(
@@ -134,6 +155,7 @@ class CompositePredictor:
             self.weights.append(weight)
             self.dirs.append(dir_sign)
             self.scales.append(scale)
+            self.objectives.append(child_objective)
 
         self._stats_cache: Dict[tuple, Dict[str, Tuple[float, float]]] = {}
 
@@ -144,20 +166,23 @@ class CompositePredictor:
     def predict(self, composition: Dict[str, float]) -> Tuple[float, float]:
         """Return ``(reward, 0.0)`` — composite has no scalar joint std.
 
-        Direction is applied to the raw mean *before* the std term is folded
-        in, matching :class:`DPPropertyPredictor` / :class:`DPStructurePredictor`
-        convention. For ``mean_minus_kstd`` this gives ``dir*m - k*s`` per
-        child, so the std term acts as an uncertainty penalty regardless of
-        whether the child is minimizing or maximizing (exploit semantics in
-        both directions). Switch to ``mean_plus_kstd`` to flip to exploration.
+        Each child folds its own ``(mean, std)`` through *its own* objective
+        (``mean`` / ``mean_minus_kstd`` / ``mean_plus_kstd``) before the
+        weighted sum. Direction is applied to the raw mean *before* the std
+        term is folded in (matching the single-predictor convention), so
+        ``mean_minus_kstd`` always penalizes uncertainty regardless of
+        whether the child is minimizing or maximizing. ``k`` is global —
+        per-child uncertainty weighting can be absorbed into ``scale_k``.
         """
         from ..training import objective_from_mean_std
 
         stats = self._stats(composition)
         reward = 0.0
-        for name, w, d, sc in zip(self.names, self.weights, self.dirs, self.scales):
+        for name, w, d, sc, obj in zip(
+            self.names, self.weights, self.dirs, self.scales, self.objectives,
+        ):
             m, s = stats[name]
-            v = objective_from_mean_std(d * m, s, self.objective, self.k)
+            v = objective_from_mean_std(d * m, s, obj, self.k)
             reward += w * v / sc
         return float(reward), 0.0
 

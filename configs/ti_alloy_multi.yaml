@@ -51,14 +51,22 @@ constraint_filter: null
 # `composite` wraps N child predictors (each resolved through the registry)
 # and combines them into one scalar reward:
 #
-#   reward = Σ_k  weight_k * dir_k * v_k / scale_k
+#   reward = Σ_k  weight_k * v_k / scale_k
 #
-# where dir_k is +1 for `direction: max` and -1 for `direction: min`, and v_k
-# is the per-child mean folded with that child's own std via the composite-
-# level `objective` (e.g. `mean_minus_kstd`: v_k = mean_k - k*std_k). Each
-# child keeps its uncertainty in native units; the framework does NOT compute
-# a joint dp_std across mixed physical quantities. generated.csv records
-# per-property columns: obj_<name>_mean / obj_<name>_std.
+# where v_k is computed per-child by applying direction to the mean and then
+# folding with the std according to that child's `objective`:
+#
+#   v_k = dir_k * mean_k                 if objective: mean              (ignore std)
+#   v_k = dir_k * mean_k - k * std_k     if objective: mean_minus_kstd   (exploit — penalize uncertainty)
+#   v_k = dir_k * mean_k + k * std_k     if objective: mean_plus_kstd    (explore — reward uncertainty)
+#
+# Direction (+1 for `max`, -1 for `min`) and objective (exploit / explore /
+# ignore) are independent per-child knobs. `k` is global as the single
+# overall risk-aversion dial.
+#
+# Each child keeps its uncertainty in native units; the framework does NOT
+# compute a joint dp_std across mixed physical quantities. generated.csv
+# records per-property columns: obj_<name>_mean / obj_<name>_std.
 #
 # Tuning weights/scales: pick `scale_k` ≈ typical magnitude of property k
 # (matching the units of the model output). Then `weight_k` controls the
@@ -71,13 +79,12 @@ base_poscar: /ABS/PATH/TO/your_ti_alloy.POSCAR
 site_symbol: X
 n_random_configs: 5
 
-# Per-child folding rule. Applied to each child's (mean, std) before the
-# weighted sum.
-objective: mean_minus_kstd
+# Global uncertainty weight (the `k` in `mean ± k*std`). Same for all
+# children; per-child effective weighting can be tuned via scale.
 k: 1.0
 
 objectives:
-  # ---- Objective 1: formation energy (minimize) via dp_structure ----
+  # ---- Objective 1: formation energy (minimize, exploit) via dp_structure ----
   - name: energy
     predictor: dp_structure
     dp_models:
@@ -85,10 +92,11 @@ objectives:
     dp_head: Omat24           # multi-task DP: pick the energy head
     energy_per_atom: true
     direction: min
+    objective: mean_minus_kstd   # well-validated head → exploit (low std preferred)
     weight: 1.0
     scale: 3.0                # typical |E/atom| in eV/atom
 
-  # ---- Objective 2: property head output 0 (maximize) via dp_property ----
+  # ---- Objective 2: property head output 0 (maximize, exploit) via dp_property ----
   - name: prop0
     predictor: dp_property
     dp_models:
@@ -100,10 +108,11 @@ objectives:
     dp_head: property
     output_index: 0
     direction: max
+    objective: mean_minus_kstd   # exploit — penalize ensemble disagreement on this property
     weight: 0.5
     scale: 100.0              # typical magnitude in this property's units
 
-  # ---- Objective 3: property head output 2 (minimize) via dp_property ----
+  # ---- Objective 3: property head output 2 (minimize, exploit) via dp_property ----
   - name: prop2
     predictor: dp_property
     dp_models:
@@ -115,6 +124,7 @@ objectives:
     dp_head: property
     output_index: 2
     direction: min
+    objective: mean_minus_kstd
     weight: 0.3
     scale: 5.0
 
