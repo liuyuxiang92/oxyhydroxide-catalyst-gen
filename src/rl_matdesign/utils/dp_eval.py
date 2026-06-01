@@ -21,8 +21,15 @@ from typing import Any, List, Optional
 import numpy as np
 
 
-def load_ase_calculators(dp_models: List[str]) -> List[Any]:
-    """Load a list of ASE-compatible DeepMD calculators (one per checkpoint)."""
+def load_ase_calculators(
+    dp_models: List[str], *, head: Optional[str] = None
+) -> List[Any]:
+    """Load a list of ASE-compatible DeepMD calculators (one per checkpoint).
+
+    ``head`` selects which output head of a multi-task DP checkpoint to use
+    (e.g. ``"Omat24"`` for the energy head of an Omat24+property model). Leave
+    as ``None`` for single-task checkpoints — DPCalculator's own default.
+    """
     try:
         from deepmd.calculator import DP as DPCalculator
     except ImportError as exc:
@@ -30,7 +37,8 @@ def load_ase_calculators(dp_models: List[str]) -> List[Any]:
             "DPStructurePredictor requires deepmd-kit (ASE calculator): "
             "`pip install deepmd-kit`."
         ) from exc
-    return [DPCalculator(model=p) for p in dp_models]
+    kwargs = {"head": head} if head is not None else {}
+    return [DPCalculator(model=p, **kwargs) for p in dp_models]
 
 
 def eval_energy_ase(

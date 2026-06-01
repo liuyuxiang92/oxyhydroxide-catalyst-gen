@@ -219,3 +219,15 @@ Not stuck — removing `sys.path.insert(0, src/)` from 5 scripts in one session 
 - Phase E adapted to GPU handoff: user has 5 DP models + POSCAR on a remote GPU machine, will run themselves. Wrote `configs/ti_alloy_user.yaml` as a fill-in-the-blanks template with REQUIRED USER EDITS section for base_poscar/site_symbol/dp_models paths.
 - Decision: multi-output DP (4 properties per structure) handled via the `output_index` YAML key (default 0). User can pick any of {0,1,2,3} by editing the YAML. Alternative `output_aggregator: mean|max` documented inline. No code change needed — `pick_scalar` already supports both modes.
 - Next: validate ti_alloy_user.yaml loads cleanly through `load_config`, smoke-run with `predictor: dummy` override to confirm env builds and rollouts work; then commit + push.
+
+### EARS — Session Start (2026-06-01 11:08)
+<!-- concepts: yaml-config-design, dp-predictor-knobs, framework-onboarding -->
+- Task: Answer follow-up questions about the YAML-first framework — branch to use, YAML-vs-CLI split, ti_alloy.yaml vs ti_alloy_user.yaml, and the meaning of `energy_per_atom`.
+- Why: User is preparing to launch the Ti-alloy GPU run and is internalizing the new config schema; clear answers reduce misconfiguration risk on the remote machine.
+
+### EARS — Progress (2026-06-01 11:27)
+<!-- concepts: deepmd-multitask-models, dp_structure-head-support, ti-alloy-gpu-handoff -->
+- Discovery: User's Ti-alloy DP checkpoints are **multi-task** models with heads ['Omat24', 'property']. DeepMD's `DPCalculator(model=p)` asserts `head is not None` for multi-task checkpoints → AssertionError on first reward call during PG warmup.
+- Root cause: `load_ase_calculators` in src/rl_matdesign/utils/dp_eval.py hard-coded `DPCalculator(model=p)` with no head argument. `DPStructurePredictor` had no cfg key for it either.
+- Fix in progress: (1) added `head: Optional[str] = None` kwarg to `load_ase_calculators`, only passes through when set so single-task models still work. Next: wire `dp_head` config key through `DPStructurePredictor`, document in ti_alloy_user.yaml.
+- Caveat to flag to user: `dp_structure` uses ASE `atoms.get_potential_energy()` → scalar energy only. Works with energy-style head (`Omat24`). The 4-property `property` head returns a vector and would need the DeepProperty path (the one OOH uses), NOT this fix. So `output_index` in ti_alloy_user.yaml is currently a no-op for `dp_structure` — only meaningful for the OOH-style predictor.

@@ -60,7 +60,7 @@ dp_models:
   - models/ti/m1.pt
   - models/ti/m2.pt
 site_symbol: X
-output_index: 0                # which output to read from a multi-output model
+# dp_head: Omat24              # required for multi-task DP checkpoints; omit for single-task
 objective: mean_minus_kstd     # reward = -mean - k*std (exploit)
 k: 1.0
 n_random_configs: 5

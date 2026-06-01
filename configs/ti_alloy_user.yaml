@@ -62,11 +62,18 @@ dp_models:
   - /ABS/PATH/TO/ti_dp_model_4.pt
   - /ABS/PATH/TO/ti_dp_model_5.pt
 
-# Each DP model returns 4 properties per structure; pick which one drives the reward.
-# 0 = first output (default), 1 / 2 / 3 = others. To pick by aggregation
-# instead of by index, set `output_aggregator: mean` or `max`.
-output_index: 0
-# output_aggregator: index     # default; set to "mean" or "max" if you want to combine outputs
+# Multi-task DP checkpoints expose multiple heads (run `dp --pt show MODEL.pt model-branch`
+# to list them). Pick the head whose output is the scalar energy used as reward.
+# For Omat24+property checkpoints this is typically "Omat24". Leave unset for
+# single-task checkpoints.
+dp_head: Omat24
+
+# NOTE: output_index / output_aggregator only apply to predictors that return a
+# property vector (e.g. the OOH overpotential pipeline via DeepProperty). The
+# `dp_structure` predictor uses ASE potential energy → a single scalar per
+# (structure, model) — so output_index has no effect here. If you need to read
+# one component of a vector-valued head (e.g. the 'property' head returning 4
+# values), that requires a different predictor (DeepProperty path), not this fix.
 
 # =====================================================================
 

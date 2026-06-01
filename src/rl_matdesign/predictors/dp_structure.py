@@ -30,6 +30,9 @@ Optional:
     - ``k`` (default ``1.0``).
     - ``n_random_configs`` (default ``5``).
     - ``energy_per_atom`` (default ``True``).
+    - ``dp_head`` (default ``None``): which head of a multi-task DP checkpoint
+      to evaluate (e.g. ``"Omat24"``). Required when the checkpoint exposes
+      multiple heads; single-task checkpoints can leave this unset.
 """
 from __future__ import annotations
 
@@ -66,6 +69,8 @@ class DPStructurePredictor:
         self.k: float = float(cfg.get("k", 1.0))
         self.n_random_configs: int = int(cfg.get("n_random_configs", 5))
         self.energy_per_atom: bool = bool(cfg.get("energy_per_atom", True))
+        head_val = cfg.get("dp_head")
+        self.dp_head: Optional[str] = str(head_val) if head_val else None
         self._rng = np.random.default_rng(seed)
         self._dp_calculators: Optional[List[Any]] = None
 
@@ -121,5 +126,7 @@ class DPStructurePredictor:
     def _get_calculators(self) -> List[Any]:
         if self._dp_calculators is None:
             from ..utils.dp_eval import load_ase_calculators
-            self._dp_calculators = load_ase_calculators(self.dp_models)
+            self._dp_calculators = load_ase_calculators(
+                self.dp_models, head=self.dp_head,
+            )
         return self._dp_calculators
