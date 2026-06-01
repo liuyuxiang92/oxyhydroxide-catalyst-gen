@@ -80,9 +80,22 @@ class DPStructurePredictor:
 
     def predict(self, composition: Dict[str, float]) -> Tuple[float, float]:
         """Return ``(reward, std)`` for *composition*."""
+        from ..training import objective_from_mean_std
+
+        mean_v, std_v = self.raw_mean_std(composition)
+        reward = objective_from_mean_std(
+            self._value_sign() * mean_v, std_v, self.objective, self.k,
+        )
+        return reward, std_v
+
+    def raw_mean_std(self, composition: Dict[str, float]) -> Tuple[float, float]:
+        """Return raw ``(mean, std)`` over the (structure × calculator) population.
+
+        No sign flip, no objective folding. Used by :class:`CompositePredictor`
+        to combine multiple physical properties at their native scales.
+        """
         from ..utils.structure import substitute_sites
         from ..utils.dp_eval import eval_energy_ase
-        from ..training import objective_from_mean_std
 
         structures = substitute_sites(
             template_poscar=self.poscar_template,
@@ -96,12 +109,7 @@ class DPStructurePredictor:
             self._get_calculators(),
             energy_per_atom=self.energy_per_atom,
         )
-        mean_v = float(np.mean(values))
-        std_v = float(np.std(values))
-        reward = objective_from_mean_std(
-            self._value_sign() * mean_v, std_v, self.objective, self.k,
-        )
-        return reward, std_v
+        return float(np.mean(values)), float(np.std(values))
 
     def batch_predict(
         self, compositions: List[Dict[str, float]]

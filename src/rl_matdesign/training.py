@@ -1022,6 +1022,7 @@ def generate_candidates(
 
     use_predict_raw = hasattr(predictor, "predict_raw")
     use_check_phase = hasattr(predictor, "check_phase")
+    use_per_obj_stats = hasattr(predictor, "per_objective_stats")
 
     # Cache raw (mean, std) values: avoids a second DeepMD call for the same
     # composition when the first was already made inside env.reward_fn.
@@ -1089,9 +1090,18 @@ def generate_candidates(
                 "formula": env.terminal_formula,
                 "reward": reward,
                 "dp_mean": raw_mean,
-                "dp_std": std,
-                "dp_mean_minus_std": raw_mean - k * std,
             }
+            if use_per_obj_stats:
+                # Composite predictor: each property keeps its own std in
+                # native physical units. A joint dp_std across mixed units
+                # would be meaningless, so dp_std / dp_mean_minus_std stay
+                # absent (pandas writes NaN). Per-property columns below.
+                for obj_name, (m, s) in predictor.per_objective_stats(comp).items():
+                    row[f"obj_{obj_name}_mean"] = float(m)
+                    row[f"obj_{obj_name}_std"] = float(s)
+            else:
+                row["dp_std"] = std
+                row["dp_mean_minus_std"] = raw_mean - k * std
             if use_check_phase:
                 phase_ok, phase_label = predictor.check_phase(comp)
                 row["primary_ok"] = bool(phase_ok)

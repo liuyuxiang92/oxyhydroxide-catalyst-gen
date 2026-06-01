@@ -74,9 +74,22 @@ class DPPropertyPredictor:
 
     def predict(self, composition: Dict[str, float]) -> Tuple[float, float]:
         """Return ``(reward, std)`` for *composition*."""
+        from ..training import objective_from_mean_std
+
+        mean_v, std_v = self.raw_mean_std(composition)
+        reward = objective_from_mean_std(
+            self._value_sign() * mean_v, std_v, self.objective, self.k,
+        )
+        return reward, std_v
+
+    def raw_mean_std(self, composition: Dict[str, float]) -> Tuple[float, float]:
+        """Return raw ``(mean, std)`` over the (model × random-config) population.
+
+        No sign flip, no objective folding. Used by :class:`CompositePredictor`
+        to combine multiple physical properties at their native scales.
+        """
         from ..utils.structure import substitute_sites
         from ..utils.dp_eval import pick_scalar
-        from ..training import objective_from_mean_std
 
         models = self._get_models()
         elem_to_type = self._elem_to_type
@@ -128,12 +141,7 @@ class DPPropertyPredictor:
                 )
 
         arr = np.asarray(all_values, dtype=float)
-        mean_v = float(np.mean(arr))
-        std_v = float(np.std(arr))
-        reward = objective_from_mean_std(
-            self._value_sign() * mean_v, std_v, self.objective, self.k,
-        )
-        return reward, std_v
+        return float(np.mean(arr)), float(np.std(arr))
 
     def batch_predict(
         self, compositions: List[Dict[str, float]]
