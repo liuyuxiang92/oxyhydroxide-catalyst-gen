@@ -151,11 +151,17 @@ def _make_ooh_phase(cfg: dict, *, env=None, **_):
     )
 
 
+def _make_chain(cfg: dict, *, env=None, **_):
+    from .constraints.chain import ChainConstraintFilter
+    return ChainConstraintFilter(cfg, env=env)
+
+
 CONSTRAINTS: Dict[str, Factory] = {
     "smact_charge":      _make_smact_charge,
     "last_step_element": _make_last_step_element,
     "ooh_phase":         _make_ooh_phase,
     "phase_pattern":     _make_phase_pattern,
+    "chain":             _make_chain,
 }
 
 

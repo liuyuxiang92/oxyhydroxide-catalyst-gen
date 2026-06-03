@@ -98,11 +98,26 @@ ratio_set: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
 anion_formula: ""
 n_components: 5
 
-# Force the last step to pick O with a nonzero digit (reference oxide rule).
-constraint_filter: last_step_element
-required_elements: ["O"]
-nonzero_ratio_at_last: true
-reserve_for_last: true
+# Two stacked constraints (applied in list order at every step):
+#   1. last_step_element — force step 5 = O with a nonzero digit; reserve O
+#      for the last slot so steps 1-4 can't pick it (reference oxide rule).
+#   2. smact_charge      — at the final step, screen candidate (4 cations + O)
+#      sets through SMACT oxidation-state tables: a set is kept only if some
+#      oxidation-state assignment can sum to the target cation charge.
+#      `stoich: 1.5` (target +3) is a permissive M2O3-style screen suitable
+#      for generic transition-metal oxides. Tighten to 2.0 (MO2) or loosen
+#      to 1.0 (MO) if you want a different oxide class.
+#
+# Requires `pip install smact` for the SMACT filter.
+constraint_filter: chain
+filters:
+  - constraint_filter: last_step_element
+    required_elements: ["O"]
+    nonzero_ratio_at_last: true
+    reserve_for_last: true
+  - constraint_filter: smact_charge
+    smact_anions:
+      - {symbol: O, charge: -2, stoich: 1.5}
 
 # ---- Predictor ----
 predictor: sinter_calcine
