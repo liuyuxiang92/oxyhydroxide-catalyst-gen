@@ -1,4 +1,4 @@
-# oxyhydroxide-catalyst-gen — General Framework
+# Reinforce Learning for Materials Design
 
 Config-driven RL runner for materials composition discovery.
 Supports multiple material systems (OOH catalyst, HEA, perovskite, oxides) via YAML configs.
