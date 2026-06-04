@@ -32,5 +32,5 @@ search_space:
   pg_entropy_coef:        { dist: loguniform, low: 1.0e-3, high: 0.5 }
   pg_batch_eps:           { dist: categorical, choices: [8, 16, 32, 64] }
   pg_repeat_penalty_coef: { dist: uniform, low: 0.0, high: 20.0 }
-  pg_repeat_penalty_shape:{ dist: categorical, choices: [log, sqrt, linear] }
+  pg_repeat_penalty_shape: { dist: categorical, choices: [log, sqrt, linear] }
   gamma:                  { dist: uniform, low: 0.85, high: 0.99 }

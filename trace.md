@@ -389,3 +389,21 @@ Design choices:
 
 Wired the analysis dir into final_report.md (lists each artifact +
 one-line blurb) so users land there first and follow the breadcrumbs.
+
+### EARS — Progress (2026-06-04 17:36)
+<!-- concepts: yaml-syntax, hpo-config-templates -->
+HPO driver shipped and user is exercising it on the OOH server. DQN
+HPO run started working after the failure-surfacing patch (commit
+3dabca6 — stderr.log per seed + console warnings). Root cause of the
+original silent failures unclear since they self-resolved; suspect
+relative-path resolution in CWD that was different between manual
+rl-matdesign and the HPO subprocess but the user did not paste the
+stderr we'd need to confirm.
+
+A2C HPO run failed at YAML parse: `pg_repeat_penalty_shape:{...}` —
+no space between the key's colon and the inline-mapping brace. YAML
+requires whitespace there. Fixed in both ooh_a2c.yaml and
+oxides_sinter_a2c.yaml (only A2C templates had it; DQN templates do
+not use pg_repeat_penalty_shape). Lesson: when writing YAML inline
+maps by hand, always validate them by loading once with yaml.safe_load
+before committing.
