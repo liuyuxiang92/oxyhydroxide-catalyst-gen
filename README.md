@@ -4,7 +4,6 @@ Config-driven RL runner for materials composition discovery.
 Supports multiple material systems (OOH catalyst, HEA, perovskite, oxides) via YAML configs.
 Three RL algorithms: **DQN** (online, target-network), **REINFORCE**, and **A2C**.
 
-For the OOH-specific CLI-driven branch see `feat/classical-dqn`.
 
 ---
 
