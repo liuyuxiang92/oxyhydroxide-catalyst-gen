@@ -134,3 +134,65 @@ There is no test suite, linter configuration, or build step.
 - Iterative buffer schedule: `--iter-num-iters` controls rounds of collect→retrain; `--iter-online-eps-per-iter` overrides episodes per round; `--iter-train-epochs` overrides training epochs per round (defaults to `--dqn-epochs`).
 - PG methods are on-policy: each episode uses the current policy, no replay buffer. The `EpisodeStep.allowed_actions` field (populated by `env.step` before each transition) is used in `train_pg` to reconstruct the full action distribution for the log-probability computation.
 - Use `--pg-gen-stochastic` when the policy hasn't yet learned strong preferences; greedy argmax on a near-uniform policy will generate the same composition every episode.
+
+## Order invariance
+
+The framework's state and reward are **permutation-invariant over element choices** by construction. Picking elements in any order yields the same per-step state features (whenever the partial multisets match), the same Q / π estimates, and the same terminal reward.
+
+### What's guaranteed
+
+- **State at step k** is a function of `(partial Composition multiset, step counter)` — never of the trajectory's action order. Two episodes that have picked the same multiset of `(element, fraction)` pairs by step k get bit-identical (up to floating-point round-off) `state_material_features`.
+- **Action at step k** is `(elem_identity, fraction)` — the element label itself, not a positional slot. So `Q(s, "add Co at 0.2")` doesn't depend on whether Co is being added at step 2 or step 4 from the same partial bag.
+- **Terminal reward** is `predictor(terminal Composition)` — the predictor receives a `Composition` (unordered mapping), so the order in which the episode built the composition is invisible to the predictor.
+- **Generation dedup** in `generated.csv` collapses permutation-equivalent compositions to a single row via `env.terminal_comp_key()` (canonical sorted multiset).
+
+### Where invariance is enforced
+
+- `featurize_formula` (`src/rl_matdesign/featurization.py:43`) routes the partial-state string through `pymatgen.Composition`, which is an unordered element→amount mapping. All downstream Magpie features are statistics over that mapping (mean / std / sum / max) — operations that don't care about order.
+- `env.terminal_comp_key` (`env.py:258`, `env_integer.py:148`) canonicalizes the terminal composition to a sorted tuple for cross-episode dedup.
+
+### Predictor contract for FQN plug-ins
+
+A user-authored predictor (`predictor: pkg.module:ClassName` in YAML) **MUST** treat the input dict as an unordered mapping. Specifically:
+
+- Don't iterate `composition.items()` assuming a meaningful order (e.g. "the first key is the major cation"). Use `sorted(composition.items())` if you need a stable iteration order.
+- Don't extract `next(iter(composition))` and treat it as semantically distinguished.
+- If you build derived features, drive them off `sorted(composition.items())` or pass through `pymatgen.Composition` like the built-in predictors do.
+
+Violations are silent — the agent's value function fragments across orderings, training slows down, and generated.csv contains "duplicate" compositions that the predictor scored differently.
+
+### Test guardrail
+
+`tests/test_order_invariance.py` pins this property at three layers (featurizer, env, predictor contract). If you add a custom predictor or modify the featurizer, add a parametrized test there asserting `predict(composition_A) == predict(composition_B)` for two differently-ordered dicts with the same content. The existing `test_contract_example_predictor_is_order_invariant` and `test_contract_violation_is_detected` document the expected shape.
+
+### Sample-efficiency knob — `dqn_augment_permutations`
+
+YAML key: `dqn_augment_permutations: K` (CLI: `--dqn-augment-permutations K`, default `0`).
+
+When set on a DQN run, each completed episode is re-inserted into the replay buffer K additional times under random permutations of the action sequence. The terminal reward is reused (no extra predictor call), and within-episode duplicates are skipped. This gives DQN more `(state, action)` coverage per expensive lab call — useful when the predictor is the bottleneck (DeepMD ensembles, OOH overpotential) or when `cation_set` is large.
+
+**DQN only.** PG / A2C are on-policy: their gradient direction is tied to the action *actually sampled by the current policy*, so permuting trajectories breaks the policy-gradient theorem. The flag is silently ignored (with a one-line warning) for non-DQN methods.
+
+Validity rules: with `LastStepElementFilter.reserve_for_last=True` (sinter/calcine/OOH configs), only the first N-1 positions are permuted to keep the required element in the last slot. With `episode_style: fixed_order_amount`, augmentation is a no-op (cation order is forced by config).
+
+Recommended starting value: `K=3`. For N=5 with a fixed last position, up to 23 alternative permutations exist; the helper caps `K` at the available count and logs a warning if you set it higher.
+
+### Generation diversity caveat
+
+Even with a perfectly trained order-invariant Q-network, **greedy argmax decoding** deterministically picks the same first cation every episode — the symmetry says many starting elements would give the same value, but `argmax` arbitrarily picks one. The framework's existing mitigations:
+
+- DQN generation: `--gen-temperature 1.0` (default) fires Boltzmann sampling, which spreads mass across tied actions.
+- PG generation: pass `--pg-gen-stochastic` to sample from `π(a|s)` rather than argmax.
+- Generation dedup in `generated.csv` collapses any permutation-equivalent duplicates that slip through.
+
+If you see "all candidates start with the same element" in `generated.csv`, drop temperature toward 0 *only* if you've confirmed via `scripts/check_invariance.py` that the Q-network has actually learned the symmetry; otherwise raise temperature instead.
+
+### Diagnostic — `scripts/check_invariance.py`
+
+Standalone CLI that loads a config and (optionally) a trained checkpoint, samples random N-element multisets, and evaluates each under permutations to report the max delta in:
+
+- Featurizer output (should be 0 modulo float round-off — catches broken featurizers).
+- Predictor `predict()` mean / std (catches contract-violating user predictors).
+- Q-network outputs (catches custom architectures that inadvertently encode order).
+
+Usage: `python scripts/check_invariance.py --config configs/oxides_sinter.yaml --num-samples 20`. Pass `--qnet runs/<my-run>/qnet.pt` to also probe a trained checkpoint.

@@ -269,3 +269,58 @@ User asked whether two constraint filters could be used together. Current framew
 ### EARS — Progress (2026-06-03 11:06)
 <!-- concepts: testing, constraint-composition -->
 Following the `ChainConstraintFilter` implementation + sinter/calcine config edits, added `tests/test_chain.py` with 11 focused tests covering: registry short-name dispatch, two-child composition over real `LastStepElementFilter` instances (verifies (O, nonzero-digit) survival at the final step), explicit ordering proof via stub children where the second observes the first's output, two safety-fallback paths (any child emptying the action list → return pre-chain input), and four input-validation errors (empty `filters`, missing `filters`, non-list `filters`, non-dict child, child missing `constraint_filter:` key). Final test rounds-trips both shipped oxide YAMLs through the registry and asserts the resolved child types are `[LastStepElementFilter, SMACTChargeFilter]` — gated with `importorskip("smact")` so it skips cleanly on machines without the SMACT package. Style mirrors `test_phase_pattern.py` (in-function imports, local `_oh` helper, direct `filter_actions` calls with kwargs matching the env contract). Construction-time stubs use `__new__` + manual `.children` assignment to bypass the registry round-trip and isolate the safety-fallback / ordering behaviors. Tests not yet executed.
+
+## 2026-06-03 — Order-invariance contract + DQN trajectory-permutation augmentation
+
+### EARS — Progress (2026-06-03 19:18)
+<!-- concepts: reinforcement-learning, dqn, order-invariance, symmetry-augmentation -->
+Plan approved (`~/.claude/plans/synchronous-petting-liskov.md`): pin the existing
+order-invariance property of the framework via test + docs + DQN augmentation
+knob + diagnostic script.
+
+Discovery during planning: order-invariance is already structurally enforced —
+state = `(Magpie features of partial Composition, step counter)`; `featurize_formula`
+routes through `pymatgen.Composition` so element order is normalized away. No
+correctness fix needed. The plan adds *guardrails* (test) and a *sample-efficiency*
+knob (`dqn_augment_permutations: K` for DQN only — PG/A2C is on-policy so
+trajectory permutation breaks the log-prob attribution).
+
+Started Component 1: wrote `tests/test_order_invariance.py` covering featurizer
+(fractional + integer), CompositionEnv state-features-match-when-multisets-match,
+IntegerRatioEnv same, predictor contract via example + anti-pattern + real
+SinterCalcineRF check. Test asserts `state_material_features` are equal across
+permuted episodes at every step k where the partial multiset matches — NOT at
+indices where they don't (e.g., step 1 of Fe-first vs Ni-first paths differs by
+design).
+
+Key design choice in the augmentation helper (Component 2): re-drive the env via
+`env.step()` with a temporarily-swapped `env.reward_fn` rather than manually
+rebuilding state features. Keeps featurization, constraint filtering, and
+`allowed_actions` consistent with the production code path; only cost is the
+predictor swap and a deepcopy/initialize of env state. Validity rules detect
+`LastStepElementFilter.reserve_for_last=True` (including via `ChainConstraintFilter`)
+and keep last position fixed; `fixed_order_amount` short-circuits.
+
+Within-episode row deduplication added after walking through the duplicate-row
+pattern at late steps (when last position is fixed, the terminal row is identical
+across all permutations). Dedup is scoped to the current episode's augmentation
+pass — cross-episode coincidences are legitimate independent observations and
+bootstrapping needs them.
+
+### EARS — Progress (2026-06-03 19:45)
+<!-- concepts: reinforcement-learning, dqn, symmetry-augmentation -->
+Components 1 + 3 done (invariance test green; CLAUDE.md "Order invariance"
+section added). Augmentation helper (`_augment_episode_in_buffer` in
+training.py) wired up: `_detect_last_position_pin` walks ChainConstraintFilter
+children to find LastStepElementFilter.reserve_for_last and pins position N-1;
+fingerprint-based dedup uses np.round(s_mat_raw, 6) + s_step + a_elem_idx +
+a_comp_val + done; permutations are enumerated then random.shuffle()d and
+top-K taken. Re-drive wraps env.reward_fn = lambda _f: original_R inside
+try/finally so swap reverts even on exception. Threaded through CLI
+(`--dqn-augment-permutations K`) + YAML (`dqn_augment_permutations: K`)
+into `train_dqn_online(augment_permutations=K)`. Module-level
+_AUG_WARNED_* flags rate-limit no-op / capping warnings to once per run.
+Tolerance fix on test_order_invariance.py: assert_allclose with rtol=1e-10,
+atol=1e-12 instead of bit-exact assert_array_equal — matminer aggregations
+have benign FP round-off from operand reorder; the architectural invariance
+is "equal up to FP precision" which is what we now assert.

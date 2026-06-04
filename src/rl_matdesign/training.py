@@ -163,6 +163,208 @@ def add_episode_to_buffer(
         })
 
 
+def _row_fingerprint(row: dict) -> tuple:
+    """Hashable fingerprint of a buffer row, used for within-episode dedup."""
+    return (
+        tuple(np.round(row["s_mat_raw"], 6).tolist()),
+        tuple(row["s_step"].tolist()),
+        int(row["a_elem_idx"]),
+        float(row["a_comp_val"]),
+        bool(row["done"]),
+    )
+
+
+def _detect_last_position_pin(env) -> Optional[set]:
+    """If env.phase_filter pins certain elements at the terminal action,
+    return the set of pinned element symbols. Otherwise return None.
+
+    Walks ``ChainConstraintFilter.children`` so a filter nested inside a
+    chain is detected correctly.
+    """
+    from .constraints.last_step_element import LastStepElementFilter
+
+    if env.phase_filter is None:
+        return None
+
+    def _walk(f):
+        if isinstance(f, LastStepElementFilter):
+            if f.reserve_for_last:
+                return set(f.required_elements)
+            return None
+        if hasattr(f, "children"):
+            for child in f.children:
+                pinned = _walk(child)
+                if pinned is not None:
+                    return pinned
+        return None
+
+    return _walk(env.phase_filter)
+
+
+def _path_to_rows(path: list, fraction_set: List[str]) -> List[dict]:
+    """Convert an env.path into row dicts (matching add_episode_to_buffer)."""
+    rows: List[dict] = []
+    n = len(path)
+    for k, step in enumerate(path):
+        done = k == n - 1
+        next_step = path[k + 1] if not done else None
+        next_allowed_idx: List[Tuple[int, int]] = []
+        if not done:
+            for (elem_oh, comp_oh) in next_step.allowed_actions:
+                next_allowed_idx.append(
+                    (int(np.argmax(elem_oh)), int(np.argmax(comp_oh)))
+                )
+        rows.append({
+            "s_mat_raw":       np.asarray(step.state_material_features, dtype=float),
+            "s_step":          np.asarray(step.state_step_onehot, dtype=float),
+            "a_elem_idx":      int(np.argmax(step.action_elem_onehot)),
+            "a_comp_val":      float(fraction_set[int(np.argmax(step.action_comp_onehot))]),
+            "reward":          float(step.reward),
+            "s_mat_next_raw":  np.asarray(next_step.state_material_features, dtype=float)
+                               if not done else np.zeros(len(step.state_material_features), dtype=float),
+            "s_step_next":     np.asarray(next_step.state_step_onehot, dtype=float)
+                               if not done else np.zeros(len(step.state_step_onehot), dtype=float),
+            "next_allowed_idx": next_allowed_idx,
+            "done":            done,
+        })
+    return rows
+
+
+# Module-level guards so the "no alternatives possible" / "non-DQN method"
+# warnings fire only once per training run, not once per episode.
+_AUG_WARNED_NO_ALTS = False
+_AUG_WARNED_FIXED_ORDER = False
+
+
+def _augment_episode_in_buffer(
+    env,
+    original_path: list,
+    buffer: collections.deque,
+    elem_feats_scaled: np.ndarray,
+    fraction_set: List[str],
+    *,
+    K: int,
+) -> None:
+    """Insert *original_path* plus up to *K* permutation-augmented copies.
+
+    Always inserts the original first (preserving exact ``K=0`` behavior).
+    For each augmentation, re-drives the env with a permuted action sequence
+    using ``env.step``, which keeps featurization, allowed_actions, and the
+    constraint-filter outputs consistent with production code. The expensive
+    predictor call is avoided by temporarily swapping ``env.reward_fn`` for
+    a constant returning the original terminal reward.
+
+    Dedup is scoped to this episode's augmentation pass: rows whose
+    fingerprint already exists in the original or earlier-augmented rows
+    of *this* episode are skipped. Cross-episode coincidences are kept,
+    since they are legitimate independent observations.
+    """
+    global _AUG_WARNED_NO_ALTS, _AUG_WARNED_FIXED_ORDER
+
+    # Always insert the original path first (zero risk when K == 0).
+    add_episode_to_buffer(original_path, buffer, elem_feats_scaled, fraction_set)
+    if K <= 0:
+        return
+
+    # episode_style: 'fixed_order_amount' forces a single ordering — no permutation valid.
+    episode_style = getattr(env, "episode_style", None)
+    if episode_style == "fixed_order_amount":
+        if not _AUG_WARNED_FIXED_ORDER:
+            print(
+                "[WARN] dqn_augment_permutations is a no-op when "
+                "episode_style='fixed_order_amount' (element order is forced).",
+                flush=True,
+            )
+            _AUG_WARNED_FIXED_ORDER = True
+        return
+
+    N = len(original_path)
+    if N < 2:
+        return
+
+    # Detect whether a LastStepElementFilter pins the terminal action.
+    pinned_last_elements = _detect_last_position_pin(env)
+    if pinned_last_elements is not None:
+        permutable = list(range(N - 1))   # keep position N-1 fixed
+    else:
+        permutable = list(range(N))
+
+    import math
+    import itertools
+
+    if len(permutable) < 2:
+        if not _AUG_WARNED_NO_ALTS:
+            print(
+                f"[WARN] dqn_augment_permutations: only {math.factorial(len(permutable))} "
+                "permutation(s) of the permutable positions; augmentation is a no-op "
+                "for this episode shape.",
+                flush=True,
+            )
+            _AUG_WARNED_NO_ALTS = True
+        return
+
+    perm_count = math.factorial(len(permutable))
+    alternatives_count = perm_count - 1
+    if alternatives_count == 0:
+        return
+    num_to_sample = min(K, alternatives_count)
+    if K > alternatives_count and not _AUG_WARNED_NO_ALTS:
+        print(
+            f"[WARN] dqn_augment_permutations: requested K={K} but only "
+            f"{alternatives_count} alternative permutation(s) exist; using "
+            f"K={alternatives_count}.",
+            flush=True,
+        )
+        _AUG_WARNED_NO_ALTS = True
+
+    all_perms = list(itertools.permutations(permutable))
+    identity = tuple(permutable)
+    all_perms.remove(identity)
+    random.shuffle(all_perms)
+    chosen_perms = all_perms[:num_to_sample]
+
+    # Build the action sequence from original_path.
+    original_actions = [
+        (step.action_elem_onehot, step.action_comp_onehot)
+        for step in original_path
+    ]
+
+    # Build fingerprint set seeded with the original rows we just inserted.
+    seen_fingerprints: set = set()
+    for row in list(buffer)[-N:]:
+        seen_fingerprints.add(_row_fingerprint(row))
+
+    # Stash the original terminal reward and predictor.
+    original_R = float(original_path[-1].reward)
+    saved_reward_fn = env.reward_fn
+
+    try:
+        env.reward_fn = lambda _formula: original_R
+        for perm in chosen_perms:
+            if pinned_last_elements is not None:
+                permuted_actions = [original_actions[i] for i in perm] + [original_actions[-1]]
+            else:
+                permuted_actions = [original_actions[i] for i in perm]
+
+            env.initialize()
+            try:
+                for action in permuted_actions:
+                    env.step(action)
+            except (ValueError, RuntimeError) as _e:
+                # An ordering that the env rejects (e.g., a constraint we
+                # didn't anticipate): silently skip this augmentation.
+                continue
+
+            for row in _path_to_rows(env.path, fraction_set):
+                fp = _row_fingerprint(row)
+                if fp in seen_fingerprints:
+                    continue
+                seen_fingerprints.add(fp)
+                buffer.append(row)
+    finally:
+        env.reward_fn = saved_reward_fn
+
+
 def _compute_td_target(
     row: dict,
     target_net: torch.nn.Module,
@@ -259,6 +461,7 @@ def train_dqn_online(
     loss_name: str = "smoothl1",
     checkpoint_cfg: Optional[dict] = None,
     resume_state: Optional[dict] = None,
+    augment_permutations: int = 0,
 ) -> Tuple[torch.nn.Module, StandardScaler, List[dict]]:
     """Classical online DQN with FIFO replay buffer and TD targets.
 
@@ -307,11 +510,24 @@ def train_dqn_online(
     else:
         buffer: collections.deque = collections.deque(maxlen=dqn_buffer_size)
 
-        print(f"[INFO] DQN warmup: {n_warmup_eps} random episodes with real rewards...")
+        if augment_permutations > 0:
+            print(
+                f"[INFO] DQN warmup: {n_warmup_eps} random episodes with real rewards "
+                f"(K={augment_permutations} permutation augmentations per episode)...",
+                flush=True,
+            )
+        else:
+            print(f"[INFO] DQN warmup: {n_warmup_eps} random episodes with real rewards...")
         pbar = tqdm(total=n_warmup_eps, desc="DQN warmup")
         for _ in range(n_warmup_eps):
             _rollout_random_episode(env)
-            add_episode_to_buffer(env.path, buffer, elem_feats_scaled, fraction_set)
+            if augment_permutations > 0:
+                _augment_episode_in_buffer(
+                    env, env.path, buffer, elem_feats_scaled, fraction_set,
+                    K=augment_permutations,
+                )
+            else:
+                add_episode_to_buffer(env.path, buffer, elem_feats_scaled, fraction_set)
             pbar.update(1)
         pbar.close()
 
@@ -376,7 +592,13 @@ def train_dqn_online(
             env.step(_a)
 
         episode_reward = float(env.path[-1].reward)
-        add_episode_to_buffer(env.path, buffer, elem_feats_scaled, fraction_set)
+        if augment_permutations > 0:
+            _augment_episode_in_buffer(
+                env, env.path, buffer, elem_feats_scaled, fraction_set,
+                K=augment_permutations,
+            )
+        else:
+            add_episode_to_buffer(env.path, buffer, elem_feats_scaled, fraction_set)
 
         # 2. Gradient steps.
         mean_loss = float("nan")

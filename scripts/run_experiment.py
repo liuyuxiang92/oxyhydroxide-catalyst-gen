@@ -95,6 +95,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dqn-loss", choices=["mse", "smoothl1"], default=None,
                    dest="dqn_loss",
                    help="Loss function for DQN training (default: from config or smoothl1).")
+    p.add_argument("--dqn-augment-permutations", type=int, default=None, metavar="K",
+                   dest="dqn_augment_permutations",
+                   help="DQN-only: insert K permutation-augmented copies of each completed "
+                        "episode into the replay buffer (terminal reward is reused — no extra "
+                        "predictor calls). Within-episode duplicate rows are skipped. Ignored "
+                        "with a warning for REINFORCE/A2C (on-policy methods can't use "
+                        "permuted trajectories). Default 0 (off). Overrides config "
+                        "'dqn_augment_permutations'.")
     p.add_argument("--max-gen-attempts", type=int, default=None,
                    dest="max_gen_attempts",
                    help="Max generation attempts before stopping. Default: 10 × num_gen_eps.")
@@ -272,6 +280,18 @@ def main() -> None:
     gen_top_frac    = float(cfg.get("gen_top_frac", 0.0))
     gen_epsilon_gen = float(cfg.get("gen_epsilon", 0.0))
 
+    # Warn-and-ignore: augmentation only makes sense for off-policy DQN.
+    _aug_K_request = args.dqn_augment_permutations
+    if _aug_K_request is None:
+        _aug_K_request = int(cfg.get("dqn_augment_permutations", 0))
+    if method != "dqn" and int(_aug_K_request) > 0:
+        print(
+            f"[WARN] dqn_augment_permutations={_aug_K_request} is ignored for "
+            f"method={method!r}: PG/A2C are on-policy and permuted trajectories "
+            "break the log-prob attribution.",
+            flush=True,
+        )
+
     # ------------------------------------------------------------------
     # DQN path — classical online DQN
     # ------------------------------------------------------------------
@@ -404,6 +424,9 @@ def main() -> None:
                     checkpoint_cfg["dp_cache"] = _pcache
 
             _dqn_loss = args.dqn_loss or cfg.get("dqn_loss", "smoothl1")
+            _aug_K = args.dqn_augment_permutations
+            if _aug_K is None:
+                _aug_K = int(cfg.get("dqn_augment_permutations", 0))
             qnet, scaler, train_rows = train_dqn_online(
                 env=env,
                 elem_feats_scaled=elem_feats_scaled,
@@ -423,6 +446,7 @@ def main() -> None:
                 loss_name=_dqn_loss,
                 checkpoint_cfg=checkpoint_cfg,
                 resume_state=resume_state,
+                augment_permutations=_aug_K,
             )
             for r in train_rows:
                 metrics.log(**r)
