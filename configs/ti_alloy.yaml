@@ -1,29 +1,37 @@
-# Tier-1 example: titanium alloy with per-element composition bounds.
+# Ti-alloy run template.
 #
-# This is the use case described by the user: 11 elements, sum=100, step=1.
-# Allowed range per element:
-#   45-90 Ti, 0-25 Al, 0-10 V, 0-5 Cr, 0-5 Fe, 5-45 Zr,
-#   0-20 Nb, 0-10 Mo, 0-5 Sn, 0-10 Hf, 0-5 Ta
+# Episode definition:
+#   - 11 distinct cations picked over 11 steps, no duplicates.
+#   - At each step the agent chooses BOTH which element to add and what
+#     fraction to assign it (episode_style: element_then_amount, the default).
+#   - Order is NOT fixed — the agent learns its own ordering. Because reward
+#     and state are permutation-invariant over the partial multiset (see
+#     CLAUDE.md "Order invariance"), all 11! orderings collapse to the same
+#     value; the only meaningful freedom is the choice of fractions.
 #
-# The user supplies only this YAML, a base POSCAR (with placeholder 'X' sites),
-# and one or more DeepMD model files. No Python is required:
-#  - `predictor: dp_structure` resolves to the built-in DPStructurePredictor.
-#  - `episode_style: fixed_order_amount` makes each step pick an amount only;
-#    the element at step k is `cation_set[k]`.
-#  - `element_bounds` clamps each per-step amount to the allowed range.
-#  - The final step's amount is forced to satisfy sum=100.
+# Fractions are drawn from `fraction_set` and must sum to exactly 1.00 (the
+# env's feasibility table enforces this at every step).
 #
 # Run:
 #   python scripts/run_experiment.py \
 #       --config configs/ti_alloy.yaml \
-#       --out runs/ti_a2c_seed0 \
-#       --dp-seed 0
+#       --out runs/ti_alloy_a2c_seed0 \
+#       --dp-seed 0 --train-seed 0 --gen-seed 0 \
+#       --save-checkpoint-freq 50
+#
+# Known gap: the original Ti-alloy spec also imposes per-element ranges
+# (45-90 Ti, 0-25 Al, 0-10 V, 0-5 Cr, 0-5 Fe, 5-45 Zr, 0-20 Nb, 0-10 Mo,
+#  0-5 Sn, 0-10 Hf, 0-5 Ta). The current env only honors `element_bounds`
+# in `fixed_order_amount` mode, so those bounds are NOT enforced here.
+# If you need them, either (a) switch back to `episode_style: fixed_order_amount`
+# with a fixed cation order, or (b) extend the env's action filter to mask
+# fractions per element under `element_then_amount`.
 
 
 # ---- Environment ----
 cation_set: [Ti, Al, V, Cr, Fe, Zr, Nb, Mo, Sn, Hf, Ta]
 fraction_set:
-  # 0.00 to 1.00 in 0.01 steps (matches step=1% per element).
+  # 0.00 to 0.90 in 0.01 steps (matches step=1% per element).
   ["0.00","0.01","0.02","0.03","0.04","0.05","0.06","0.07","0.08","0.09",
    "0.10","0.11","0.12","0.13","0.14","0.15","0.16","0.17","0.18","0.19",
    "0.20","0.21","0.22","0.23","0.24","0.25","0.26","0.27","0.28","0.29",
@@ -35,59 +43,53 @@ fraction_set:
    "0.80","0.81","0.82","0.83","0.84","0.85","0.86","0.87","0.88","0.89","0.90"]
 total_units: 100               # step size = 1/100 = 0.01
 anion_formula: ""
-n_components: 11               # = len(cation_set), forced by fixed_order_amount
-episode_style: fixed_order_amount
+n_components: 11               # use all 11 cations, one per step, no duplicates
+episode_style: element_then_amount
 
-element_bounds:
-  Ti: [0.45, 0.90]
-  Al: [0.00, 0.25]
-  V:  [0.00, 0.10]
-  Cr: [0.00, 0.05]
-  Fe: [0.00, 0.05]
-  Zr: [0.05, 0.45]
-  Nb: [0.00, 0.20]
-  Mo: [0.00, 0.10]
-  Sn: [0.00, 0.05]
-  Hf: [0.00, 0.10]
-  Ta: [0.00, 0.05]
+constraint_filter: null
 
-constraint_filter: null        # per-element bounds handle the rules
-
-# ---- Predictor (replace paths with your own) ----
+# =====================================================================
+# REQUIRED USER EDITS — fill these in before running on the GPU machine
+# =====================================================================
 predictor: dp_structure
-base_poscar: data/ti_alloy/FCC.POSCAR      # placeholder 'X' on substitution sites
-dp_models:
-  - models/ti/m1.pt
-  - models/ti/m2.pt
+base_poscar: /ABS/PATH/TO/your_ti_alloy.POSCAR      # placeholder 'X' sites
 site_symbol: X
+dp_models:
+  - /ABS/PATH/TO/ti_dp_model_1.pt
+  - /ABS/PATH/TO/ti_dp_model_2.pt
+  - /ABS/PATH/TO/ti_dp_model_3.pt
+  - /ABS/PATH/TO/ti_dp_model_4.pt
+  - /ABS/PATH/TO/ti_dp_model_5.pt
 # dp_head: Omat24              # required for multi-task DP checkpoints; omit for single-task
-objective: mean_minus_kstd     # reward = -mean - k*std (exploit)
+
+n_random_configs: 5            # random site assignments to average per composition
+energy_per_atom: true          # normalize each evaluation by atom count
+objective: mean_minus_kstd     # reward = -mean - k*std (exploit); use mean_plus_kstd for explore
 k: 1.0
-n_random_configs: 5
-energy_per_atom: true
+# =====================================================================
 
 # ---- RL method ----
-method: a2c
+method: a2c                    # CLI --method overrides this
 
-# ---- Policy-gradient hyperparameters ----
-pg_warmup_eps: 200
-pg_num_iters: 500
-pg_batch_eps: 16
+# ---- Policy-gradient hyperparameters (used by reinforce / a2c) ----
+pg_warmup_eps: 200             # random episodes to fit the StandardScaler
+pg_num_iters: 500              # outer training iterations
+pg_batch_eps: 16               # episodes per batch (one optimizer step per batch)
 pg_lr_actor: 0.001
 pg_lr_critic: 0.001
-pg_entropy_coef: 0.05
-pg_repeat_penalty_coef: 1.0
+pg_entropy_coef: 0.05          # entropy bonus weight
+pg_repeat_penalty_coef: 1.0    # penalize revisiting same composition (log schedule)
 pg_repeat_penalty_shape: log
 gamma: 0.95
 
 # ---- Generation ----
-num_gen_eps: 200
+num_gen_eps: 200               # unique compositions to generate after training
 exploration_gen_eps: 0
 gen_temperature: 1.0
 gen_top_frac: 0.0
 gen_epsilon: 0.0
 
-# ---- DQN-specific (unused for a2c; kept for completeness) ----
+# ---- DQN-specific (unused for a2c; populated so --method dqn also works) ----
 dqn_lr: 0.001
 dqn_batch_size: 256
 dqn_warmup_eps: 500
@@ -97,3 +99,4 @@ dqn_grad_steps_per_ep: 5
 dqn_target_update_freq: 100
 dqn_eps_anneal_eps: 10000
 dqn_eps_min: 0.05
+dqn_augment_permutations: 0    # set to 3+ for trajectory-permutation augmentation (DQN only)

@@ -324,3 +324,24 @@ Tolerance fix on test_order_invariance.py: assert_allclose with rtol=1e-10,
 atol=1e-12 instead of bit-exact assert_array_equal — matminer aggregations
 have benign FP round-off from operand reorder; the architectural invariance
 is "equal up to FP precision" which is what we now assert.
+
+### EARS — Progress (2026-06-04 11:29)
+<!-- concepts: env-episode-style, yaml-config-hygiene -->
+Consolidated three ti_alloy configs (`ti_alloy.yaml`, `ti_alloy_user.yaml`,
+`ti_alloy_multi.yaml`) into a single `ti_alloy.yaml`. User clarified the
+intended setup: 11 distinct cations over 11 steps, no duplicates, agent
+chooses both element and fraction at each step — i.e. `episode_style:
+element_then_amount` with `n_components: 11`, not `fixed_order_amount`.
+
+Discovery / gap: `env.py:147-153` rejects `element_bounds` when
+`episode_style == "element_then_amount"` ("element_bounds is currently
+only supported with fixed_order_amount"). The user's original Ti-alloy
+spec includes per-element ranges (45-90 Ti, 0-25 Al, ...), so switching
+to element_then_amount drops those bounds. Documented as a known gap in
+the new YAML header with two workarounds (fixed_order_amount, or extend
+the action filter). No code change yet — flagged for follow-up only.
+
+Deleted the redundant `ti_alloy_user.yaml` and `ti_alloy_multi.yaml`;
+the multi-objective composite example can be revived later as a
+separate file if needed (it was an orthogonal predictor demo, not
+specific to Ti).
