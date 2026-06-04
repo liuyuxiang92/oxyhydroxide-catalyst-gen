@@ -232,3 +232,17 @@ Templates ship for `ooh_dqn`, `ooh_a2c`, `oxides_sinter_dqn`, `oxides_sinter_a2c
 ### Seeds and reproducibility
 
 Each "seed" of a trial passes three decorrelated integers to `run_experiment.py`: `--train-seed i`, `--dp-seed i+10_000`, `--gen-seed i+20_000`. This decouples the training RNG, predictor random-config sampling, and generation sampling, giving a cleaner variance signal than passing the same int three times.
+
+### Analysis outputs
+
+After stage 1 finishes the driver writes `<out>/analysis/` (best-effort, all failures are soft warnings):
+
+- `param_importances.csv` — fANOVA-style importance score per hyperparameter (higher = matters more).
+- `param_importances.png` — bar chart of the above.
+- `optimization_history.png` — score per trial; flat line = the search isn't improving (widen the space or raise n_trials).
+- `parallel_coordinate.png` — trial trajectories through the search space; useful for spotting clusters.
+- `slice.png` — per-param score scatter; the clearest way to see *which* knob is driving the score.
+
+Pass `--no-plots` to skip PNG generation (CSV still written). Requires `matplotlib`; importance/plots silently skip with a warning if you have <2 completed trials or the score surface is flat (e.g. constant predictor).
+
+For deeper analysis, the SQLite study is just `optuna.load_study(study_name=..., storage="sqlite:///<out>/study.db")` away — every Optuna analysis API works against it.

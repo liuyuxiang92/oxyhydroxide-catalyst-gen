@@ -392,8 +392,90 @@ def _write_final_report(
     warn = _stage1_variance_warning(stage1_study, hpo_cfg["stage2"]["n_top_to_confirm"])
     if warn:
         lines.append(f"\n> **Note**: {warn}\n")
+
+    analysis_dir = os.path.join(out_root, "analysis")
+    if os.path.isdir(analysis_dir) and os.listdir(analysis_dir):
+        lines.append("\n## Analysis artifacts\n")
+        lines.append(f"See `{os.path.relpath(analysis_dir, out_root)}/`:")
+        for name, blurb in (
+            ("param_importances.csv", "fANOVA-style importance per hyperparameter (higher = matters more)"),
+            ("param_importances.png", "bar chart of the above"),
+            ("optimization_history.png", "per-trial score; sanity-check that the search actually improved"),
+            ("parallel_coordinate.png", "trial trajectories through the search space; spot clusters"),
+            ("slice.png", "per-param score scatter; spot which knobs drive the score"),
+        ):
+            p = os.path.join(analysis_dir, name)
+            if os.path.exists(p):
+                lines.append(f"- `{name}` — {blurb}")
     with open(report_path, "w") as f:
         f.write("\n".join(lines) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Analysis outputs: param importances + matplotlib plots
+# ---------------------------------------------------------------------------
+
+
+def _write_analysis_outputs(
+    *,
+    study: optuna.Study,
+    out_root: str,
+    do_plots: bool,
+) -> None:
+    """Best-effort: write param_importances.csv and matplotlib PNGs to <out>/analysis/.
+
+    All failures are logged as warnings — analysis is decorative; a failure
+    here must not kill the HPO run.
+    """
+    completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    if len(completed) < 2:
+        log.warning("analysis: need >=2 completed trials for importances/plots, have %d; skipping",
+                    len(completed))
+        return
+
+    analysis_dir = os.path.join(out_root, "analysis")
+    os.makedirs(analysis_dir, exist_ok=True)
+
+    try:
+        importances = optuna.importance.get_param_importances(study)
+        with open(os.path.join(analysis_dir, "param_importances.csv"), "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["param", "importance"])
+            for k, v in importances.items():
+                w.writerow([k, v])
+        log.info("analysis: wrote param_importances.csv (%d params)", len(importances))
+    except Exception as e:
+        log.warning("analysis: param importances failed: %s", e)
+
+    if not do_plots:
+        return
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from optuna.visualization import matplotlib as ovm
+    except ImportError as e:
+        log.warning("analysis: matplotlib not installed; skipping PNG plots (%s)", e)
+        return
+
+    def _save(fig_or_ax, name):
+        fig = fig_or_ax.figure if hasattr(fig_or_ax, "figure") else fig_or_ax[0].figure
+        fig.tight_layout()
+        fig.savefig(os.path.join(analysis_dir, name), dpi=120, bbox_inches="tight")
+        plt.close(fig)
+
+    for plot_name, fn in [
+        ("param_importances.png", ovm.plot_param_importances),
+        ("optimization_history.png", ovm.plot_optimization_history),
+        ("parallel_coordinate.png", ovm.plot_parallel_coordinate),
+        ("slice.png", ovm.plot_slice),
+    ]:
+        try:
+            _save(fn(study), plot_name)
+            log.info("analysis: wrote %s", plot_name)
+        except Exception as e:
+            log.warning("analysis: %s failed: %s", plot_name, e)
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +611,9 @@ def parse_args() -> argparse.Namespace:
                    help="Per-trial subprocess timeout in seconds. None = no timeout.")
     p.add_argument("--skip-stage2", action="store_true",
                    help="Run only stage 1, then exit. Useful for iterating on the search space.")
+    p.add_argument("--no-plots", action="store_true",
+                   help="Skip matplotlib PNG generation in <out>/analysis/ "
+                        "(param_importances.csv is still written).")
     return p.parse_args()
 
 
@@ -593,6 +678,10 @@ def main() -> None:
             log.warning(warn)
         state["stage1_done"] = True
         _write_state(out_root, state)
+
+    # Analysis (param importances + PNGs) runs against the stage-1 study;
+    # safe to call whether or not we're about to do stage 2.
+    _write_analysis_outputs(study=study, out_root=out_root, do_plots=not args.no_plots)
 
     if args.skip_stage2:
         log.info("stage 1 done; --skip-stage2 set, exiting")

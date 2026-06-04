@@ -369,3 +369,23 @@ Key design points landed during Plan-agent critique:
 
 Currently working on: `src/rl_matdesign/hpo/` helper module
 (search_space.py, metric.py, runner.py) so the driver stays thin.
+
+### EARS — Progress (2026-06-04 14:39)
+<!-- concepts: hpo-analysis, optuna-visualization, matplotlib-backend -->
+Extending scripts/hpo.py with auto-generated analysis artifacts. The
+driver already picks rank-1 in final_report.md, but users asked for
+"what mattered?" diagnostics. Adding `_write_analysis_outputs`:
+- param_importances.csv (fANOVA via optuna.importance.get_param_importances)
+- 4 PNGs via optuna.visualization.matplotlib (importance bar, opt
+  history, parallel coord, slice plot)
+
+Design choices:
+- matplotlib backend over plotly: no kaleido dep, plt.savefig is
+  enough. matplotlib already transitively in (matminer/pandas).
+- All failures soft (try/except → log.warn). Analysis is decorative;
+  HPO run must not die on a viz error.
+- Skip when <2 completed trials (importance solver needs at least 2).
+- `--no-plots` opt-out for headless/quick iterations.
+
+Wired the analysis dir into final_report.md (lists each artifact +
+one-line blurb) so users land there first and follow the breadcrumbs.
