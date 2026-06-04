@@ -217,15 +217,34 @@ def _run_one_seed(
         if gid is not None and gpu_pool is not None:
             gpu_pool.put(gid)
 
+    # Always persist subprocess tails so failures are debuggable after the run.
+    try:
+        with open(os.path.join(seed_out, "stdout.log"), "w") as f:
+            f.write(result.stdout_tail)
+        with open(os.path.join(seed_out, "stderr.log"), "w") as f:
+            f.write(result.stderr_tail)
+    except OSError:
+        pass  # never let log-writing kill a trial
+
     if result.returncode != 0:
+        # Log to console too — otherwise Optuna's `catch=` swallows the message
+        # and the user only sees "0 completed trials" at the end.
+        log.warning(
+            "trial subprocess failed (rc=%d) in %s; stderr tail:\n%s",
+            result.returncode, seed_out, result.stderr_tail[-1500:] or "<empty>",
+        )
         raise TrialRunError(
             f"run_experiment exited with code {result.returncode}; "
-            f"stderr tail:\n{result.stderr_tail}"
+            f"see {seed_out}/stderr.log"
         )
     if not os.path.exists(result.generated_csv):
+        log.error(
+            "run_experiment exited 0 but %s is missing; stderr tail:\n%s",
+            result.generated_csv, result.stderr_tail[-1500:] or "<empty>",
+        )
         raise RuntimeError(
             f"run_experiment exited 0 but {result.generated_csv} is missing; "
-            f"stderr tail:\n{result.stderr_tail}"
+            f"see {seed_out}/stderr.log"
         )
     return top_k_mean_from_csv(result.generated_csv, k=int(_METRIC_K))
 
@@ -673,6 +692,22 @@ def main() -> None:
             raise
 
         _write_stage_summary(study, os.path.join(out_root, "stage1_summary.csv"))
+        # Surface stage-1 outcome counts so a "0 completed" run is loud, not silent.
+        n_complete = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+        n_fail = len([t for t in study.trials if t.state == optuna.trial.TrialState.FAIL])
+        log.info("stage 1 done: %d completed, %d failed (out of %d total trials)",
+                 n_complete, n_fail, len(study.trials))
+        if n_complete == 0 and n_fail > 0:
+            sample_dir = os.path.join(out_root, "stage1", "trial_0000", "seed_0")
+            log.error(
+                "all %d stage-1 trials failed. Reproduce one manually to see the error:\n"
+                "    python scripts/run_experiment.py \\\n"
+                "        --config %s/stage1/trial_0000/config.yaml \\\n"
+                "        --method %s --out /tmp/repro \\\n"
+                "        --train-seed 0 --dp-seed 10000 --gen-seed 20000\n"
+                "Or read %s/stderr.log directly.",
+                n_fail, out_root, hpo_cfg["method"], sample_dir,
+            )
         warn = _stage1_variance_warning(study, hpo_cfg["stage2"]["n_top_to_confirm"])
         if warn:
             log.warning(warn)
