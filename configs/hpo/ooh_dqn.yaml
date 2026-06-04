@@ -1,0 +1,58 @@
+# HPO search-space template — OOH catalyst, DQN.
+#
+# Two-stage protocol:
+#   Stage 1: 30 trials at 25% training budget, 1 seed each (cheap screen).
+#   Stage 2: top 3 trials re-run at full base-config budget, 3 seeds each.
+#
+# Total compute ≈ (30 × 0.25 + 3 × 3) = 16.5 full-budget runs.
+#
+# Run:
+#   python scripts/hpo.py \
+#       --hpo-config configs/hpo/ooh_dqn.yaml \
+#       --out runs/hpo/ooh_dqn_v1
+#   # optional: --gpu-ids 0 1 2 3   (round-robin across 4 GPUs when n_parallel_trials > 1)
+
+base_config: ../ooh_dqn.yaml          # resolved relative to this file
+study_name: ooh_dqn_search_v1
+method: dqn
+
+metric:
+  kind: top_k_mean
+  k: 10
+
+optuna:
+  seed: 42                            # TPE sampler seed (reproducible proposals)
+
+stage1:
+  n_trials: 30
+  n_parallel_trials: 1                # raise + pass --gpu-ids on multi-GPU box
+  seeds_per_trial: 1                  # cheap screen — single seed per config
+  budget_scaling:
+    # Training-budget knobs scaled to 25% of base config for the screen.
+    dqn_num_train_eps: 0.25
+    dqn_warmup_eps: 0.25
+    dqn_eps_anneal_eps: 0.25
+    # num_gen_eps is NOT scaled (metric variance ~ 1/sqrt(n_gen)).
+
+stage2:
+  n_top_to_confirm: 3                 # re-run top-3 stage-1 configs at full budget
+  seeds_per_trial: 3
+
+# Knobs we deliberately freeze (not searched). Anything set here overrides
+# the base config's value for every trial.
+fixed_overrides:
+  dqn_loss: smoothl1
+  dqn_augment_permutations: 3         # cheap order-symmetry augmentation
+  dqn_buffer_size: 50000
+
+# The actual search space.
+search_space:
+  dqn_lr:                 { dist: loguniform, low: 1.0e-4, high: 5.0e-3 }
+  dqn_batch_size:         { dist: categorical, choices: [32, 64, 128, 256] }
+  dqn_grad_steps_per_ep:  { dist: int, low: 1, high: 8 }
+  dqn_target_update_freq: { dist: categorical, choices: [10, 50, 100, 200, 500] }
+  dqn_hidden_dim:         { dist: categorical, choices: [128, 256, 512] }
+  dqn_eps_min:            { dist: uniform, low: 0.01, high: 0.20 }
+  # Anneal as a fraction of train eps so it scales with budget.
+  dqn_eps_anneal_eps:     { dist: frac_of, base: dqn_num_train_eps, low: 0.3, high: 0.8 }
+  gamma:                  { dist: uniform, low: 0.85, high: 0.99 }

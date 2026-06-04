@@ -1,0 +1,43 @@
+# HPO search-space template — oxide sintering, DQN.
+#
+# Cheaper per-trial than OOH (no DeepMD ensemble), so feel free to raise
+# n_trials / seeds_per_trial.
+
+base_config: ../oxides_sinter.yaml
+study_name: oxides_sinter_dqn_search_v1
+method: dqn
+
+metric:
+  kind: top_k_mean
+  k: 10
+
+optuna:
+  seed: 42
+
+stage1:
+  n_trials: 40
+  n_parallel_trials: 1
+  seeds_per_trial: 2
+  budget_scaling:
+    dqn_num_train_eps: 0.3
+    dqn_warmup_eps: 0.3
+    dqn_eps_anneal_eps: 0.3
+
+stage2:
+  n_top_to_confirm: 3
+  seeds_per_trial: 3
+
+fixed_overrides:
+  dqn_loss: smoothl1
+  dqn_augment_permutations: 3
+  dqn_buffer_size: 50000
+
+search_space:
+  dqn_lr:                 { dist: loguniform, low: 1.0e-4, high: 5.0e-3 }
+  dqn_batch_size:         { dist: categorical, choices: [32, 64, 128, 256] }
+  dqn_grad_steps_per_ep:  { dist: int, low: 1, high: 8 }
+  dqn_target_update_freq: { dist: categorical, choices: [10, 50, 100, 200, 500] }
+  dqn_hidden_dim:         { dist: categorical, choices: [128, 256, 512] }
+  dqn_eps_min:            { dist: uniform, low: 0.01, high: 0.20 }
+  dqn_eps_anneal_eps:     { dist: frac_of, base: dqn_num_train_eps, low: 0.3, high: 0.8 }
+  gamma:                  { dist: uniform, low: 0.85, high: 0.99 }

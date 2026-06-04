@@ -196,3 +196,39 @@ Standalone CLI that loads a config and (optionally) a trained checkpoint, sample
 - Q-network outputs (catches custom architectures that inadvertently encode order).
 
 Usage: `python scripts/check_invariance.py --config configs/oxides_sinter.yaml --num-samples 20`. Pass `--qnet runs/<my-run>/qnet.pt` to also probe a trained checkpoint.
+
+## Hyperparameter optimization
+
+`scripts/hpo.py` is a generic Optuna-based HPO driver that works for any scenario (`configs/ooh.yaml`, `oxides_sinter.yaml`, `ti_alloy.yaml`, `hea.yaml`, etc.) and any method (`dqn`, `reinforce`, `a2c`) without driver edits — you only write a search-space YAML in `configs/hpo/`.
+
+### Quick start
+
+```bash
+pip install "optuna>=3.0"
+python scripts/hpo.py \
+    --hpo-config configs/hpo/ooh_dqn.yaml \
+    --out runs/hpo/ooh_dqn_v1
+```
+
+Templates ship for `ooh_dqn`, `ooh_a2c`, `oxides_sinter_dqn`, `oxides_sinter_a2c`. Copy + edit the `base_config:` and `search_space:` keys for any other scenario.
+
+### What it does
+
+1. **Stage 1 (cheap screen)**: runs `n_trials` trials (default 30) at reduced training budget (default 25%); each trial averages over `seeds_per_trial` independent seeds. The objective is the top-K mean of `reward` in `generated.csv` (default K=10). `num_gen_eps` is **not** scaled — metric variance is ~1/√n_gen, and shrinking generation makes scores noisier without much cost saving.
+2. **Stage 2 (confirm)**: re-runs the top `n_top_to_confirm` trials (default 3) at full base-config budget with `seeds_per_trial_stage2` seeds (default 3).
+3. **Final report**: `<out>/final_report.md` shows the rank-1 config + a copy-paste reproduction command.
+
+### State / resume
+
+- Optuna SQLite study at `<out>/study.db`. Relaunching against the same `--out` resumes from the last completed trial.
+- Stage 1 → 2 progression tracked via `<out>/state.json`.
+- `--skip-stage2` ends the run after stage 1 (useful while iterating on the search space).
+- Crashed subprocess trials are marked `FAIL` and excluded from the surrogate — TPE handles `FAIL` gracefully (don't return `-inf`; that poisons the model).
+
+### Parallelism
+
+`stage1.n_parallel_trials > 1` enables Optuna's threading-mode `n_jobs`. For multi-GPU, pass `--gpu-ids 0 1 2 3` — the driver round-robins `CUDA_VISIBLE_DEVICES` across the trial workers. Alternative: run one driver per GPU with the same `study_name` (SQLite handles concurrent writes).
+
+### Seeds and reproducibility
+
+Each "seed" of a trial passes three decorrelated integers to `run_experiment.py`: `--train-seed i`, `--dp-seed i+10_000`, `--gen-seed i+20_000`. This decouples the training RNG, predictor random-config sampling, and generation sampling, giving a cleaner variance signal than passing the same int three times.

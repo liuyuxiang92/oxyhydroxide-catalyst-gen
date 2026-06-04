@@ -345,3 +345,27 @@ Deleted the redundant `ti_alloy_user.yaml` and `ti_alloy_multi.yaml`;
 the multi-objective composite example can be revived later as a
 separate file if needed (it was an orthogonal predictor demo, not
 specific to Ti).
+
+### EARS — Progress (2026-06-04 13:44)
+<!-- concepts: hpo-driver, optuna-tpe, two-stage-hpo -->
+Started implementing generic Optuna-based HPO driver (plan at
+~/.claude/plans/synchronous-petting-liskov.md). Design lands on a
+standalone `scripts/hpo.py` that consumes an HPO search-space YAML
+(separate from the scenario config), spawns `run_experiment.py` as a
+subprocess per (trial × seed), and computes top-K-mean of the reward
+column in `generated.csv` as the Optuna objective. Two-stage protocol:
+cheap screen at 25% of training budget × N trials, then full-budget
+confirm of top-3 with more seeds.
+
+Key design points landed during Plan-agent critique:
+- Don't scale `num_gen_eps` in stage 1 — metric variance is ~1/√n_gen,
+  so shrinking generation makes scores noisier without much cost saving.
+- Decorrelate the three seeds (train=i, dp=i+10_000, gen=i+20_000)
+  rather than passing the same int 3×.
+- Subprocess (not in-process) because TF/PT/matminer global caches
+  would leak across trials in one process.
+- Optuna SQLite study → free resume across driver restarts.
+- FAIL crashed trials (don't return -inf — would poison TPE surrogate).
+
+Currently working on: `src/rl_matdesign/hpo/` helper module
+(search_space.py, metric.py, runner.py) so the driver stays thin.

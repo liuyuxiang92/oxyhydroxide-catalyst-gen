@@ -7,6 +7,9 @@ pymatgen
 matminer
 pandas
 
+# Optional for hyperparameter optimization (scripts/hpo.py):
+optuna>=3.0
+
 # Optional for DeepMD mode:
 # ase
 # deepmd-kit
