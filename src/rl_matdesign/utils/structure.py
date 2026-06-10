@@ -31,6 +31,62 @@ import numpy as np
 # Layer 1: substitution engine
 # ---------------------------------------------------------------------------
 
+def resolve_region(
+    atoms_or_symbols: Union["ase.Atoms", Sequence[str]],
+    spec: Union[str, Dict[str, Any]],
+) -> List[int]:
+    """Resolve a declarative site-selection *spec* to concrete atom indices.
+
+    A general, scenario-agnostic selector so eligible regions (e.g. "the last
+    1000 S sites") live in config rather than hardcoded Python.
+
+    Supported specs::
+
+        "S"                                       # all S sites
+        {"symbol": "S"}                           # all S sites
+        {"symbol": "S", "take": "last", "count": 1000}   # last 1000 S (by index)
+        {"symbol": "S", "take": "first", "count": 2000}
+        {"symbol": "S", "index_range": [3500, 4500]}     # S sites with global index in [a, b)
+        {"indices": [...]}                        # explicit global indices
+
+    ``take``/``index_range`` operate on the symbol-matched indices in ascending
+    global-index order, so they are robust to where the element block sits in
+    the POSCAR.
+    """
+    symbols = (
+        list(atoms_or_symbols.get_chemical_symbols())
+        if hasattr(atoms_or_symbols, "get_chemical_symbols")
+        else list(atoms_or_symbols)
+    )
+
+    if isinstance(spec, str):
+        spec = {"symbol": spec}
+    if not isinstance(spec, dict):
+        raise TypeError(f"region spec must be a str or dict, got {type(spec).__name__}")
+
+    if "indices" in spec:
+        return [int(i) for i in spec["indices"]]
+
+    symbol = spec.get("symbol")
+    if symbol is None:
+        raise ValueError(f"region spec needs 'symbol' or 'indices': {spec!r}")
+    matched = [i for i, s in enumerate(symbols) if s == symbol]
+
+    if "index_range" in spec:
+        lo, hi = spec["index_range"]
+        return [i for i in matched if lo <= i < hi]
+
+    take = spec.get("take")
+    if take is None:
+        return matched
+    count = int(spec["count"])
+    if take == "first":
+        return matched[:count]
+    if take == "last":
+        return matched[-count:]
+    raise ValueError(f"region spec 'take' must be 'first' or 'last', got {take!r}")
+
+
 @dataclass
 class SublatticeOp:
     """One substitution/deletion operation on a base structure.
