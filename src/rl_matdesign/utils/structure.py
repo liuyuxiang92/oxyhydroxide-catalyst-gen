@@ -262,7 +262,7 @@ def _fractions_to_counts(composition: Dict[str, float], n_sites: int) -> Dict[st
 def relax_structure(
     atoms: "ase.Atoms",
     *,
-    model: str = "DPA-3.1-3M.pt",
+    model: str = "models/DPA-3.1-3M.pt",
     head: Optional[str] = None,
     calc: Optional[Any] = None,
     fmax: float = 0.001,

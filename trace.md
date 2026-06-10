@@ -444,3 +444,12 @@ Tasks 1-3 done + committed (7759bbe). Walked the LiPS chemistry with the user; k
 - **Metal categories (confirmed):** both(11)=Mn,Ni,Cu,Zn,Mo,In,Sn,Sb,W,Tm,Yb; sulfide-only=Ru; oxide-only(19)=Mg,Al,Si,Sc,Ti,V,Cr,Fe,Co,Ga,Ge,Y,Zr,Nb,Hf,Ta,Ho,Er,Lu. Drives the metal→O constraint mask.
 - **Eligible-region rule ("last 1000 S") = general mechanism + LiPS config value**, NOT hardcoded. Engine already takes index regions; added public `resolve_region(atoms, spec)` selector (symbol / take first|last+count / index_range / explicit indices) so the region is declarative config and reusable. Placement self-consistent: halides 1.7 + max O 0.24 = 1.94 ≤ 2 per f.u. fit in the last-1000 region.
 - Still open (mechanical): property model paths/heads, geo-opt model+head, weights/scales, exact POSCAR S indexing (header inconsistency).
+
+### EARS — Progress (2026-06-10 15:33)
+<!-- concepts: deepmd-property-heads, geo-opt-model-default, lips-config-shape -->
+All mechanical chemistry inputs now confirmed by user:
+- Property heads: **conductivity head = "experiment"** (DeepProperty, models in SSE-models/models/model{1..5}.pt); **stability = NO head** (DeepProperty head=None, SSE-models/models_stab/model{1..5}.pt). Both larger=better (direction: max).
+- Geo-opt: default model lives in a subdir → set relax_structure default to **models/DPA-3.1-3M.pt** (repo convention; user drops the file there, YAML overrides). LiPS relax **head = SSE_ABACUS**, head provided in YAML.
+- Weights: **same as CompositePredictor** — user defines weight/scale/direction per property in YAML. structure_pipeline reuses that schema.
+- POSCAR: just 3000 contiguous S; **last 1000 S are substitutable** → resolve_region(atoms, {symbol:S, take:last, count:1000}). Item 7 resolved (the Xe/Cl in the header comment line is noise).
+- Chemistry fully unblocked. Next: gitignore the large DPA model, then build MultiGroupEnv (task 4) — the keystone — then structure_pipeline (task 5) then LiPS recipe/constraint/config (task 6).
