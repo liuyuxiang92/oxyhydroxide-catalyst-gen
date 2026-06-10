@@ -94,3 +94,53 @@ def pick_scalar(
     raise ValueError(
         f"Unknown output_aggregator {output_aggregator!r}; expected one of: index, mean, max."
     )
+
+
+def eval_property_ensemble(
+    structures: List[Any],
+    models: List[Any],
+    elem_to_type: dict,
+    *,
+    output_index: int = 0,
+    output_aggregator: str = "index",
+) -> List[float]:
+    """Evaluate a ``DeepProperty`` ensemble on *structures* → flat list of scalars.
+
+    Returns one scalar per (structure, model) pair (so an ensemble of M models on
+    N structures yields N*M values), each collapsed from the model's output
+    vector via :func:`pick_scalar`. Shared by ``dp_property`` and the
+    ``structure_pipeline`` predictor.
+    """
+    nframes = len(structures)
+    natoms = len(structures[0])
+    coords = np.zeros((nframes, natoms, 3), dtype=np.float64)
+    cells = np.zeros((nframes, 3, 3), dtype=np.float64)
+    atom_types = np.zeros((nframes, natoms), dtype=np.int32)
+    for i, atoms in enumerate(structures):
+        coords[i] = atoms.get_positions()
+        cells[i] = atoms.get_cell().array
+        syms = atoms.get_chemical_symbols()
+        unknown = sorted({s for s in syms if s not in elem_to_type})
+        if unknown:
+            raise RuntimeError(
+                f"Elements {unknown} are not in the DP model type_map "
+                f"({sorted(elem_to_type)}). Check the checkpoint covers every species."
+            )
+        atom_types[i] = np.fromiter(
+            (elem_to_type[s] for s in syms), dtype=np.int32, count=natoms,
+        )
+
+    values: List[float] = []
+    for dp in models:
+        res = np.asarray(
+            dp.eval(coords=coords, cells=cells, atom_types=atom_types, mixed_type=True)
+        )
+        if res.ndim == 1:
+            res = res.reshape(1, -1) if nframes == 1 else res.reshape(nframes, -1)
+        for frame_vec in res:
+            values.append(
+                pick_scalar(
+                    frame_vec, output_index=output_index, output_aggregator=output_aggregator
+                )
+            )
+    return values

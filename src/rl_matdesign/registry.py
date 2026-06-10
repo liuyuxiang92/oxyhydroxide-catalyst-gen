@@ -80,6 +80,11 @@ def _make_ooh(cfg: dict, *, seed: Optional[int] = None, **_):
     )
 
 
+def _make_structure_pipeline(cfg: dict, *, seed: Optional[int] = None, **_):
+    from .predictors.structure_pipeline import StructurePipelinePredictor
+    return StructurePipelinePredictor(cfg, seed=seed)
+
+
 def _make_dummy(cfg: dict, **_):
     import random as _random
 
@@ -94,15 +99,44 @@ def _make_dummy(cfg: dict, **_):
 
 
 PREDICTORS: Dict[str, Factory] = {
-    "dp_structure":   _make_dp_structure,
-    "dp_property":    _make_dp_property,
-    "composite":      _make_composite,
-    "hea":            _make_hea,
-    "perovskite":     _make_perovskite,
-    "sinter_calcine": _make_sinter_calcine,
-    "ooh":            _make_ooh,
-    "dummy":          _make_dummy,
+    "dp_structure":       _make_dp_structure,
+    "dp_property":        _make_dp_property,
+    "composite":          _make_composite,
+    "structure_pipeline": _make_structure_pipeline,
+    "hea":                _make_hea,
+    "perovskite":         _make_perovskite,
+    "sinter_calcine":     _make_sinter_calcine,
+    "ooh":                _make_ooh,
+    "dummy":              _make_dummy,
 }
+
+
+# ---------------------------------------------------------------------------
+# Built-in structure-builder factories (composition/groups -> ASE Atoms)
+# ---------------------------------------------------------------------------
+
+def _make_sse_builder(cfg: dict, *, seed: Optional[int] = None, **_):
+    from .predictors.builders.sse import SSESupercellBuilder
+    return SSESupercellBuilder(cfg, seed=seed)
+
+
+BUILDERS: Dict[str, Factory] = {
+    "sse": _make_sse_builder,
+}
+
+
+def resolve_builder(kind: str, cfg: dict, *, seed: Optional[int] = None):
+    """Build a structure-builder from a short name or ``pkg.module:ClassName`` FQN."""
+    if ":" in kind:
+        cls = _load_fqn(kind)
+        return cls(cfg, seed=seed)
+    factory = BUILDERS.get(kind.lower())
+    if factory is None:
+        raise ValueError(
+            f"Unknown builder {kind!r}. Built-ins: {sorted(BUILDERS)}. "
+            f"For a custom builder, use the FQN form: 'pkg.module:ClassName'."
+        )
+    return factory(cfg, seed=seed)
 
 
 # ---------------------------------------------------------------------------
