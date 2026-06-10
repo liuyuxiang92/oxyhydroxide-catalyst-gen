@@ -189,6 +189,12 @@ def main() -> None:
 
     cfg = load_config(args.config)
 
+    # User-friendly scenario configs expand into a full multi_group config here,
+    # before anything reads env/predictor keys.
+    if cfg.get("env_type") == "lips":
+        from rl_matdesign.scenarios.lips import expand as _expand_lips
+        cfg = _expand_lips(cfg)
+
     method = args.method or cfg.get("method", "a2c")
     train_seed = args.train_seed if args.train_seed is not None else args.dp_seed
     gen_seed   = args.gen_seed   if args.gen_seed   is not None else args.dp_seed

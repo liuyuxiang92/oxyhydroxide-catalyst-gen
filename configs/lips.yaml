@@ -1,0 +1,116 @@
+# Doped Li6PS6 solid-state electrolyte — USER-FRIENDLY config.
+#
+# You describe the chemistry in natural units; the framework generates all the
+# internal env encoding (fraction grids, Cl selectors, cl_map, O flags, S
+# residuals, sum-to-1 bookkeeping). See configs/lips_sse.yaml for the fully
+# expanded equivalent if you want to see what this turns into.
+#
+#   python scripts/run_experiment.py --config configs/lips.yaml \
+#       --method a2c --out runs/lips_a2c_s0 --train-seed 0 --dp-seed 0 --gen-seed 0
+
+env_type: lips
+base_poscar: POSCAR_supercell      # (Li6PS6)*500 ; edit to your absolute path
+formula_units: 500
+
+# ---- P-site: replace P with one dopant metal ----
+dopant_metals:
+  [Mn, Ni, Cu, Zn, Mo, In, Sn, Sb, W, Ru, Tm, Yb,
+   Mg, Al, Si, Sc, Ti, V, Cr, Fe, Co, Ga, Ge, Y, Zr, Nb, Hf, Ta, Ho, Er, Lu]
+metal_level: {min: 0.02, max: 0.08, step: 0.01}   # fraction of P replaced by the metal
+
+# ---- S-site: replace S with Cl (and Br); optionally with O (metal-oxide form) ----
+cl_per_fu:   {min: 0.6, max: 1.4, step: 0.2}       # # of S (of 6) replaced by Cl, per formula unit
+halide_total: 1.7                                  # Cl + Br per formula unit (Br = halide_total - Cl)
+
+# ---- Oxygen form per metal ----
+metal_only: [Ru]                                   # never takes oxygen (metal form only)
+oxide_only: [Mg, Al, Si, Sc, Ti, V, Cr, Fe, Co, Ga, Ge, Y, Zr, Nb, Hf, Ta, Ho, Er, Lu]
+# every other metal ("both") may take oxygen or not — the agent decides.
+
+# Optional: which S sites may be substituted (default: the last 1000).
+# eligible_region: {symbol: S, take: last, count: 1000}
+
+# ---- Charge-neutrality valences (metal: {metal-form, oxide-form}) ----
+valences:
+  Li: 1
+  P: 5
+  S: -2
+  O: -2
+  Cl: -1
+  Br: -1
+  Cu: {sulfide: 2, oxide: 2}
+  Hf: {sulfide: 4, oxide: 4}
+  In: {sulfide: 3, oxide: 3}
+  Mn: {sulfide: 2, oxide: 4}
+  Mo: {sulfide: 4, oxide: 6}
+  Nb: {sulfide: 4, oxide: 5}
+  Ni: {sulfide: 2, oxide: 3}
+  Ru: {sulfide: 4, oxide: 2}
+  Sn: {sulfide: 4, oxide: 4}
+  W:  {sulfide: 4, oxide: 6}
+  Al: {sulfide: 3, oxide: 3}
+  Co: {sulfide: 2, oxide: 2}
+  Cr: {sulfide: 3, oxide: 3}
+  Fe: {sulfide: 2, oxide: 3}
+  Ga: {sulfide: 3, oxide: 3}
+  Mg: {sulfide: 2, oxide: 2}
+  Sb: {sulfide: 5, oxide: 3}
+  Si: {sulfide: 4, oxide: 4}
+  Ti: {sulfide: 4, oxide: 4}
+  V:  {sulfide: 3, oxide: 5}
+  Zn: {sulfide: 2, oxide: 2}
+  Zr: {sulfide: 4, oxide: 4}
+  Ge: {sulfide: 4, oxide: 4}
+  Y:  {sulfide: 3, oxide: 3}
+  Sc: {sulfide: 3, oxide: 3}
+  Ta: {sulfide: 5, oxide: 5}
+  Ho: {sulfide: 3, oxide: 3}
+  Er: {sulfide: 3, oxide: 3}
+  Tm: {sulfide: 3, oxide: 3}
+  Yb: {sulfide: 3, oxide: 3}
+  Lu: {sulfide: 3, oxide: 3}
+
+# ---- Scoring: build once -> relax once -> conductivity + stability ----
+geo_opt:
+  model: models/DPA-3.1-3M.pt
+  head: SSE_ABACUS
+  fmax: 0.001
+  steps: 1000
+  relax_cell: true
+n_random_configs: 1
+
+properties:
+  - name: conductivity
+    models: [SSE-models/models/model1.pt, SSE-models/models/model2.pt,
+             SSE-models/models/model3.pt, SSE-models/models/model4.pt,
+             SSE-models/models/model5.pt]
+    head: experiment
+    direction: max
+    weight: 1.0
+    scale: 1.0
+    objective: mean_minus_kstd
+  - name: stability
+    models: [SSE-models/models_stab/model1.pt, SSE-models/models_stab/model2.pt,
+             SSE-models/models_stab/model3.pt, SSE-models/models_stab/model4.pt,
+             SSE-models/models_stab/model5.pt]
+    head: null
+    direction: max
+    weight: 1.0
+    scale: 1.0
+    objective: mean_minus_kstd
+k: 1.0
+
+# ---- RL ----
+method: a2c
+pg_warmup_eps: 200
+pg_num_iters: 300
+pg_batch_eps: 16
+pg_lr_actor: 0.001
+pg_lr_critic: 0.001
+pg_entropy_coef: 0.05
+gen_temperature: 1.0
+gamma: 0.99
+pg_repeat_penalty_coef: 0.5
+pg_repeat_penalty_shape: log
+num_gen_eps: 200
+exploration_gen_eps: 0
