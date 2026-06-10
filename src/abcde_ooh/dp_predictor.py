@@ -334,35 +334,22 @@ class DeepMDOverpotentialPredictor:
         return self._geo_opt_calc
 
     def _optimize_structure(self, atoms: "Atoms", masked_indices: List[int]) -> "Atoms":
-        """Geometry-optimize a structure, removing masked atoms first, then reconstructing."""
-        from ase.optimize import LBFGS  # type: ignore[import-not-found]
-        try:
-            from ase.filters import UnitCellFilter  # ASE >= 3.23
-        except ImportError:
-            from ase.constraints import UnitCellFilter  # type: ignore[import-not-found]
+        """Geometry-optimize a structure, removing masked atoms first, then reconstructing.
 
-        mask_set = set(int(i) for i in masked_indices)
-        keep_indices = [i for i in range(len(atoms)) if i not in mask_set]
+        Delegates to the shared :func:`rl_matdesign.utils.structure.relax_structure`
+        capability, reusing this predictor's cached (Omat24-headed) DP calculator so
+        behavior is unchanged. OOH is now just one consumer of the general relaxer.
+        """
+        from rl_matdesign.utils.structure import relax_structure
 
-        real_atoms = atoms[keep_indices]
-        real_atoms.calc = self._get_geo_opt_calc()
-        ucf = UnitCellFilter(real_atoms, scalar_pressure=0.0)
-        opt = LBFGS(ucf)
-        try:
-            opt.run(fmax=0.001, steps=1000)
-        except Exception as e:
-            print(f"[GEO-OPT] optimization did not converge or errored: {e}; using last frame")
-
-        # Rebuild full-size Atoms: update kept-atom positions, leave masked positions unchanged.
-        result = atoms.copy()
-        opt_positions = real_atoms.get_positions()
-        opt_cell = real_atoms.get_cell()
-        result.set_cell(opt_cell)
-        all_positions = result.get_positions().copy()
-        for new_i, orig_i in enumerate(keep_indices):
-            all_positions[orig_i] = opt_positions[new_i]
-        result.set_positions(all_positions)
-        return result
+        return relax_structure(
+            atoms,
+            calc=self._get_geo_opt_calc(),
+            mask_indices=masked_indices,
+            fmax=0.001,
+            steps=1000,
+            relax_cell=True,
+        )
 
     def _build_dp_inputs_for_one_doped_slab(self, doped, anchor_elems: List[str], rng: random.Random):
         anchor_set = set(anchor_elems)

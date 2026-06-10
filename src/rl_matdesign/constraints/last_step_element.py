@@ -57,6 +57,7 @@ class LastStepElementFilter(ConstraintFilter):
         possible_sums_by_k: List[Any],
         cation_set: List[str],
         fraction_set: List[str],
+        **_: Any,
     ) -> List[Tuple[Tuple[float, ...], Tuple[float, ...]]]:
         from ..encoding import decode_one_hot
 

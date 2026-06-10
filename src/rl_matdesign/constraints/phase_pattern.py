@@ -149,6 +149,7 @@ class PhasePatternFilter:
         possible_sums_by_k,  # noqa: ARG002
         cation_set: List[str],
         fraction_set: List[str],
+        **_: Any,
     ) -> List[Tuple[Tuple[float, ...], Tuple[float, ...]]]:
         # Only do a thorough check when this action is the LAST one in the
         # episode (steps_left counts post-action remaining steps). Earlier

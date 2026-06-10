@@ -407,3 +407,31 @@ oxides_sinter_a2c.yaml (only A2C templates had it; DQN templates do
 not use pg_repeat_penalty_shape). Lesson: when writing YAML inline
 maps by hand, always validate them by loading once with yaml.safe_load
 before committing.
+
+### EARS — Progress (2026-06-05 11:34)
+<!-- concepts: dqn-replay-buffer, docs-sync, checkpoint-format -->
+Syncing stale docs/tooling to the refactored DQN. Key discovery: the DQN
+path moved from an *offline MC-return* buffer saved as `random_dataset.npz`
+(keys `s_mat/s_step/a_elem/a_comp/y`, one-hot actions, `y`=MC return) to a
+*classical online TD* buffer — an in-memory `deque` of per-step transition
+dicts (`a_elem_idx` int, `a_comp_val` float, per-step `reward` nonzero only at
+terminal, plus `s_mat_next_raw`/`next_allowed_idx` for the bootstrap target).
+The buffer now persists only inside `checkpoint.pt` under key `"buffer"`
+(type=="dqn"), not as an npz. Rewrote `summarize_replay_buffer.py` to read the
+checkpoint, split episodes on `done=True`, decode comp from cation_set in
+`run_config.json`, and recompute via the generic `resolve_predictor` registry
+(old `abcde_ooh.dp_predictor` DPConfig path is gone). Next: update CLAUDE.md
+output-files table + design notes.
+
+### EARS — Session Start (2026-06-08 11:15)
+<!-- concepts: dqn-state-representation, finite-horizon-rl, magpie-featurization -->
+- Task: Ongoing Q&A walkthrough of the RL framework internals; current question is why s_step (step-counter one-hot, dim n_components) is part of the network input given s_material already encodes the partial composition.
+- Why: User is learning how the DQN/PG state-action representation works to understand/extend the framework.
+
+### EARS — Progress (2026-06-10 14:32)
+<!-- concepts: multi-sublattice-env, structure-substitution-builder, doped-sse-design -->
+- Approved a large framework generalization (branch `feat/multi-sublattice-lips`, plan in ~/.claude/plans/vivid-jingling-lynx.md): doped Li6PS6 SSE scenario.
+- Key insight driving the design: existing env = "one composition group sums to 1"; LiPS = "N sublattice groups each sum to 1". So we make the *composition group* the primitive and a scenario = ordered sequence of N groups (N=1 = today, backward compatible). LiPS = P-site group + S-site group; Li-site is *derived* (charge neutrality) in the predictor recipe, not an env group.
+- Layering rule established: agent picks it → constraint (env layer); computed from picks → recipe (predictor layer). Br=1.7−Cl and Li-vacancy are derived.
+- Just implemented Layer-1 builder in utils/structure.py: `build_substituted_structure(base, ops, n_configs, rng)` with `SublatticeOp{sites(symbol|index-region), put{species:count}, remove}` — multi-sublattice substitution + atom deletion (vacancies) via count-diff vs POSCAR. `substitute_sites` kept as a one-op RSS wrapper (resolves all site selections against ORIGINAL symbols so ops never interfere). Also lifted `relax_structure` (LBFGS+UnitCellFilter+DPCalculator, default model DPA-3.1-3M.pt, user-defined head, optional mask_indices) out of OOH into a shared util.
+- Next: local unit test of builder counts+deletion; then prior_groups constraint kwarg, MultiGroupEnv, structure_pipeline predictor. LiPS recipe/constraint/config blocked on chemistry inputs (charge-neutrality Δcharge formula, metal→O coupling + oxide stoich, O grid, property-model heads, weights, POSCAR S indexing).

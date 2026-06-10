@@ -13,7 +13,7 @@ For OOH catalyst phase constraints see the ``main`` branch
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 class ConstraintFilter:
@@ -35,9 +35,19 @@ class ConstraintFilter:
         possible_sums_by_k: List[Any],
         cation_set: List[str],
         fraction_set: List[str],
+        prior_groups: Optional[List[Dict[str, float]]] = None,
+        **_: Any,
     ) -> List[Tuple[Tuple[float, ...], Tuple[float, ...]]]:
         """Return the subset of *actions* consistent with this constraint.
 
         The default implementation returns *actions* unchanged.
+
+        ``prior_groups`` carries the already-completed group compositions (in
+        group order) when this filter runs inside a :class:`MultiGroupEnv`, so a
+        later sublattice can depend on an earlier pick (e.g. the S-site O range
+        bounded by the P-site metal). It is ``None`` for single-group
+        (:class:`CompositionEnv`) runs. Filters that ignore cross-group coupling
+        can simply not read it. The trailing ``**_`` keeps subclasses forward
+        compatible with future context kwargs.
         """
         return actions

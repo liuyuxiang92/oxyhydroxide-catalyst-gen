@@ -140,6 +140,7 @@ class SMACTChargeFilter(ConstraintFilter):
         possible_sums_by_k: List[Any],
         cation_set: List[str],
         fraction_set: List[str],
+        **_: Any,
     ) -> List[Tuple[Tuple[float, ...], Tuple[float, ...]]]:
         # Only enforce at the final step (adding last cation).
         if steps_left > 0:

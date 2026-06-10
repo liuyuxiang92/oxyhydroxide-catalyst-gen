@@ -1,19 +1,143 @@
-"""Structure substitution utilities for generating alloyed supercells.
+"""Structure substitution + relaxation utilities.
 
-Generates *n_configs* random solid-solution structures by randomly assigning
-elements to sites according to composition fractions (Random Solid Solution
-Approximation).  Fast and suitable for DPA evaluation during RL training.
+Two layers live here:
 
-The logic is extracted from the OOH predictor's
-``_choose_counts_from_fractions`` and ``_build_dp_inputs_for_one_doped_slab``
-methods so that HEA and perovskite predictors share a single implementation.
+* **Layer 1 — substitution engine.** :func:`build_substituted_structure` edits a
+  base structure to match target *integer atom counts* per sublattice: it
+  substitutes species onto, and optionally deletes (vacancies) from, selected
+  sites. A "sublattice operation" (:class:`SublatticeOp`) selects sites either by
+  chemical symbol or by an explicit index region, places ``{species: count}``
+  replacements, and removes ``remove`` sites. The remaining selected sites keep
+  their original species. This is the general "count-diff vs the base POSCAR"
+  builder used by multi-sublattice scenarios (e.g. doped Li6PS6).
+
+  :func:`substitute_sites` is a thin one-operation wrapper over the engine,
+  preserving the original Random-Solid-Solution behavior (fill all placeholder
+  sites by fractional composition) for HEA / perovskite / ti_alloy / dp_structure.
+
+* **Relaxation.** :func:`relax_structure` is the shared geometry-optimization
+  capability (LBFGS + cell filter + a DeepMD calculator with a named head),
+  lifted out of the OOH predictor so any structure-based predictor can reuse it.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import numpy as np
 
+
+# ---------------------------------------------------------------------------
+# Layer 1: substitution engine
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SublatticeOp:
+    """One substitution/deletion operation on a base structure.
+
+    Parameters
+    ----------
+    sites:
+        Either a chemical symbol (``str``) — selects *all* atoms of that symbol —
+        or an explicit sequence of integer site indices (an eligible region, e.g.
+        "the last 1000 S atoms").
+    put:
+        ``{species: count}`` — integer **atom counts** of replacement species to
+        place on the selected sites (random assignment among them).
+    remove:
+        Number of selected sites to delete (vacancies).
+
+    The remaining ``n_selected - sum(put.values()) - remove`` selected sites keep
+    their original species. Requires ``sum(put.values()) + remove <= n_selected``.
+    """
+
+    sites: Union[str, Sequence[int]]
+    put: Dict[str, int] = field(default_factory=dict)
+    remove: int = 0
+
+
+def _resolve_sites(symbols: Sequence[str], sites: Union[str, Sequence[int]]) -> List[int]:
+    if isinstance(sites, str):
+        return [i for i, s in enumerate(symbols) if s == sites]
+    return [int(i) for i in sites]
+
+
+def build_substituted_structure(
+    base: Union[str, "ase.Atoms"],
+    ops: Sequence[SublatticeOp],
+    n_configs: int = 1,
+    rng: Optional[np.random.Generator] = None,
+) -> List["ase.Atoms"]:
+    """Build *n_configs* random structures by applying *ops* to *base*.
+
+    Parameters
+    ----------
+    base:
+        A POSCAR/CONTCAR path *or* an ASE ``Atoms`` object (used as a template;
+        copied per config).
+    ops:
+        Sublattice operations to apply. All site selections are resolved against
+        the **original** symbols, so the order of ``ops`` does not matter and ops
+        on different sublattices never interfere.
+    n_configs:
+        Number of random realizations to generate.
+    rng:
+        NumPy generator for reproducibility.
+
+    Returns
+    -------
+    List of ``n_configs`` ASE ``Atoms`` objects (with deletions applied).
+    """
+    try:
+        from ase.io import read as ase_read
+    except ImportError as exc:  # pragma: no cover - exercised only without ASE
+        raise ImportError("build_substituted_structure requires ASE: pip install ase") from exc
+
+    if rng is None:
+        rng = np.random.default_rng()
+
+    template = ase_read(base) if isinstance(base, str) else base
+
+    configs: List["ase.Atoms"] = []
+    for _ in range(n_configs):
+        atoms = template.copy()
+        orig_symbols = list(atoms.get_chemical_symbols())
+        symbols = list(orig_symbols)
+        delete_indices: List[int] = []
+
+        for op in ops:
+            sel = _resolve_sites(orig_symbols, op.sites)
+            n_sel = len(sel)
+            n_put = sum(int(c) for c in op.put.values())
+            n_rm = int(op.remove)
+            if n_put + n_rm > n_sel:
+                raise ValueError(
+                    f"SublatticeOp wants to place {n_put} + delete {n_rm} on only "
+                    f"{n_sel} selected sites (selector={op.sites!r})."
+                )
+            order = [int(i) for i in rng.permutation(sel)]
+            cursor = 0
+            for species, count in op.put.items():
+                for _ in range(int(count)):
+                    symbols[order[cursor]] = species
+                    cursor += 1
+            for _ in range(n_rm):
+                delete_indices.append(order[cursor])
+                cursor += 1
+
+        atoms.set_chemical_symbols(symbols)
+        if delete_indices:
+            drop = set(delete_indices)
+            keep = [i for i in range(len(atoms)) if i not in drop]
+            atoms = atoms[keep]
+        configs.append(atoms)
+
+    return configs
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatible one-operation wrapper (Random Solid Solution)
+# ---------------------------------------------------------------------------
 
 def substitute_sites(
     template_poscar: str,
@@ -22,54 +146,34 @@ def substitute_sites(
     n_configs: int = 5,
     rng: Optional[np.random.Generator] = None,
 ) -> List["ase.Atoms"]:
-    """Generate ASE Atoms objects with template sites substituted per *composition*.
+    """Fill all ``site_symbol`` sites of a template per fractional *composition*.
 
-    Parameters
-    ----------
-    template_poscar:
-        Path to a POSCAR/CONTCAR file.  The sites occupied by *site_symbol*
-        will be replaced.  For HEA use a placeholder element (e.g. ``"X"`` or
-        ``"Cu"``).  For perovskite B-site use the placeholder B-site element.
-    composition:
-        Dict ``{element: fraction}``.  Fractions must sum to 1.0.
-    site_symbol:
-        Element symbol in the template that marks sites to be substituted.
-    n_configs:
-        Number of random structures to generate.
-    rng:
-        NumPy random generator for reproducibility.  If ``None`` a new default
-        generator is created.
-
-    Returns
-    -------
-    List of *n_configs* ASE Atoms objects.
+    Thin wrapper over :func:`build_substituted_structure` preserving the original
+    HEA/perovskite/ti_alloy behavior: one sublattice, no vacancies, integer counts
+    allocated from fractions (largest-remainder).
     """
     try:
         from ase.io import read as ase_read
-    except ImportError as exc:
+    except ImportError as exc:  # pragma: no cover
         raise ImportError("substitute_sites requires ASE: pip install ase") from exc
 
     if rng is None:
         rng = np.random.default_rng()
 
     template = ase_read(template_poscar)
-
-    # Identify target sites.
-    site_indices = [i for i, s in enumerate(template.get_chemical_symbols()) if s == site_symbol]
+    site_indices = [
+        i for i, s in enumerate(template.get_chemical_symbols()) if s == site_symbol
+    ]
     if not site_indices:
         raise ValueError(
             f"No sites with symbol '{site_symbol}' found in {template_poscar}. "
             "Check that site_symbol matches the placeholder element in the template."
         )
 
-    n_sites = len(site_indices)
-    counts = _fractions_to_counts(composition, n_sites)
-    return _random_configs(template, site_indices, counts, n_configs, rng)
+    counts = _fractions_to_counts(composition, len(site_indices))
+    op = SublatticeOp(sites=site_symbol, put=counts, remove=0)
+    return build_substituted_structure(template, [op], n_configs=n_configs, rng=rng)
 
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
 
 def _fractions_to_counts(composition: Dict[str, float], n_sites: int) -> Dict[str, int]:
     """Allocate integer atom counts from fractional composition.
@@ -87,7 +191,6 @@ def _fractions_to_counts(composition: Dict[str, float], n_sites: int) -> Dict[st
     if deficit < 0 or deficit > len(elements):
         raise ValueError(f"Cannot allocate {n_sites} sites from fractions {composition}.")
 
-    # Assign remaining sites to elements with largest remainders.
     remainders.sort(reverse=True)
     counts_list = floors[:]
     for k in range(deficit):
@@ -96,26 +199,81 @@ def _fractions_to_counts(composition: Dict[str, float], n_sites: int) -> Dict[st
     return {elements[i]: counts_list[i] for i in range(len(elements))}
 
 
-def _random_configs(
-    template: "ase.Atoms",
-    site_indices: List[int],
-    counts: Dict[str, int],
-    n_configs: int,
-    rng: np.random.Generator,
-) -> List["ase.Atoms"]:
-    """Generate *n_configs* random solid-solution structures."""
-    # Build the element list in the order they will be assigned.
-    elem_list: List[str] = []
-    for elem, count in counts.items():
-        elem_list.extend([elem] * count)
+# ---------------------------------------------------------------------------
+# Shared relaxation capability
+# ---------------------------------------------------------------------------
 
-    configs = []
-    for _ in range(n_configs):
-        atoms = template.copy()
-        shuffled = rng.permutation(elem_list).tolist()
-        symbols = atoms.get_chemical_symbols()
-        for idx, elem in zip(site_indices, shuffled):
-            symbols[idx] = elem
-        atoms.set_chemical_symbols(symbols)
-        configs.append(atoms)
-    return configs
+def relax_structure(
+    atoms: "ase.Atoms",
+    *,
+    model: str = "DPA-3.1-3M.pt",
+    head: Optional[str] = None,
+    calc: Optional[Any] = None,
+    fmax: float = 0.001,
+    steps: int = 1000,
+    relax_cell: bool = True,
+    mask_indices: Optional[Sequence[int]] = None,
+) -> "ase.Atoms":
+    """Geometry-optimize *atoms* with a DeepMD calculator.
+
+    A first-class, shared capability (formerly buried in the OOH predictor). Any
+    structure-based predictor can call it.
+
+    Parameters
+    ----------
+    model:
+        DeepMD checkpoint path. Defaults to ``DPA-3.1-3M.pt``.
+    head:
+        Output head of a multi-task checkpoint (e.g. ``"SSE_ABACUS"``). The model
+        has a default; **the head is the caller's responsibility**.
+    calc:
+        A pre-built ASE calculator to reuse (avoids reloading the model every
+        call). If given, ``model``/``head`` are ignored.
+    fmax, steps, relax_cell:
+        LBFGS force threshold, max steps, and whether to relax the cell
+        (``UnitCellFilter``).
+    mask_indices:
+        Optional site indices to *exclude* from optimization (e.g. OOH adsorbate
+        placeholders); their positions are restored unchanged in the result.
+    """
+    from ase.optimize import LBFGS
+
+    try:
+        from ase.filters import UnitCellFilter  # ASE >= 3.23
+    except ImportError:  # pragma: no cover
+        from ase.constraints import UnitCellFilter
+
+    keep_indices: Optional[List[int]] = None
+    if mask_indices:
+        drop = {int(i) for i in mask_indices}
+        keep_indices = [i for i in range(len(atoms)) if i not in drop]
+        work = atoms[keep_indices].copy()
+    else:
+        work = atoms.copy()
+
+    if calc is None:
+        from deepmd.calculator import DP as DPCalculator
+        kwargs = {"head": head} if head else {}
+        calc = DPCalculator(model=model, **kwargs)
+    work.calc = calc
+
+    target = UnitCellFilter(work, scalar_pressure=0.0) if relax_cell else work
+    opt = LBFGS(target)
+    try:
+        opt.run(fmax=fmax, steps=steps)
+    except Exception as exc:  # noqa: BLE001 - relaxation failures shouldn't crash the run
+        print(f"relax_structure: optimization did not converge: {exc}")
+
+    if keep_indices is None:
+        return work
+
+    # Rebuild the full structure: relaxed cell + relaxed positions for kept atoms,
+    # original positions for masked atoms.
+    result = atoms.copy()
+    result.set_cell(work.get_cell())
+    positions = result.get_positions().copy()
+    work_positions = work.get_positions()
+    for new_i, orig_i in enumerate(keep_indices):
+        positions[orig_i] = work_positions[new_i]
+    result.set_positions(positions)
+    return result
