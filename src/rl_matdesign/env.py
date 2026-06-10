@@ -346,7 +346,7 @@ class CompositionEnv:
                 actions.append((elem_oh, comp_oh))
 
         if self.phase_filter is not None:
-            actions = self.phase_filter.filter_actions(
+            kw = dict(
                 actions=actions,
                 units_map=self._units_map,
                 steps_left=self.n_components - self.counter - 1,
@@ -354,8 +354,14 @@ class CompositionEnv:
                 possible_sums_by_k=self._possible_sums_by_k,
                 cation_set=self.cation_set,
                 fraction_set=self.fraction_set,
-                prior_groups=prior_groups,
             )
+            # Only forward prior_groups when it is actually set (i.e. from
+            # MultiGroupEnv). Standalone single-group use passes None, so filters
+            # are called exactly as before — external/user filters that predate
+            # the cross-group hook keep working unchanged.
+            if prior_groups is not None:
+                kw["prior_groups"] = prior_groups
+            actions = self.phase_filter.filter_actions(**kw)
 
         return actions
 
