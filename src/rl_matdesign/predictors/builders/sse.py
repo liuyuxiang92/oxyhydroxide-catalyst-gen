@@ -99,7 +99,13 @@ class SSESupercellBuilder:
 
         n_metal = int(round(level * n_P_total))
         n_P = n_P_total - n_metal
-        n_O = int(round(o_frac * n_S_total))
+        # O is DERIVED, not the env's magnitude: the S-site O pick is only a
+        # scenario flag (O>0 ⇒ oxide). The real oxygen count comes from the metal
+        # oxide stoichiometry, n_O = (oxide_valence / 2) · n_metal.
+        if scenario == "oxide":
+            n_O = int(round(0.5 * self._valence(metal, scenario="oxide") * n_metal))
+        else:
+            n_O = 0
         n_Cl = int(round(cl_frac * n_S_total))
         n_Br = int(round(self.halide_total * self.fu)) - n_Cl
         n_S = n_S_total - n_O - n_Cl - n_Br
