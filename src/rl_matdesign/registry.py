@@ -190,12 +190,18 @@ def _make_chain(cfg: dict, *, env=None, **_):
     return ChainConstraintFilter(cfg, env=env)
 
 
+def _make_sse_doping(cfg: dict, *, env=None, **_):
+    from .constraints.sse_doping import SSEDopingFilter
+    return SSEDopingFilter(cfg, env=env)
+
+
 CONSTRAINTS: Dict[str, Factory] = {
     "smact_charge":      _make_smact_charge,
     "last_step_element": _make_last_step_element,
     "ooh_phase":         _make_ooh_phase,
     "phase_pattern":     _make_phase_pattern,
     "chain":             _make_chain,
+    "sse_doping":        _make_sse_doping,
 }
 
 

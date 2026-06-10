@@ -35,6 +35,17 @@ class SSESupercellBuilder:
         self.valences: Dict[str, Any] = dict(cfg["valences"])  # {el: int | {sulfide,oxide}}
         self.fu: int = int(cfg.get("formula_units", 500))
         self.halide_total: float = float(cfg.get("halide_total", 1.7))  # per f.u.
+        # S-site O pick is a scenario flag: o_frac <= o_off ⇒ metal form (no O);
+        # above ⇒ metal-oxide form. Default 0.0 ⇒ "any O present means oxide".
+        self.o_off: float = float(cfg.get("o_off", 0.0))
+        # Optional Cl selector -> exact Cl-per-formula-unit map (keys = the 2-decimal
+        # S-site fraction the env emits; round-tripped via round(.,2)). Lets the env
+        # use clean selector fractions while the recipe places the exact halide count
+        # (Cl/6 values like 0.8/6=0.133 don't survive the 2-decimal fraction strings).
+        raw_map = cfg.get("cl_map")
+        self.cl_map: Optional[Dict[float, float]] = (
+            {round(float(k), 2): float(v) for k, v in raw_map.items()} if raw_map else None
+        )
         self.eligible_region = cfg.get("eligible_region", {"symbol": "S", "take": "last", "count": 1000})
 
         # Group names + host symbols / per-f.u. site counts.
@@ -91,7 +102,7 @@ class SSESupercellBuilder:
     def counts(self, candidate: Dict[str, Dict[str, float]]) -> Dict[str, int]:
         """Integer supercell counts + the charge-neutral Li vacancy (table-driven)."""
         metal, level, o_frac, cl_frac = self._decode(candidate)
-        scenario = "oxide" if o_frac > 0 else "sulfide"
+        scenario = "oxide" if o_frac > self.o_off + 1e-9 else "sulfide"
 
         n_P_total = self.p_site_per_fu * self.fu
         n_S_total = self.s_site_per_fu * self.fu
@@ -106,7 +117,16 @@ class SSESupercellBuilder:
             n_O = int(round(0.5 * self._valence(metal, scenario="oxide") * n_metal))
         else:
             n_O = 0
-        n_Cl = int(round(cl_frac * n_S_total))
+        if self.cl_map is not None:
+            cl_per_fu = self.cl_map.get(round(cl_frac, 2))
+            if cl_per_fu is None:
+                raise KeyError(
+                    f"S-site Cl fraction {round(cl_frac, 2)} not in cl_map "
+                    f"{sorted(self.cl_map)}."
+                )
+            n_Cl = int(round(cl_per_fu * self.fu))
+        else:
+            n_Cl = int(round(cl_frac * n_S_total))
         n_Br = int(round(self.halide_total * self.fu)) - n_Cl
         n_S = n_S_total - n_O - n_Cl - n_Br
         if n_Br < 0 or n_S < 0:

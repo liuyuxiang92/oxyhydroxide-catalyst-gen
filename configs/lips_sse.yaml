@@ -1,0 +1,166 @@
+# Doped Li6PS6 solid-state electrolyte — multi-sublattice RL design.
+#
+# Two sublattice groups (each sums to 1):
+#   P_site = {<31 dopant metals>, P}  — agent picks ONE metal + its level (0.02-0.08)
+#   S_site = {O, Cl, S} (fixed order) — agent picks the O FORM flag (metal vs metal-oxide,
+#            masked by the metal's category) and a Cl selector; S is the residual.
+# Br = 1.7 - Cl and the charge-neutral Li vacancy are DERIVED in the recipe.
+#
+# Reward = weighted(conductivity, stability), both larger-is-better, scored on ONE
+# relaxed structure (DPA-3.1-3M / SSE_ABACUS).
+#
+# Usage (on the GPU box, with the models in place):
+#   python scripts/run_experiment.py --config configs/lips_sse.yaml \
+#       --method a2c --out runs/lips_a2c_s0 --train-seed 0 --dp-seed 0 --gen-seed 0
+
+env_type: multi_group
+
+groups:
+  # ---- P-site: pick one dopant metal at level 0.02-0.08; P takes the rest ----
+  - name: P_site
+    cation_set:
+      [Mn, Ni, Cu, Zn, Mo, In, Sn, Sb, W, Ru, Tm, Yb,
+       Mg, Al, Si, Sc, Ti, V, Cr, Fe, Co, Ga, Ge, Y, Zr, Nb, Hf, Ta, Ho, Er, Lu, P]
+    fraction_set: ["0.02", "0.03", "0.04", "0.05", "0.06", "0.07", "0.08",
+                   "0.92", "0.93", "0.94", "0.95", "0.96", "0.97", "0.98"]
+    total_units: 100
+    n_components: 2
+    episode_style: element_then_amount
+    constraint_filter: sse_doping
+    role: p_site
+    host_P: P
+    levels: ["0.02", "0.03", "0.04", "0.05", "0.06", "0.07", "0.08"]
+
+  # ---- S-site: O form-flag (metal/oxide, by metal category) + Cl selector ----
+  - name: S_site
+    cation_set: [O, Cl, S]
+    fraction_set: ["0.05", "0.10", "0.15", "0.20", "0.25", "0.30",
+                   "0.60", "0.65", "0.70", "0.75", "0.80", "0.85"]
+    total_units: 100
+    n_components: 3
+    episode_style: fixed_order_amount     # order pinned: O, then Cl, then S
+    constraint_filter: sse_doping
+    role: s_site
+    host_P: P
+    o_off: "0.05"      # metal form (no oxygen)
+    o_on: "0.10"       # metal-oxide form (oxygen added; amount derived in recipe)
+    cl_values: ["0.10", "0.15", "0.20", "0.25", "0.30"]
+    metal_only: [Ru]
+    oxide_only: [Mg, Al, Si, Sc, Ti, V, Cr, Fe, Co, Ga, Ge, Y, Zr, Nb, Hf, Ta, Ho, Er, Lu]
+    # "both" (decide O or not) = every other metal: Mn Ni Cu Zn Mo In Sn Sb W Tm Yb
+
+# ---- Predictor: build once -> relax once -> conductivity + stability -> combine ----
+predictor: structure_pipeline
+builder: sse
+base_poscar: POSCAR_supercell            # (Li6PS6)*500 ; edit to your absolute path
+formula_units: 500
+halide_total: 1.7                        # Cl + Br per formula unit
+o_off: 0.05                              # matches the S_site o_off flag
+eligible_region: {symbol: S, take: last, count: 1000}   # only the last 1000 S substitutable
+p_site_group: P_site
+s_site_group: S_site
+host: {P: P, S: S, Li: Li}
+p_site_per_fu: 1
+s_site_per_fu: 6
+li_per_fu: 6
+n_random_configs: 1                      # one configuration per candidate, then geo-opt
+
+# Cl selector (S-site fraction) -> exact Cl-per-formula-unit count.
+cl_map: {0.10: 0.6, 0.15: 0.8, 0.20: 1.0, 0.25: 1.2, 0.30: 1.4}
+
+# Charge-neutrality valence table (metal: {metal-form, oxide-form}); drives both the
+# Li-vacancy solve and the oxide O count. From the user's VALENCY_MAP.
+valences:
+  Li: 1
+  P: 5
+  S: -2
+  O: -2
+  Cl: -1
+  Br: -1
+  Cu: {sulfide: 2, oxide: 2}
+  Hf: {sulfide: 4, oxide: 4}
+  In: {sulfide: 3, oxide: 3}
+  Mn: {sulfide: 2, oxide: 4}
+  Mo: {sulfide: 4, oxide: 6}
+  Nb: {sulfide: 4, oxide: 5}
+  Ni: {sulfide: 2, oxide: 3}
+  Ru: {sulfide: 4, oxide: 2}
+  Sn: {sulfide: 4, oxide: 4}
+  W:  {sulfide: 4, oxide: 6}
+  Al: {sulfide: 3, oxide: 3}
+  Co: {sulfide: 2, oxide: 2}
+  Cr: {sulfide: 3, oxide: 3}
+  Fe: {sulfide: 2, oxide: 3}
+  Ga: {sulfide: 3, oxide: 3}
+  Mg: {sulfide: 2, oxide: 2}
+  Sb: {sulfide: 5, oxide: 3}
+  Si: {sulfide: 4, oxide: 4}
+  Ti: {sulfide: 4, oxide: 4}
+  V:  {sulfide: 3, oxide: 5}
+  Zn: {sulfide: 2, oxide: 2}
+  Zr: {sulfide: 4, oxide: 4}
+  Ge: {sulfide: 4, oxide: 4}
+  Y:  {sulfide: 3, oxide: 3}
+  Sc: {sulfide: 3, oxide: 3}
+  Ta: {sulfide: 5, oxide: 5}
+  Ho: {sulfide: 3, oxide: 3}
+  Er: {sulfide: 3, oxide: 3}
+  Tm: {sulfide: 3, oxide: 3}
+  Yb: {sulfide: 3, oxide: 3}
+  Lu: {sulfide: 3, oxide: 3}
+
+geo_opt:
+  model: models/DPA-3.1-3M.pt
+  head: SSE_ABACUS
+  fmax: 0.001
+  steps: 1000
+  relax_cell: true
+
+properties:
+  - name: conductivity
+    models: [SSE-models/models/model1.pt, SSE-models/models/model2.pt,
+             SSE-models/models/model3.pt, SSE-models/models/model4.pt,
+             SSE-models/models/model5.pt]
+    head: experiment
+    direction: max
+    weight: 1.0
+    scale: 1.0
+    objective: mean_minus_kstd
+  - name: stability
+    models: [SSE-models/models_stab/model1.pt, SSE-models/models_stab/model2.pt,
+             SSE-models/models_stab/model3.pt, SSE-models/models_stab/model4.pt,
+             SSE-models/models_stab/model5.pt]
+    head: null
+    direction: max
+    weight: 1.0
+    scale: 1.0
+    objective: mean_minus_kstd
+k: 1.0
+
+# ---- RL hyperparameters ----
+method: a2c
+pg_warmup_eps: 200
+pg_num_iters: 300
+pg_batch_eps: 16
+pg_lr_actor: 0.001
+pg_lr_critic: 0.001
+pg_entropy_coef: 0.05
+gen_temperature: 1.0
+gen_top_frac: 0.0
+gen_epsilon: 0.0
+gamma: 0.99
+pg_repeat_penalty_coef: 0.5
+pg_repeat_penalty_shape: log
+num_gen_eps: 200
+exploration_gen_eps: 0
+
+# ---- DQN-specific (used when --method dqn) ----
+dqn_lr: 0.001
+dqn_batch_size: 256
+dqn_warmup_eps: 200
+dqn_num_train_eps: 20000
+dqn_buffer_size: 50000
+dqn_grad_steps_per_ep: 5
+dqn_target_update_freq: 100
+dqn_eps_anneal_eps: 10000
+dqn_eps_min: 0.05
