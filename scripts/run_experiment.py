@@ -231,6 +231,12 @@ def main() -> None:
         mean, _ = predictor.predict(comp)
         return mean
 
+    def mg_reward_fn(groups: dict) -> float:
+        # MultiGroupEnv hands the predictor the structured {group: {el: frac}}
+        # mapping; the (recipe) predictor assembles the full structure from it.
+        mean, _ = predictor.predict(groups)
+        return mean
+
     # Build env first (without filter), then build the filter using env's
     # feasibility tables (_allowed_units, _possible_sums_by_k), then attach.
     # This is required for the ooh_phase filter and avoids the previous probe
@@ -243,6 +249,18 @@ def main() -> None:
             reward_fn=reward_fn,
             phase_filter=None,
         )
+    elif env_type == "multi_group":
+        from rl_matdesign.env_multigroup import MultiGroupEnv
+
+        # Each group carries its own CompositionEnv-style spec plus an optional
+        # constraint_filter; build the per-group filter instance here (env=None —
+        # multi-group filters mask by element/level/prior-group, not env tables).
+        built_groups = []
+        for g in cfg["groups"]:
+            gspec = dict(g)
+            gspec["constraint_filter"] = build_constraint_filter(g, env=None)
+            built_groups.append(gspec)
+        env = MultiGroupEnv(groups=built_groups, reward_fn=mg_reward_fn)
     else:
         env = CompositionEnv(
             cation_set=cfg["cation_set"],
@@ -256,7 +274,10 @@ def main() -> None:
             episode_style=cfg.get("episode_style", "element_then_amount"),
         )
 
-    env.phase_filter = build_constraint_filter(cfg, env=env)
+    # Single-group envs attach a top-level filter post-construction (some filters
+    # need the env's feasibility tables). multi_group filters live per-group.
+    if env_type != "multi_group":
+        env.phase_filter = build_constraint_filter(cfg, env=env)
 
     step_dim     = env.n_components
     fraction_set = list(env.fraction_set)

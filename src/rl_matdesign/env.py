@@ -241,6 +241,14 @@ class CompositionEnv:
         state = "".join(f"{el}{_format_fraction(units, self._total_units)}" for el, units in items)
         return f"{state}{self.anion_formula}"
 
+    def current_state_features(self) -> np.ndarray:
+        """Material features of the current (partial) state, for action selection.
+
+        Uniform accessor shared with :class:`MultiGroupEnv` so training/generation
+        code never reaches into env-specific state representation.
+        """
+        return np.asarray(self.state_featurizer(self.state), dtype=float)
+
     def cation_fractions(self) -> Dict[str, float]:
         if not self.state:
             return {}
@@ -310,8 +318,15 @@ class CompositionEnv:
                 allowed.append(u)
         return allowed
 
-    def allowed_actions(self) -> List[Tuple[Tuple[float, ...], Tuple[float, ...]]]:
-        """Return all feasibility-guaranteed (elem_onehot, comp_onehot) pairs."""
+    def allowed_actions(
+        self, *, prior_groups: Optional[List[Dict[str, float]]] = None
+    ) -> List[Tuple[Tuple[float, ...], Tuple[float, ...]]]:
+        """Return all feasibility-guaranteed (elem_onehot, comp_onehot) pairs.
+
+        ``prior_groups`` is forwarded to the constraint filter for cross-group
+        coupling under :class:`MultiGroupEnv`; it is ``None`` (and ignored) for
+        standalone single-group use, so existing callers are unaffected.
+        """
         if self.counter >= self.n_components:
             return []
 
@@ -339,6 +354,7 @@ class CompositionEnv:
                 possible_sums_by_k=self._possible_sums_by_k,
                 cation_set=self.cation_set,
                 fraction_set=self.fraction_set,
+                prior_groups=prior_groups,
             )
 
         return actions

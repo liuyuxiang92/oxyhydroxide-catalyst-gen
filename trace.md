@@ -453,3 +453,14 @@ All mechanical chemistry inputs now confirmed by user:
 - Weights: **same as CompositePredictor** — user defines weight/scale/direction per property in YAML. structure_pipeline reuses that schema.
 - POSCAR: just 3000 contiguous S; **last 1000 S are substitutable** → resolve_region(atoms, {symbol:S, take:last, count:1000}). Item 7 resolved (the Xe/Cl in the header comment line is noise).
 - Chemistry fully unblocked. Next: gitignore the large DPA model, then build MultiGroupEnv (task 4) — the keystone — then structure_pipeline (task 5) then LiPS recipe/constraint/config (task 6).
+
+### EARS — Progress (2026-06-10 15:44)
+<!-- concepts: multi-group-env, union-alphabet-encoding, training-loop-contract -->
+MultiGroupEnv (task 4) implemented + tested (tests/test_multigroup_env.py, all green; full suite green).
+Key design decisions discovered by reading training.py:
+- training.py represents actions as a_elem_idx=argmax(action_elem_onehot) into env.cation_set and a_comp_val=float(fraction_set[argmax(action_comp_onehot)]); element side uses Magpie FEATURES (frac_dim=1 scalar), step one-hot sized env.n_components. So a UNION cation_set/fraction_set across groups makes MultiGroupEnv drop-in compatible — no training.py changes for the loop itself.
+- Generation/reward path: training.py calls env.terminal_cation_fractions() and passes it straight to predictor.predict(). So MultiGroupEnv.terminal_cation_fractions() returns the STRUCTURED {group:{el:frac}} dict; the recipe predictor consumes that. terminal_comp_key() = structured tuple for dedup; reward_fn receives the structured dict.
+- Implementation = DELEGATION: one inner CompositionEnv per group (owns feasibility/bounds/episode_style); MultiGroupEnv re-encodes group-alphabet one-hots <-> union, concats per-group Magpie features, threads prior_groups (completed groups' comps) to the active group's filter.
+- GOTCHA: inner CompositionEnv.step() internally recomputes its own allowed_actions() WITHOUT prior_groups (for its own path, which MultiGroupEnv discards) -> filters get spurious prior_groups=None calls. Benign (result unused) but **constraint filters MUST tolerate prior_groups=None**. Added prior_groups kwarg to CompositionEnv.allowed_actions (default None -> byte-identical for existing callers).
+- N=1 MultiGroupEnv reproduces CompositionEnv bit-for-bit (regression test passes).
+- Now wiring env_type: multi_group into run_experiment.py (mg_reward_fn passes structured groups to predict; per-group filters via build_constraint_filter(group, env=None); skip the top-level phase_filter line for multi_group).

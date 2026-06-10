@@ -576,7 +576,7 @@ def train_dqn_online(
         for _t in range(env.n_components):
             _allowed = env.allowed_actions()
             _s_mat_sc = scaler.transform(
-                env.state_featurizer(env.state).reshape(1, -1))[0]
+                env.current_state_features().reshape(1, -1))[0]
             _s_step = np.zeros(env.n_components, dtype=float)
             _s_step[env.counter] = 1.0
             if float(np.random.rand()) < eps:
@@ -756,7 +756,7 @@ def _rollout_policy_episode(
     env.initialize()
     for _ in range(env.n_components):
         allowed = env.allowed_actions()
-        s_mat = scaler.transform(env.state_featurizer(env.state).reshape(1, -1))[0]
+        s_mat = scaler.transform(env.current_state_features().reshape(1, -1))[0]
         s_step = np.zeros(env.n_components, dtype=float)
         if env.counter < env.n_components:
             s_step[env.counter] = 1.0
@@ -812,7 +812,7 @@ def _rollout_pg_episode(
     env.initialize()
     for _ in range(env.n_components):
         allowed = env.allowed_actions()
-        s_mat = scaler.transform(env.state_featurizer(env.state).reshape(1, -1))[0]
+        s_mat = scaler.transform(env.current_state_features().reshape(1, -1))[0]
         s_step = np.zeros(env.n_components, dtype=float)
         if env.counter < env.n_components:
             s_step[env.counter] = 1.0
@@ -1150,7 +1150,7 @@ def _pg_single_episode_generate(
     env.initialize()
     for _ in range(env.n_components):
         allowed = env.allowed_actions()
-        s_mat = scaler.transform(env.state_featurizer(env.state).reshape(1, -1))[0]
+        s_mat = scaler.transform(env.current_state_features().reshape(1, -1))[0]
         s_step = np.zeros(env.n_components, dtype=float)
         if env.counter < env.n_components:
             s_step[env.counter] = 1.0
