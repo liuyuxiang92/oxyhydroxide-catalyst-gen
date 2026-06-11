@@ -63,16 +63,38 @@ No sum-to-1 constraint; the composition is normalized afterward.
 
 # 2. `multi_group` env — `groups:`
 
-`groups:` is an **ordered list**; each entry is a `fraction`-env spec plus a name
-and an optional per-group filter. The agent fills the groups in order; each group
-sums to 1 on its own. N=1 reproduces a plain `CompositionEnv`. The predictor
-receives the structured `{group_name: {element: fraction}}`.
+`groups:` is an **ordered list** of sublattice **groups**, filled in order. A group
+is the atomic unit; a single `fraction`/`integer_ratio` env is the one-group case.
+The predictor receives the structured `{group_name: {element: value}}`.
+
+**Common group keys**
 
 | Key | What it does | Choices / default |
 |---|---|---|
 | `name` | Group label (appears in the structured terminal) | string |
-| `cation_set` … `element_bounds` | Same meaning as the `fraction` env, **per group** | (see §1) |
-| `constraint_filter` + its kwargs | Per-group filter, e.g. `sse_doping` with `role:` etc. | (see §3) |
+| `kind` | Group type | `composition` (default) or `categorical` |
+| `sites` | Sublattice size (atoms per formula unit) — bridges fraction<->count and assembles the chemical formula (`amount × sites`) | `1` |
+| `constraint_filter` + its kwargs | Per-group filter (sees `prior_groups` for cross-group coupling) | (see §3) |
+
+**`kind: composition`** — pick N elements with amounts summing to 1. Reuses the
+`fraction`-env keys (`cation_set`, `fraction_set`, `total_units`, `n_components`,
+`episode_style`, `element_bounds`) plus friendly knobs:
+
+| Key | What it does | Choices / default |
+|---|---|---|
+| `amount` | Generate the value grid instead of writing `fraction_set` | `{min, max, step}` or a list |
+| `host` | A host element auto-takes the leftover (list only the dopants; wires a `host_complement` filter) | element symbol |
+
+**`kind: categorical`** — pick discrete **real values**; no sum-to-1. Each slot is
+one element with its own value list; the terminal returns the chosen values
+unchanged (so a builder reads `Cl = 1.0` / `O = 1` directly).
+
+| Key | What it does |
+|---|---|
+| `choices` | `[{element, values: [...]}, …]` — one slot per element |
+
+A categorical filter may mask a slot by an earlier group (e.g. `sse_doping` masks
+the O slot by the P-site metal's category).
 
 # 3. Constraint filters (`constraint_filter:`)
 
@@ -84,7 +106,8 @@ receives the structured `{group_name: {element: fraction}}`.
 | `phase_pattern` | Keep compositions matching phase patterns | `phase_patterns` |
 | `ooh_phase` | OOH oxyhydroxide phase screen | `target_phases` (default `[any]`) |
 | `chain` | Apply several filters in sequence | `filters: [ {constraint_filter: …, …}, … ]` |
-| `sse_doping` | LiPS P/S-site masks | `role` (`p_site`/`s_site`), `host_P`; **p_site:** `levels`; **s_site:** `o_off`, `o_on`, `cl_values`, `metal_only`, `oxide_only` |
+| `host_complement` | Dopants at a level, host takes the rest (wired automatically by a composition group's `host` knob) | `host_element`, `levels` |
+| `sse_doping` | Mask the LiPS S-site O-form slot by the metal's category | `o_element` (`O`), `host_P` (`P`), `metal_only`, `oxide_only` |
 | `"pkg.mod:Class"` | Your own filter (FQN) | your class's keys |
 
 \newpage
@@ -163,14 +186,16 @@ Reward = `sum weight * (direction*mean - k*std) / scale` over the properties.
 |---|---|---|
 | `base_poscar` | Base supercell | required |
 | `valences` | Charge table `{el: int \| {sulfide, oxide}}` (drives the Li-vacancy solve **and** oxide O count) | required |
-| `formula_units` | Formula units in the supercell | `500` |
 | `halide_total` | Cl + Br per formula unit | `1.7` |
-| `o_off` | O-pick threshold for "metal form" (no O) | `0.0` |
 | `eligible_region` | Substitutable S region | `{symbol: S, take: last, count: 1000}` |
-| `cl_map` | Cl selector -> exact Cl-per-formula-unit | none |
+| `formula_units` | Formula units in the supercell — **inferred from the POSCAR** (host-P count / `p_site_per_fu`) unless set | inferred |
 | `p_site_group` / `s_site_group` | Group names to read | `P_site` / `S_site` |
 | `host` | `{P, S, Li}` host symbols | `{P:P, S:S, Li:Li}` |
 | `p_site_per_fu` / `s_site_per_fu` / `li_per_fu` | Sites per formula unit | `1` / `6` / `6` |
+
+The S-site reads the categorical values directly — O is a form flag (`0` metal /
+`>0` oxide), Cl is a real per-f.u. count. `Br = halide_total − Cl` and the
+charge-neutral Li vacancy are derived. (No `cl_map` / `o_off`.)
 
 # 6. RL method & hyperparameters
 
