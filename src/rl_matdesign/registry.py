@@ -44,16 +44,6 @@ def _make_composite(cfg: dict, *, seed: Optional[int] = None, **_):
     return CompositePredictor(cfg, seed=seed)
 
 
-def _make_hea(cfg: dict, *, seed: Optional[int] = None, **_):
-    from .predictors.hea import HEAPropertyPredictor
-    return HEAPropertyPredictor(cfg, seed=seed)
-
-
-def _make_perovskite(cfg: dict, *, seed: Optional[int] = None, **_):
-    from .predictors.perovskite import PerovskitePropertyPredictor
-    return PerovskitePropertyPredictor(cfg, seed=seed)
-
-
 def _make_sinter_calcine(cfg: dict, **_):
     from .predictors.sinter_calcine import SinterCalcineRFPredictor
     return SinterCalcineRFPredictor(
@@ -103,8 +93,6 @@ PREDICTORS: Dict[str, Factory] = {
     "dp_property":        _make_dp_property,
     "composite":          _make_composite,
     "structure_pipeline": _make_structure_pipeline,
-    "hea":                _make_hea,
-    "perovskite":         _make_perovskite,
     "sinter_calcine":     _make_sinter_calcine,
     "ooh":                _make_ooh,
     "dummy":              _make_dummy,
@@ -115,13 +103,19 @@ PREDICTORS: Dict[str, Factory] = {
 # Built-in structure-builder factories (composition/groups -> ASE Atoms)
 # ---------------------------------------------------------------------------
 
+def _make_substitute_builder(cfg: dict, *, seed: Optional[int] = None, **_):
+    from .predictors.builders.substitute import SubstituteBuilder
+    return SubstituteBuilder(cfg, seed=seed)
+
+
 def _make_sse_builder(cfg: dict, *, seed: Optional[int] = None, **_):
     from .predictors.builders.sse import SSESupercellBuilder
     return SSESupercellBuilder(cfg, seed=seed)
 
 
 BUILDERS: Dict[str, Factory] = {
-    "sse": _make_sse_builder,
+    "substitute": _make_substitute_builder,
+    "sse":        _make_sse_builder,
 }
 
 
