@@ -34,11 +34,20 @@ Config keys
     geo_opt:          optional ``{model, head, fmax, steps, relax_cell, enabled}``;
                       omit / ``enabled: false`` to score the unrelaxed structure.
     k:                uncertainty coefficient for the objective folding.
+    sweep:            optional ``{name, values}`` — an inner optimization over a
+                      shared operating condition (e.g. temperature). For each
+                      candidate, every property is scored at each value and the
+                      single value maximizing the combined reward is kept; it is
+                      substituted into each property's fparam ``null`` slot and
+                      reported as a ``<name>`` stat (→ ``obj_<name>_mean`` CSV
+                      column). Structures are built+relaxed once and reused.
     properties:       non-empty list; each entry:
         name, backend (energy|property), models (or legacy dp_models), head,
         output_index, output_aggregator, energy_per_atom, direction (max|min),
-        weight, scale, objective. In ``share_structure: false`` an entry may
-        also carry its own builder / base_poscar / site_symbol / n_random_configs.
+        weight, scale, objective, fparam, aparam. A ``null`` in ``fparam`` marks
+        the slot filled by the sweep value (requires a top-level ``sweep``). In
+        ``share_structure: false`` an entry may also carry its own builder /
+        base_poscar / site_symbol / n_random_configs.
 """
 from __future__ import annotations
 
@@ -70,6 +79,24 @@ class StructureScorePredictor:
         go = cfg.get("geo_opt") or {}
         self.geo_opt: Dict[str, Any] = dict(go)
         self.geo_opt_enabled: bool = bool(go) and bool(go.get("enabled", True))
+
+        # Optional inner optimization over a shared operating condition (e.g.
+        # temperature). For each candidate we score every property at each sweep
+        # value and keep the single value maximizing the combined reward. The
+        # value is substituted into each property's fparam `null` placeholder(s).
+        sweep = cfg.get("sweep")
+        self.sweep: Optional[Dict[str, Any]] = None
+        if sweep is not None:
+            values = sweep.get("values")
+            if not values:
+                raise ValueError(
+                    "sweep needs a non-empty 'values' list (e.g. temperatures to "
+                    "try for each composition)."
+                )
+            self.sweep = {
+                "name": str(sweep.get("name", "sweep")),
+                "values": [float(v) for v in values],
+            }
 
         raw_props = cfg.get("properties")
         if not raw_props:
@@ -126,6 +153,19 @@ class StructureScorePredictor:
                     f"{list(_OBJECTIVES)}."
                 )
 
+            # `null` entries in fparam mark the slot filled by the sweep value.
+            fparam = p.get("fparam")
+            sweep_slots = (
+                [j for j, x in enumerate(fparam) if x is None]
+                if isinstance(fparam, (list, tuple)) else []
+            )
+            if sweep_slots and self.sweep is None:
+                raise ValueError(
+                    f"properties[{i}] ({name!r}) has a null placeholder in fparam "
+                    f"but no top-level 'sweep' is configured. Add a 'sweep' block "
+                    "(e.g. {name: temperature, values: [...]}) or fill the fparam."
+                )
+
             self.properties.append({
                 "name": name,
                 "backend": backend,
@@ -134,6 +174,9 @@ class StructureScorePredictor:
                 "output_index": int(p.get("output_index", 0)),
                 "output_aggregator": str(p.get("output_aggregator", "index")),
                 "energy_per_atom": bool(p.get("energy_per_atom", True)),
+                "fparam": fparam,
+                "sweep_slots": sweep_slots,
+                "aparam": p.get("aparam"),
                 "direction": _DIRECTION_ALIASES[direction],
                 "weight": float(p.get("weight", 1.0)),
                 "scale": scale,
@@ -165,18 +208,26 @@ class StructureScorePredictor:
     # PropertyPredictor protocol
     # ------------------------------------------------------------------
 
-    def predict(self, candidate: Any) -> Tuple[float, float]:
+    def _combine(self, stats: Dict[str, Tuple[float, float]]) -> float:
+        """Weighted/signed/scaled fold of per-property stats into one reward.
+
+        Shared by ``predict`` and the sweep argmax so both rank temperatures by
+        the identical objective.
+        """
         from ..training import objective_from_mean_std
 
-        stats = self._raw_stats(candidate)
         reward = 0.0
-        stds: List[float] = []
         for prop in self.properties:
             m, s = stats[prop["name"]]
             v = objective_from_mean_std(prop["direction"] * m, s, prop["objective"], self.k)
             reward += prop["weight"] * v / prop["scale"]
-            stds.append(s)
-        return float(reward), float(np.mean(stds)) if stds else 0.0
+        return float(reward)
+
+    def predict(self, candidate: Any) -> Tuple[float, float]:
+        stats = self._raw_stats(candidate)
+        reward = self._combine(stats)
+        stds = [stats[prop["name"]][1] for prop in self.properties]
+        return reward, float(np.mean(stds)) if stds else 0.0
 
     def predict_raw(self, candidate: Any) -> Tuple[float, float]:
         """Combined value from raw means (no std penalty) — for the dp_mean column."""
@@ -204,7 +255,10 @@ class StructureScorePredictor:
         if cached is not None:
             return cached
 
-        stats: Dict[str, Tuple[float, float]] = {}
+        # 1. Materialize structures once (build + optional relax) — independent
+        #    of any sweep value. Shared: one relaxed cell scored by every
+        #    property; else: each property builds (and relaxes) its own.
+        prop_structures: Dict[str, List[Any]] = {}
         if self.share_structure:
             structures = self._shared_builder.build(
                 candidate, n_configs=self.n_random_configs, rng=self._rng
@@ -212,7 +266,7 @@ class StructureScorePredictor:
             if self.geo_opt_enabled:
                 structures = [self._relax(s) for s in structures]
             for prop in self.properties:
-                stats[prop["name"]] = self._score(prop, structures)
+                prop_structures[prop["name"]] = structures
         else:
             for prop, builder in zip(self.properties, self._builders):
                 structures = builder.build(
@@ -220,14 +274,51 @@ class StructureScorePredictor:
                 )
                 if self.geo_opt_enabled:
                     structures = [self._relax(s) for s in structures]
-                stats[prop["name"]] = self._score(prop, structures)
+                prop_structures[prop["name"]] = structures
+
+        # 2. Score. No sweep: score each property once. Sweep: try each value,
+        #    keep the single (shared) value maximizing the combined reward — the
+        #    expensive build+relax above is reused across all sweep values.
+        if self.sweep is None:
+            stats = {
+                p["name"]: self._score(p, prop_structures[p["name"]])
+                for p in self.properties
+            }
+        else:
+            best_stats: Optional[Dict[str, Tuple[float, float]]] = None
+            best_reward: Optional[float] = None
+            best_value: Optional[float] = None
+            for v in self.sweep["values"]:
+                trial = {
+                    p["name"]: self._score(
+                        p, prop_structures[p["name"]], fparam=self._fparam_at(p, v)
+                    )
+                    for p in self.properties
+                }
+                r = self._combine(trial)
+                if best_reward is None or r > best_reward:
+                    best_reward, best_stats, best_value = r, trial, v
+            stats = dict(best_stats)  # type: ignore[arg-type]
+            stats[self.sweep["name"]] = (float(best_value), 0.0)
 
         # Single-entry cache: the generation loop already memoizes by comp key
         # at the outer level; this guards accidental double-eval within one call.
         self._stats_cache = {key: stats}
         return stats
 
-    def _score(self, prop: Dict[str, Any], structures: List[Any]) -> Tuple[float, float]:
+    @staticmethod
+    def _fparam_at(prop: Dict[str, Any], value: float) -> Any:
+        """Return *prop*'s fparam with its ``null`` slots filled by *value*."""
+        if not prop["sweep_slots"]:
+            return prop["fparam"]      # T-independent property (or no fparam)
+        out = list(prop["fparam"])
+        for j in prop["sweep_slots"]:
+            out[j] = value
+        return out
+
+    def _score(
+        self, prop: Dict[str, Any], structures: List[Any], *, fparam: Any = None,
+    ) -> Tuple[float, float]:
         if prop["backend"] == "energy":
             from ..utils.dp_eval import eval_energy_ase
             values = eval_energy_ase(
@@ -241,6 +332,8 @@ class StructureScorePredictor:
                 structures, models, elem_to_type,
                 output_index=prop["output_index"],
                 output_aggregator=prop["output_aggregator"],
+                fparam=fparam if fparam is not None else prop["fparam"],
+                aparam=prop["aparam"],
             )
         arr = np.asarray(values, dtype=float)
         return float(np.mean(arr)), float(np.std(arr))

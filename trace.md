@@ -526,3 +526,27 @@ Stages 1-3 of the predictor refactor implemented + committed (1: 814afc3 remove 
 - Preserved training.py consumer contract: predict + predict_raw (dp_mean col) + per_objective_stats (per-obj CSV cols).
 Deleted the 4 old predictor modules + their 4 test files; added test_structure_score.py (14 tests). Migrated ALL 4 configs to structure_score (hea/perovskite: substitute+energy; ti_alloy: share_structure:false 2 property objs; lips_sse: sse+2 property objs). Verified all 4 configs construct the predictor with correct share/backends. Suite: 150 passed.
 Decision: math formula is IDENTICAL across both regimes — reward = Σ w·objective_from_mean_std(dir·mean,std,obj)/scale — so the merge is genuinely one predictor, the only branch is where structures come from. Remaining: docs (yaml_config_reference.md + PDF) + README, then commit Stage 3.
+
+### EARS — Progress (2026-06-11 14:08)
+<!-- concepts: deepmd-property-eval, structure_score-predictor, fparam-conditioning -->
+LiPS run (lips_sse.yaml) crashed inside DeepMD: property fitting net has
+numb_fparam > 0 but eval passed no fparam and the checkpoint has no baked-in
+default_fparam_tensor -> AssertionError. Root cause is that the `property`
+backend path (eval_property_ensemble) never threaded fparam/aparam through to
+dp.eval. Fix in progress: add fparam/aparam params to eval_property_ensemble
+(broadcast scalar/vector -> (nframes, ndim)) and surface `fparam`/`aparam` keys
+on each structure_score property entry. User must supply the actual fparam value
+the conductivity head was trained on (model-specific, likely temperature).
+
+### EARS — Progress (2026-06-11 14:43)
+<!-- concepts: structure_score-predictor, temperature-optimization, fparam-sweep -->
+Implemented the inner fparam sweep in structure_score.py (approved plan): a
+top-level `sweep: {name, values}` block + `null` placeholders in each property's
+fparam vector. _raw_stats now materializes structures ONCE (build+relax), then
+loops sweep values, scoring all properties per value and keeping the single
+shared value maximizing _combine() (the shared weighted/signed/scaled reward,
+now factored out of predict). Chosen value injected as a stats entry keyed by
+sweep name -> surfaces as obj_<name>_mean in generated.csv with zero logging
+change. _score gained a keyword-only fparam override; non-sweep 2-arg call path
+unchanged so existing test stubs stay valid. Validation: null slot without a
+sweep block raises. Next: lips_sse.yaml config, tests, docs.

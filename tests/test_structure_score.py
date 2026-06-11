@@ -189,6 +189,99 @@ def test_independent_mean_minus_kstd_matches_old_composite():
 
 
 # --------------------------------------------------------------------------- #
+# sweep: per-composition operating-condition optimization (e.g. temperature)
+# --------------------------------------------------------------------------- #
+
+def _sweep_cfg(**over):
+    cfg = {
+        "builder": "substitute",
+        "base_poscar": "x",
+        "site_symbol": "X",
+        "k": 1.0,
+        "sweep": {"name": "temperature", "values": [460, 470, 480, 490]},
+        "properties": [
+            {"name": "conductivity", "backend": "property", "models": ["m"],
+             "fparam": [0.0, None, 6], "direction": "max", "weight": 2.0,
+             "scale": 1.0, "objective": "mean"},
+            {"name": "stability", "backend": "property", "models": ["s"],
+             "fparam": [0.0, None, 6, 4], "direction": "max", "weight": 1.0,
+             "scale": 1.0, "objective": "mean"},
+        ],
+    }
+    cfg.update(over)
+    return cfg
+
+
+def _bind_sweep_stub(p):
+    """Stub: build one shared cell; score depends on the swept T (fparam[1])."""
+    p._shared_builder = type("B", (), {
+        "build": lambda self, cand, *, n_configs, rng: [object()]})()
+
+    def _score(prop, structures, *, fparam=None):
+        T = fparam[1]
+        if prop["name"] == "conductivity":
+            return (float(T), 0.0)         # rises with T
+        return (1000.0 - float(T), 0.0)    # stability falls with T
+    p._score = _score
+
+
+def test_fparam_null_without_sweep_raises():
+    with pytest.raises(ValueError) as info:
+        StructureScorePredictor({"base_poscar": "x", "properties": [
+            {"name": "p", "backend": "property", "models": ["m"],
+             "fparam": [0.0, None, 6]}]})
+    assert "sweep" in str(info.value)
+
+
+def test_sweep_picks_temperature_maximizing_combined_reward():
+    p = StructureScorePredictor(_sweep_cfg())
+    _bind_sweep_stub(p)
+
+    # combined(T) = 2*T + (1000 - T) = 1000 + T  -> maximized at T = 490.
+    reward, _ = p.predict({"P_site": {"P": 0.95, "Mn": 0.05}})
+    assert abs(reward - (1000.0 + 490.0)) < 1e-9
+
+
+def test_sweep_reports_chosen_temperature_in_stats():
+    p = StructureScorePredictor(_sweep_cfg())
+    _bind_sweep_stub(p)
+
+    stats = p.per_objective_stats({"x": 1.0})
+    assert stats["temperature"] == (490.0, 0.0)        # chosen operating T
+    assert stats["conductivity"] == (490.0, 0.0)       # scored at that T
+    assert stats["stability"] == (510.0, 0.0)
+
+
+def test_sweep_with_temperature_independent_property():
+    # One swept property + one T-independent property (no null in fparam):
+    # the constant property is scored once and contributes equally at every T.
+    cfg = _sweep_cfg(properties=[
+        {"name": "conductivity", "backend": "property", "models": ["m"],
+         "fparam": [0.0, None, 6], "direction": "max", "weight": 1.0,
+         "scale": 1.0, "objective": "mean"},
+        {"name": "fixed", "backend": "property", "models": ["m"],
+         "fparam": [7.0], "direction": "max", "weight": 1.0, "scale": 1.0,
+         "objective": "mean"},
+    ])
+    p = StructureScorePredictor(cfg)
+    assert p.properties[1]["sweep_slots"] == []        # T-independent
+
+    p._shared_builder = type("B", (), {
+        "build": lambda self, cand, *, n_configs, rng: [object()]})()
+
+    def _score(prop, structures, *, fparam=None):
+        if prop["name"] == "conductivity":
+            return (float(fparam[1]), 0.0)             # rises with T
+        return (3.0, 0.0)                              # constant
+    p._score = _score
+
+    # combined(T) = T + 3  -> max at 490; reward = 493; chosen T = 490.
+    reward, _ = p.predict({"x": 1.0})
+    assert abs(reward - 493.0) < 1e-9
+    assert p.per_objective_stats({"x": 1.0})["temperature"] == (490.0, 0.0)
+
+
+# --------------------------------------------------------------------------- #
 # registry
 # --------------------------------------------------------------------------- #
 

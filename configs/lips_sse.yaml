@@ -89,6 +89,14 @@ geo_opt:
   steps: 1000
   relax_cell: true
 
+# Inner per-composition optimization over the operating temperature. For each
+# composition the predictor builds+relaxes ONCE, then scores both heads at every
+# temperature and keeps the single shared T maximizing (conductivity+stability).
+# The chosen T is logged as the `obj_temperature_mean` column in generated.csv.
+sweep:
+  name: temperature
+  values: [460, 470, 480, 490]        # K; 460-490 step 10
+
 properties:
   - name: conductivity
     backend: property                 # DP property head read on the shared relaxed cell
@@ -96,6 +104,7 @@ properties:
              SSE-models/models/model3.pt, SSE-models/models/model4.pt,
              SSE-models/models/model5.pt]
     head: experiment
+    fparam: [3.9568e-05, null, 6]     # [C, T, 6]; C = 1/25273, null = swept T slot
     direction: max
     weight: 1.0
     scale: 1.0
@@ -106,6 +115,7 @@ properties:
              SSE-models/models_stab/model3.pt, SSE-models/models_stab/model4.pt,
              SSE-models/models_stab/model5.pt]
     head: null
+    fparam: [3.9568e-05, null, 6, 4]  # [C, T, 6, 4]; C = 1/25273, null = swept T slot
     direction: max
     weight: 1.0
     scale: 1.0

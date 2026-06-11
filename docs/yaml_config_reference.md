@@ -138,6 +138,7 @@ particular setting of the dials below.
 | `geo_opt` | Relaxation stage (see below); omit / `enabled: false` to skip | optional |
 | `properties` | Non-empty list of objective specs (see below) | required |
 | `k` | Uncertainty coefficient | `1.0` |
+| `sweep` | Optional `{name, values}` — optimize a shared operating condition (e.g. temperature) per composition (see below) | optional |
 | `base_poscar` / `site_symbol` | Builder knobs (for `substitute`); inherited by per-objective builders when `share_structure: false` | — |
 
 `geo_opt:` sub-keys — `model` (default `models/DPA-3.1-3M.pt`), `head` (user-defined),
@@ -156,9 +157,41 @@ particular setting of the dials below.
 | `objective` | `mean_minus_kstd` / `mean` / `mean_plus_kstd` | `mean_minus_kstd` |
 | `energy_per_atom` *(energy backend)* | Normalize by atom count | `true` |
 | `output_index` / `output_aggregator` *(property backend)* | Which vector component / collapse mode | `0` / `index` (`index`/`mean`/`max`) |
+| `fparam` / `aparam` *(property backend)* | Frame / atomic parameters for heads trained with them. A `null` in `fparam` marks the slot filled by the `sweep` value (requires a top-level `sweep`) | none |
 
 Reward = `sum weight * objective_from_mean_std(direction*mean, std, objective, k) / scale`
 over the properties (identical formula in both `share_structure` regimes).
+
+### `sweep:` — per-composition operating-condition optimization
+
+Some property heads depend on an external operating condition (e.g. temperature)
+passed as a frame parameter. `sweep: {name, values}` turns that condition into an
+**inner optimization**: for each composition the predictor scores every property
+at each value and keeps the single shared value maximizing the **combined**
+reward. Because the structure is built + relaxed **once** and reused, sweeping is
+cheap (only the property inference repeats).
+
+```yaml
+sweep:
+  name: temperature
+  values: [460, 470, 480, 490]
+properties:
+  - name: conductivity
+    backend: property
+    fparam: [3.9568e-05, null, 6]      # null = the swept temperature slot
+    direction: max
+    ...
+  - name: stability
+    backend: property
+    fparam: [3.9568e-05, null, 6, 4]
+    direction: max
+    ...
+```
+
+The chosen value is logged per candidate as `obj_<name>_mean` (e.g.
+`obj_temperature_mean`) in `generated.csv`. A property with no `null` in its
+`fparam` (or an `energy` backend) is condition-independent — scored once and
+contributing equally at every sweep value.
 
 **Migration cheatsheet** (old -> `structure_score`):
 
