@@ -13,8 +13,9 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from rl_matdesign.env import CompositionEnv  # noqa: E402
-from rl_matdesign.env_multigroup import MultiGroupEnv  # noqa: E402
+from rl_matdesign.env_multigroup import MultiGroupEnv, normalize_group_spec  # noqa: E402
 from rl_matdesign.constraints.base import ConstraintFilter  # noqa: E402
+from rl_matdesign.registry import resolve_constraint  # noqa: E402
 
 
 def _drive_first_allowed(env):
@@ -22,6 +23,15 @@ def _drive_first_allowed(env):
     while env.counter < env.n_components:
         env.step(env.allowed_actions()[0])
     return env
+
+
+def _build(group_specs):
+    built = []
+    for g in group_specs:
+        gs = normalize_group_spec(g)
+        gs["constraint_filter"] = resolve_constraint(gs.get("constraint_filter"), gs, env=None)
+        built.append(gs)
+    return MultiGroupEnv(groups=built)
 
 
 def test_n1_reproduces_composition_env():
@@ -82,3 +92,47 @@ def test_prior_groups_delivers_earlier_group_to_later_filter():
     assert real, "S-site filter never received prior_groups"
     p_site_comp = {"Mn": 0.05, "Ni": 0.95}
     assert all(p == [p_site_comp] for p in real)
+
+
+def test_amount_range_expands_fraction_set():
+    g = normalize_group_spec(
+        {"cation_set": ["Ti", "Al"], "amount": {"min": 0.0, "max": 0.04, "step": 0.01},
+         "n_components": 2}
+    )
+    assert g["fraction_set"] == ["0.00", "0.01", "0.02", "0.03", "0.04"]
+    assert g["total_units"] == 100
+    assert g["sites"] == 1
+
+
+def test_host_knob_dopant_at_level_host_takes_rest():
+    g = {"name": "P_site", "cation_set": ["Mn", "Ni", "Ru"], "host": "P",
+         "amount": {"min": 0.02, "max": 0.08, "step": 0.01}, "sites": 1}
+    # normalization wires the host_complement filter + complements automatically
+    n = normalize_group_spec(g)
+    assert n["cation_set"][-1] == "P" and n["constraint_filter"] == "host_complement"
+    assert "0.95" in n["fraction_set"] and "0.05" in n["fraction_set"]
+
+    env = _build([g])
+    levels = {f"{x/100:.2f}" for x in range(2, 9)}
+    for _ in range(50):
+        env.initialize()
+        while env.counter < env.n_components:
+            env.step(env.allowed_actions()[int(np.random.randint(len(env.allowed_actions())))])
+        comp = env.terminal_cation_fractions()["P_site"]
+        metals = [k for k in comp if k != "P"]
+        assert len(metals) == 1
+        assert f"{comp[metals[0]]:.2f}" in levels            # dopant at a level
+        assert abs(comp["P"] - (1 - comp[metals[0]])) < 1e-9  # host took the rest
+
+
+def test_sites_assembles_real_counts_and_formula():
+    g1 = {"name": "P", "cation_set": ["Mn"], "host": "P",
+          "amount": {"min": 0.05, "max": 0.05, "step": 0.01}, "sites": 1}
+    g2 = {"name": "X", "cation_set": ["A", "B"], "fraction_set": ["0.10", "0.20", "0.80", "0.90"],
+          "total_units": 10, "n_components": 2, "sites": 6}
+    env = _drive_first_allowed(_build([g1, g2]))
+    asm = env.assembled_composition()
+    # P-site sites=1 -> fractions; X-site sites=6 -> counts summing to 6
+    assert abs((asm.get("Mn", 0) + asm.get("P", 0)) - 1.0) < 1e-9
+    assert abs((asm.get("A", 0) + asm.get("B", 0)) - 6.0) < 1e-9
+    assert env.terminal_formula  # readable, non-empty

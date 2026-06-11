@@ -45,6 +45,58 @@ from .env import CompositionEnv, EpisodeStep, _step_one_hot
 from .featurization import featurize_formula
 
 
+def normalize_group_spec(g: Dict[str, Any]) -> Dict[str, Any]:
+    """Expand a *friendly* composition-group spec into full CompositionEnv params.
+
+    Friendly knobs handled here so the env config stays terse:
+
+    * ``amount: {min, max, step}`` (or a list) -> generates ``fraction_set``.
+    * ``host: <el>`` -> lists only the dopants in ``cation_set``; the host is added
+      and auto-takes the complement via a ``host_complement`` filter (so no
+      hand-written complements and no per-scenario "host-takes-rest" constraint).
+    * ``sites: N`` -> kept (the sublattice size; used for formula assembly and by
+      the builder to place real atom counts).
+
+    Returns the spec unchanged if it has no ``amount`` (an explicit ``fraction_set``
+    is left as-is). The ``constraint_filter`` it may set is a *name* (built later by
+    the caller via the registry), matching how groups are otherwise resolved.
+    """
+    g = dict(g)
+    g.setdefault("sites", 1)
+    if g.get("kind", "composition") != "composition":
+        return g
+
+    amount = g.pop("amount", None)
+    if amount is None:
+        return g
+
+    if isinstance(amount, (list, tuple)):
+        amounts = [float(x) for x in amount]
+        step = None
+    else:
+        lo, hi, step = float(amount["min"]), float(amount["max"]), float(amount["step"])
+        n = int(round((hi - lo) / step))
+        amounts = [round(lo + i * step, 6) for i in range(n + 1)]
+    amt_strs = [f"{a:.2f}" for a in amounts]
+
+    host = g.get("host")
+    if host:
+        comp_strs = [f"{round(1.0 - a, 2):.2f}" for a in amounts]
+        dopants = [e for e in g["cation_set"] if e != host]
+        g["cation_set"] = dopants + [host]
+        g["fraction_set"] = amt_strs + comp_strs
+        g.setdefault("n_components", 2)
+        if not g.get("constraint_filter"):
+            g["constraint_filter"] = "host_complement"
+            g["host_element"] = host
+            g["levels"] = amt_strs
+    else:
+        g["fraction_set"] = amt_strs
+
+    g.setdefault("total_units", int(round(1.0 / step)) if step else 100)
+    return g
+
+
 class MultiGroupEnv:
     """Fixed-order sequence of ``CompositionEnv`` groups (each sums to 1)."""
 
@@ -65,10 +117,12 @@ class MultiGroupEnv:
         # Build one inner CompositionEnv per group. Inner reward is a no-op — this
         # env computes the single terminal reward over all groups.
         self.group_names: List[str] = []
+        self._sites: List[int] = []
         self._inners: List[CompositionEnv] = []
         for i, g in enumerate(groups):
             name = str(g.get("name", f"group{i}"))
             self.group_names.append(name)
+            self._sites.append(int(g.get("sites", 1)))
             inner = CompositionEnv(
                 cation_set=g["cation_set"],
                 fraction_set=g.get("fraction_set") or None,
@@ -220,15 +274,30 @@ class MultiGroupEnv:
             for name, inner in zip(self.group_names, self._inners)
         )
 
+    def assembled_composition(self) -> Dict[str, float]:
+        """Per-formula-unit composition ``{element: count}`` across all groups.
+
+        Each group contributes ``fraction × sites`` per element, so the result is
+        the real chemical composition (counts per formula unit). For a single group
+        with ``sites=1`` this is just the fractions — consistent with a plain
+        ``fraction`` env.
+        """
+        out: Dict[str, float] = {}
+        for inner, sites in zip(self._inners, self._sites):
+            for el, frac in inner.cation_fractions().items():
+                out[el] = out.get(el, 0.0) + frac * sites
+        return out
+
     @property
     def terminal_formula(self) -> str:
-        """Human-readable combined label (per-group formulas), for generated.csv."""
+        """Readable assembled chemical formula (per formula unit), for generated.csv."""
         if not self._is_terminal():
             return ""
-        return " | ".join(
-            f"{name}:{inner.terminal_formula}"
-            for name, inner in zip(self.group_names, self._inners)
+        items = sorted(
+            ((el, n) for el, n in self.assembled_composition().items() if n > 1e-9),
+            key=lambda t: (-t[1], t[0]),
         )
+        return "".join(f"{el}{n:.3g}" for el, n in items)
 
 
 def _ordered_union(items) -> List[str]:

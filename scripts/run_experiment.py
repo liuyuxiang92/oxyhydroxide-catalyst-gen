@@ -256,15 +256,15 @@ def main() -> None:
             phase_filter=None,
         )
     elif env_type == "multi_group":
-        from rl_matdesign.env_multigroup import MultiGroupEnv
+        from rl_matdesign.env_multigroup import MultiGroupEnv, normalize_group_spec
 
-        # Each group carries its own CompositionEnv-style spec plus an optional
-        # constraint_filter; build the per-group filter instance here (env=None —
-        # multi-group filters mask by element/level/prior-group, not env tables).
+        # Normalize each group's friendly knobs (amount/host/sites) into full
+        # CompositionEnv params, then build the per-group constraint instance
+        # (env=None — multi-group filters mask by element/level/prior-group).
         built_groups = []
         for g in cfg["groups"]:
-            gspec = dict(g)
-            gspec["constraint_filter"] = build_constraint_filter(g, env=None)
+            gspec = normalize_group_spec(g)
+            gspec["constraint_filter"] = build_constraint_filter(gspec, env=None)
             built_groups.append(gspec)
         env = MultiGroupEnv(groups=built_groups, reward_fn=mg_reward_fn)
     else:

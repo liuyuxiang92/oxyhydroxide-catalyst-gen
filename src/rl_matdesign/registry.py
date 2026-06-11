@@ -195,6 +195,11 @@ def _make_sse_doping(cfg: dict, *, env=None, **_):
     return SSEDopingFilter(cfg, env=env)
 
 
+def _make_host_complement(cfg: dict, *, env=None, **_):
+    from .constraints.host_complement import HostComplementFilter
+    return HostComplementFilter(cfg, env=env)
+
+
 CONSTRAINTS: Dict[str, Factory] = {
     "smact_charge":      _make_smact_charge,
     "last_step_element": _make_last_step_element,
@@ -202,6 +207,7 @@ CONSTRAINTS: Dict[str, Factory] = {
     "phase_pattern":     _make_phase_pattern,
     "chain":             _make_chain,
     "sse_doping":        _make_sse_doping,
+    "host_complement":   _make_host_complement,
 }
 
 
