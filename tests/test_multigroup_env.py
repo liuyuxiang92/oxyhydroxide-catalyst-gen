@@ -136,3 +136,45 @@ def test_sites_assembles_real_counts_and_formula():
     assert abs((asm.get("Mn", 0) + asm.get("P", 0)) - 1.0) < 1e-9
     assert abs((asm.get("A", 0) + asm.get("B", 0)) - 6.0) < 1e-9
     assert env.terminal_formula  # readable, non-empty
+
+
+def test_categorical_group_returns_real_values():
+    p = {"name": "P_site", "cation_set": ["Mn", "Ni"], "host": "P",
+         "amount": {"min": 0.05, "max": 0.05, "step": 0.01}, "sites": 1}
+    s = {"name": "S_site", "kind": "categorical", "sites": 6,
+         "choices": [{"element": "O", "values": ["none", "oxide"]},
+                     {"element": "Cl", "values": [0.6, 0.8, 1.0, 1.2, 1.4]}]}
+    env = _build([p, s])
+    assert env.n_components == 4  # P: 2 steps + S: 2 slots
+    for _ in range(60):
+        env.initialize()
+        while env.counter < env.n_components:
+            env.step(env.allowed_actions()[int(np.random.randint(len(env.allowed_actions())))])
+        t = env.terminal_cation_fractions()["S_site"]
+        assert t["O"] in ("none", "oxide")              # ORIGINAL label, not a code
+        assert t["Cl"] in (0.6, 0.8, 1.0, 1.2, 1.4)     # ORIGINAL number, not a fraction
+    # assembled composition: Cl is a real count; the O label is not an atom
+    asm = env.assembled_composition()
+    assert asm.get("Cl") in (0.6, 0.8, 1.0, 1.2, 1.4)
+    assert "none" not in asm and "oxide" not in asm
+
+
+def test_categorical_filter_sees_prior_groups():
+    captured = []
+
+    class Rec(ConstraintFilter):
+        def filter_actions(self, *, actions, prior_groups=None, **kw):
+            captured.append(prior_groups)
+            return actions
+
+    p = {"name": "P_site", "cation_set": ["Mn"], "host": "P",
+         "amount": {"min": 0.05, "max": 0.05, "step": 0.01}, "sites": 1}
+    s = {"name": "S_site", "kind": "categorical", "sites": 6,
+         "choices": [{"element": "Cl", "values": [0.6, 1.0]}],
+         "constraint_filter": Rec()}
+    # constraint is already an instance -> pass groups straight to the env
+    built = [normalize_group_spec(p), normalize_group_spec(s)]
+    built[0]["constraint_filter"] = resolve_constraint(built[0].get("constraint_filter"), built[0], env=None)
+    _drive_first_allowed(MultiGroupEnv(groups=built))
+    real = [c for c in captured if c is not None]
+    assert real and real[0] == [{"Mn": 0.05, "P": 0.95}]

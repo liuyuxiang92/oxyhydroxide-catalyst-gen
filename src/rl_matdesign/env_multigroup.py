@@ -97,8 +97,100 @@ def normalize_group_spec(g: Dict[str, Any]) -> Dict[str, Any]:
     return g
 
 
+class CategoricalGroup:
+    """A pick-from-list group: fixed-order slots, each ``(element, values)``; no sum-to-1.
+
+    Used for sublattices that are discrete choices rather than a composition (e.g. the
+    doped-Li₆PS₆ S-site: an oxygen *form* and a chlorine *count*). The agent picks one
+    value per slot in order. Values are encoded to a numeric **code** for the network's
+    scalar-amount input; the terminal returns the **original** values (so a builder reads
+    the real ``Cl = 1.0`` / ``O = "oxide"`` directly — no selector/cl_map).
+
+    Presents the minimal inner-group interface ``MultiGroupEnv`` drives.
+    """
+
+    def __init__(self, choices: Sequence[Dict[str, Any]], *, phase_filter=None) -> None:
+        self.slots: List[Tuple[str, List[Any]]] = [
+            (str(c["element"]), list(c["values"])) for c in choices
+        ]
+        if not self.slots:
+            raise ValueError("categorical group needs a non-empty 'choices' list.")
+        self.cation_set: List[str] = [el for el, _ in self.slots]
+        self.n_components: int = len(self.slots)
+        self.phase_filter = phase_filter
+
+        # Per-slot value <-> numeric-code maps; codes go into fraction_set.
+        self._slot_codes: List[List[Tuple[Any, str]]] = []
+        self._code_to_value: List[Dict[str, Any]] = []
+        codes: set[str] = set()
+        for _el, values in self.slots:
+            sc, c2v = [], {}
+            for i, v in enumerate(values):
+                code = self._encode_value(v, i)
+                sc.append((v, code))
+                c2v[code] = v
+                codes.add(code)
+            self._slot_codes.append(sc)
+            self._code_to_value.append(c2v)
+        self.fraction_set: List[str] = sorted(codes, key=float)
+        self.initialize()
+
+    @staticmethod
+    def _encode_value(v: Any, i: int) -> str:
+        try:
+            return f"{float(v):.2f}"          # numeric value -> its own code
+        except (ValueError, TypeError):
+            return f"{float(i):.2f}"           # label -> slot-local index code
+
+    def initialize(self) -> None:
+        self.counter = 0
+        self.state = ""                        # no composition string; featurizer falls back
+        self._picked: Dict[str, Any] = {}
+
+    def allowed_actions(self, *, prior_groups=None):
+        if self.counter >= self.n_components:
+            return []
+        el = self.slots[self.counter][0]
+        actions = [
+            (
+                tuple(encode_choice(el, self.cation_set).tolist()),
+                tuple(encode_choice(code, self.fraction_set).tolist()),
+            )
+            for _v, code in self._slot_codes[self.counter]
+        ]
+        if self.phase_filter is not None:
+            kw = dict(
+                actions=actions, units_map={},
+                steps_left=self.n_components - self.counter - 1,
+                allowed_units=[], possible_sums_by_k=[],
+                cation_set=self.cation_set, fraction_set=self.fraction_set,
+            )
+            if prior_groups is not None:
+                kw["prior_groups"] = prior_groups
+            actions = self.phase_filter.filter_actions(**kw)
+        return actions
+
+    def step(self, action) -> None:
+        elem_oh, comp_oh = action
+        el = decode_one_hot(elem_oh, self.cation_set)
+        expected = self.slots[self.counter][0]
+        if el != expected:
+            raise ValueError(
+                f"categorical slot {self.counter} expects {expected!r}, got {el!r}."
+            )
+        code = decode_one_hot(comp_oh, self.fraction_set)
+        self._picked[el] = self._code_to_value[self.counter][code]
+        self.counter += 1
+
+    def cation_fractions(self) -> Dict[str, Any]:
+        return dict(self._picked)
+
+    def terminal_comp_key(self) -> tuple:
+        return tuple(sorted((k, str(v)) for k, v in self._picked.items()))
+
+
 class MultiGroupEnv:
-    """Fixed-order sequence of ``CompositionEnv`` groups (each sums to 1)."""
+    """Fixed-order sequence of groups (composition: sum-to-1, or categorical: pick-list)."""
 
     def __init__(
         self,
@@ -118,23 +210,31 @@ class MultiGroupEnv:
         # env computes the single terminal reward over all groups.
         self.group_names: List[str] = []
         self._sites: List[int] = []
-        self._inners: List[CompositionEnv] = []
+        self._kinds: List[str] = []
+        self._inners: List[Any] = []
         for i, g in enumerate(groups):
             name = str(g.get("name", f"group{i}"))
+            kind = g.get("kind", "composition")
             self.group_names.append(name)
             self._sites.append(int(g.get("sites", 1)))
-            inner = CompositionEnv(
-                cation_set=g["cation_set"],
-                fraction_set=g.get("fraction_set") or None,
-                anion_formula="",  # the predictor/recipe assembles the real structure
-                n_components=int(g.get("n_components", 5)),
-                reward_fn=lambda _f: 0.0,
-                state_featurizer=state_featurizer,
-                phase_filter=g.get("constraint_filter"),
-                total_units=int(g.get("total_units", 20)),
-                element_bounds=g.get("element_bounds"),
-                episode_style=g.get("episode_style", "element_then_amount"),
-            )
+            self._kinds.append(kind)
+            if kind == "categorical":
+                inner = CategoricalGroup(
+                    g["choices"], phase_filter=g.get("constraint_filter"),
+                )
+            else:
+                inner = CompositionEnv(
+                    cation_set=g["cation_set"],
+                    fraction_set=g.get("fraction_set") or None,
+                    anion_formula="",  # the predictor/recipe assembles the real structure
+                    n_components=int(g.get("n_components", 5)),
+                    reward_fn=lambda _f: 0.0,
+                    state_featurizer=state_featurizer,
+                    phase_filter=g.get("constraint_filter"),
+                    total_units=int(g.get("total_units", 20)),
+                    element_bounds=g.get("element_bounds"),
+                    episode_style=g.get("episode_style", "element_then_amount"),
+                )
             self._inners.append(inner)
 
         # Union alphabets (first-seen order, deduplicated). Exact strings/symbols
@@ -283,9 +383,15 @@ class MultiGroupEnv:
         ``fraction`` env.
         """
         out: Dict[str, float] = {}
-        for inner, sites in zip(self._inners, self._sites):
-            for el, frac in inner.cation_fractions().items():
-                out[el] = out.get(el, 0.0) + frac * sites
+        for inner, sites, kind in zip(self._inners, self._sites, self._kinds):
+            for el, val in inner.cation_fractions().items():
+                if kind == "categorical":
+                    # categorical values are already per-f.u. counts; non-numeric
+                    # labels (e.g. an O "form") are not atoms — the builder resolves them.
+                    if isinstance(val, (int, float)):
+                        out[el] = out.get(el, 0.0) + float(val)
+                else:
+                    out[el] = out.get(el, 0.0) + val * sites
         return out
 
     @property
