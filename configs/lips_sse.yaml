@@ -34,7 +34,7 @@ groups:
     # "both" (decide O or not) = every other metal: Mn Ni Cu Zn Mo In Sn Sb W Tm Yb
 
 # ---- Predictor: build once -> relax once -> conductivity + stability ----
-predictor: structure_pipeline
+predictor: structure_score      # share_structure: true (default) = one relaxed cell, scored twice
 builder: sse
 base_poscar: POSCAR_supercell         # (Li6PS6)*500 ; edit to your absolute path
 halide_total: 1.7                     # Cl + Br per formula unit
@@ -91,6 +91,7 @@ geo_opt:
 
 properties:
   - name: conductivity
+    backend: property                 # DP property head read on the shared relaxed cell
     models: [SSE-models/models/model1.pt, SSE-models/models/model2.pt,
              SSE-models/models/model3.pt, SSE-models/models/model4.pt,
              SSE-models/models/model5.pt]
@@ -100,6 +101,7 @@ properties:
     scale: 1.0
     objective: mean_minus_kstd
   - name: stability
+    backend: property
     models: [SSE-models/models_stab/model1.pt, SSE-models/models_stab/model2.pt,
              SSE-models/models_stab/model3.pt, SSE-models/models_stab/model4.pt,
              SSE-models/models_stab/model5.pt]

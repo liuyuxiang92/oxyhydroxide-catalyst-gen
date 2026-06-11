@@ -46,16 +46,21 @@ n_components: 5           # Classic 5-component HEA
 constraint_filter: null   # No chemical constraint; DPA reward handles stability
 
 # ---- Predictor ----
-predictor: hea
+predictor: structure_score        # the one structure-based predictor
+builder: substitute               # fixed-lattice element swap onto placeholder sites
 poscar: data/hea/FCC.POSCAR       # FCC supercell template; change to BCC.POSCAR if needed
-dp_models:
-  - models/hea/model_1.pt
-  - models/hea/model_2.pt
-  - models/hea/model_3.pt
-site_symbol: "X"           # Placeholder element in the POSCAR template
-objective: mean_minus_kstd # Exploitation objective (use mean_plus_kstd for exploration)
+site_symbol: "X"                  # placeholder element in the POSCAR template
+n_random_configs: 5               # random configs per composition during RL training
 k: 1.0
-n_random_configs: 5        # Random configs per composition during RL training
+properties:
+  - name: energy
+    backend: energy               # DP potential energy (lower = more stable)
+    models:
+      - models/hea/model_1.pt
+      - models/hea/model_2.pt
+      - models/hea/model_3.pt
+    direction: min                # minimize formation energy
+    objective: mean_minus_kstd    # exploit (use mean_plus_kstd to explore)
 
 # ---- RL hyperparameters ----
 method: a2c                # Default method (overridable via --method)

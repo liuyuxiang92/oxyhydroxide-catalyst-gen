@@ -206,8 +206,9 @@ under built-in short names (Tier 3).
 
 For any system whose reward is "substitute composition onto a base POSCAR,
 evaluate with one or more DeepMD models, aggregate to a scalar", use the
-built-in `predictor: dp_structure`. See `configs/ti_alloy.yaml` for the
-canonical example. A minimal YAML:
+built-in `predictor: structure_score` with `builder: substitute` and one
+`backend: energy` property. See `configs/ti_alloy.yaml` for the canonical
+multi-objective example. A minimal YAML:
 
 ```yaml
 # Environment
@@ -223,13 +224,17 @@ element_bounds:                                 # per-element [min, max]
   # ...
 
 # Predictor
-predictor: dp_structure
+predictor: structure_score
+builder: substitute                             # fixed-lattice element swap
 base_poscar: data/ti_alloy/FCC.POSCAR           # placeholder 'X' on sub sites
-dp_models: [models/ti/m1.pt, models/ti/m2.pt]
 site_symbol: X
-output_index: 0                                 # which output of multi-output models
-objective: mean_minus_kstd                      # reward = -mean - k*std
 k: 1.0
+properties:
+  - name: energy
+    backend: energy                             # DP potential energy
+    models: [models/ti/m1.pt, models/ti/m2.pt]
+    direction: min                              # lower energy = better
+    objective: mean_minus_kstd                  # reward = -mean - k*std
 
 # Method + hyperparameters
 method: a2c
@@ -316,9 +321,7 @@ and `ooh_phase` constraint do.
 
 | Name | What it does |
 |---|---|
-| `dp_structure` | Generic DeepMD substitute-and-evaluate; the Tier-1 default |
-| `hea` | DP-ensemble formation energy on FCC/BCC, `site_symbol="X"` |
-| `perovskite` | DP-ensemble formation enthalpy on `LaBO₃`, `site_symbol="Fe"` |
+| `structure_score` | The one structure-based predictor: build (`builder`) -> [relax] -> score N properties (`backend: energy`/`property`) -> combine. `share_structure: false` for independent-structure multi-objective. The Tier-1 default |
 | `sinter_calcine` | RandomForest on Magpie features (no DeepMD) |
 | `ooh` | OOH catalyst overpotential (adsorbate placement + Sabatier formula) |
 | `dummy` | Random-noise predictor for smoke testing |

@@ -6,7 +6,7 @@ import pytest
 
 def test_builtin_predictor_names_present():
     from rl_matdesign.registry import PREDICTORS
-    expected = {"dp_structure", "hea", "perovskite", "sinter_calcine", "ooh", "dummy"}
+    expected = {"structure_score", "sinter_calcine", "ooh", "dummy"}
     assert expected.issubset(set(PREDICTORS))
 
 
@@ -30,7 +30,7 @@ def test_resolve_unknown_predictor_lists_builtins():
         resolve_predictor("definitely_not_a_real_kind", {})
     msg = str(info.value)
     # Helpful error must surface the registered short names.
-    assert "dp_structure" in msg and "ooh" in msg
+    assert "structure_score" in msg and "ooh" in msg
 
 
 def test_fqn_dispatch_loads_class(tmp_path, monkeypatch):

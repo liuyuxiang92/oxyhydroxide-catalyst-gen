@@ -90,44 +90,46 @@ constraint_filter: null        # per-element bounds handle the composition rules
 # (matching the units of the model output). Then `weight_k` controls the
 # relative pull each property exerts on the policy.
 
-predictor: composite
+predictor: structure_score
+share_structure: false         # each objective builds its OWN structure independently
 
-# Shared defaults inherited by each sub-objective (sub-cfg overrides win).
+# Shared builder knobs inherited by each objective (per-objective overrides win).
+builder: substitute            # fixed-lattice element swap onto placeholder sites
 base_poscar: /ABS/PATH/TO/your_ti_alloy.POSCAR
 site_symbol: Ti
 n_random_configs: 10           # random alloy-site assignments per composition
 
 # Global uncertainty weight (the `k` in `mean ± k*std`). Same for all
-# children; per-child effective weighting can be tuned via `scale`.
+# objectives; per-objective effective weighting can be tuned via `scale`.
 k: 1.0
 
-objectives:
-  # ---- Objective 1: property head output 0 (maximize, exploit) via dp_property ----
+properties:
+  # ---- Objective 1: property head output 0 (maximize, exploit) ----
   - name: prop0
-    predictor: dp_property
-    dp_models:
+    backend: property
+    models:
       - /ABS/PATH/TO/ti_dp_prop_1.pt
       - /ABS/PATH/TO/ti_dp_prop_2.pt
       - /ABS/PATH/TO/ti_dp_prop_3.pt
       - /ABS/PATH/TO/ti_dp_prop_4.pt
       - /ABS/PATH/TO/ti_dp_prop_5.pt
-    dp_head: property
+    head: property
     output_index: 0
     direction: max
     objective: mean_minus_kstd     # exploit — penalize ensemble disagreement
     weight: 1.0
     scale: 1.0                   # typical magnitude in this property's units
 
-  # ---- Objective 2: property head output 2 (minimize, exploit) via dp_property ----
+  # ---- Objective 2: property head output 2 (minimize, exploit) ----
   - name: prop2
-    predictor: dp_property
-    dp_models:
+    backend: property
+    models:
       - /ABS/PATH/TO/ti_dp_prop_1.pt
       - /ABS/PATH/TO/ti_dp_prop_2.pt
       - /ABS/PATH/TO/ti_dp_prop_3.pt
       - /ABS/PATH/TO/ti_dp_prop_4.pt
       - /ABS/PATH/TO/ti_dp_prop_5.pt
-    dp_head: property
+    head: property
     output_index: 2
     direction: min
     objective: mean_minus_kstd

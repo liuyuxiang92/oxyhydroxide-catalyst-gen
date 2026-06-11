@@ -54,16 +54,21 @@ n_components: 5
 constraint_filter: null   # Default: no constraint; DPA reward handles stability
 
 # ---- Predictor ----
-predictor: perovskite
+predictor: structure_score             # the one structure-based predictor
+builder: substitute                    # fixed-lattice element swap onto placeholder sites
 poscar: data/perovskite/LaBO3.POSCAR   # LaBO3 template; B-site marked as site_symbol
-dp_models:
-  - models/perovskite/model_1.pt
-  - models/perovskite/model_2.pt
-  - models/perovskite/model_3.pt
-site_symbol: "Fe"          # Placeholder for B-site atoms in the template POSCAR
-objective: mean_minus_kstd
-k: 1.0
+site_symbol: "Fe"                      # placeholder for B-site atoms in the template POSCAR
 n_random_configs: 5
+k: 1.0
+properties:
+  - name: energy
+    backend: energy                    # DP potential energy (lower = more stable)
+    models:
+      - models/perovskite/model_1.pt
+      - models/perovskite/model_2.pt
+      - models/perovskite/model_3.pt
+    direction: min                     # minimize formation enthalpy
+    objective: mean_minus_kstd
 
 # ---- RL hyperparameters ----
 method: a2c

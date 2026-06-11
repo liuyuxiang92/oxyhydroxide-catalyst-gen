@@ -109,7 +109,8 @@ class OOHCatalystPredictor:
         """Return (reward, std) for *composition*.
 
         Lower overpotential is better, so mean_overpotential is negated before
-        the objective function, mirroring how HEAPropertyPredictor negates energy.
+        the objective function, mirroring how an energy-backend objective uses
+        direction: min.
         Internally calls predict_raw() so results are cached.
         """
         raw_mean, std = self.predict_raw(composition)

@@ -29,19 +29,9 @@ Factory = Callable[..., Any]
 # Built-in predictor factories
 # ---------------------------------------------------------------------------
 
-def _make_dp_structure(cfg: dict, *, seed: Optional[int] = None, **_):
-    from .predictors.dp_structure import DPStructurePredictor
-    return DPStructurePredictor(cfg, seed=seed)
-
-
-def _make_dp_property(cfg: dict, *, seed: Optional[int] = None, **_):
-    from .predictors.dp_property import DPPropertyPredictor
-    return DPPropertyPredictor(cfg, seed=seed)
-
-
-def _make_composite(cfg: dict, *, seed: Optional[int] = None, **_):
-    from .predictors.composite import CompositePredictor
-    return CompositePredictor(cfg, seed=seed)
+def _make_structure_score(cfg: dict, *, seed: Optional[int] = None, **_):
+    from .predictors.structure_score import StructureScorePredictor
+    return StructureScorePredictor(cfg, seed=seed)
 
 
 def _make_sinter_calcine(cfg: dict, **_):
@@ -70,11 +60,6 @@ def _make_ooh(cfg: dict, *, seed: Optional[int] = None, **_):
     )
 
 
-def _make_structure_pipeline(cfg: dict, *, seed: Optional[int] = None, **_):
-    from .predictors.structure_pipeline import StructurePipelinePredictor
-    return StructurePipelinePredictor(cfg, seed=seed)
-
-
 def _make_dummy(cfg: dict, **_):
     import random as _random
 
@@ -89,10 +74,7 @@ def _make_dummy(cfg: dict, **_):
 
 
 PREDICTORS: Dict[str, Factory] = {
-    "dp_structure":       _make_dp_structure,
-    "dp_property":        _make_dp_property,
-    "composite":          _make_composite,
-    "structure_pipeline": _make_structure_pipeline,
+    "structure_score":    _make_structure_score,
     "sinter_calcine":     _make_sinter_calcine,
     "ooh":                _make_ooh,
     "dummy":              _make_dummy,

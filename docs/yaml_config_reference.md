@@ -117,56 +117,58 @@ the O slot by the P-site metal's category).
 | Value | What it does |
 |---|---|
 | `dummy` | Random reward (default; no models — smoke tests) |
-| `dp_structure` | Substitute placeholder sites -> DP **energy** ensemble |
-| `dp_property` | Substitute -> DP **property-vector** ensemble (`DeepProperty`) |
-| `composite` | Weighted combo of child predictors (shares the *composition*) |
-| `structure_pipeline` | Build once -> relax once -> N property ensembles (shares the *structure*) |
+| `structure_score` | **The one structure-based predictor** — build -> [relax] -> score N properties -> combine (see below) |
 | `ooh` | OOH overpotential (adsorbate slabs) |
-| `hea` / `perovskite` | `dp_structure` subclasses (different default `site_symbol`) |
 | `sinter_calcine` | RandomForest sintering/calcine temperature |
 | `"pkg.mod:Class"` | Your own predictor (FQN) |
 
-## `dp_structure` / `dp_property` keys
+## `structure_score` keys
+
+One predictor steered by dials. The pipeline is
+`builder.build -> [relax once, optional] -> score each property -> combine`.
+It replaces the former `dp_structure` / `dp_property` / `composite` /
+`structure_pipeline` (and the `hea` / `perovskite` aliases): each is now just a
+particular setting of the dials below.
 
 | Key | What it does | Default |
 |---|---|---|
-| `base_poscar` (or `poscar` / `poscar_template`) | Template with placeholder sites | required |
-| `dp_models` | List of `.pt` checkpoints | required |
-| `site_symbol` | Placeholder element | `X` (`hea`/`perovskite` differ) |
-| `dp_head` | Model head | none / `property` (dp_property) |
-| `objective` | `(mean,std)` -> scalar | `mean_minus_kstd`; also `mean`, `mean_plus_kstd` |
-| `k` | Uncertainty coefficient | `1.0` |
-| `n_random_configs` | Random placements averaged | `5` |
-| `energy_per_atom` *(dp_structure)* | Normalize by atom count | `true` |
-| `output_index` *(dp_property)* | Which vector component | `0` |
-| `output_aggregator` *(dp_property)* | Collapse vector -> scalar | `index` (`index`/`mean`/`max`) |
-| `maximize` *(dp_property)* | Larger raw value = better | `false` |
-
-## `composite` keys
-
-`objectives: [ {name, predictor, direction (min/max), weight, scale, objective}, … ]`,
-plus `k`. Shared `base_poscar` / `site_symbol` / `n_random_configs` inherit into
-children unless a child overrides them.
-
-## `structure_pipeline` keys
-
-| Key | What it does | Default |
-|---|---|---|
-| `builder` | Builder name/FQN (composition/groups -> ASE Atoms) | required (e.g. `sse`) |
-| `n_random_configs` | Placements per candidate | `1` |
+| `builder` | Builder name/FQN (`substitute` = fixed-lattice element swap; `sse` = doped supercell; or `pkg.mod:Class`) | `substitute` |
+| `share_structure` | `true` = build+relax **one** cell, score all properties on it; `false` = each property builds its **own** | `true` |
+| `n_random_configs` | Random placements per candidate | `1` |
 | `geo_opt` | Relaxation stage (see below); omit / `enabled: false` to skip | optional |
-| `properties` | List of property specs (see below) | required |
+| `properties` | Non-empty list of objective specs (see below) | required |
 | `k` | Uncertainty coefficient | `1.0` |
+| `base_poscar` / `site_symbol` | Builder knobs (for `substitute`); inherited by per-objective builders when `share_structure: false` | — |
 
 `geo_opt:` sub-keys — `model` (default `models/DPA-3.1-3M.pt`), `head` (user-defined),
 `fmax` (`0.001`), `steps` (`1000`), `relax_cell` (`true`), `enabled` (`true`).
 
-`properties[]:` sub-keys — `name`, `models` (ensemble list), `head`,
-`direction` (`max`/`min`), `weight` (`1.0`), `scale` (`1.0`),
-`objective` (`mean_minus_kstd`/`mean`/`mean_plus_kstd`),
-`output_index` (`0`), `output_aggregator` (`index`).
+`properties[]:` sub-keys:
 
-Reward = `sum weight * (direction*mean - k*std) / scale` over the properties.
+| Key | What it does | Default |
+|---|---|---|
+| `name` | Unique label (CSV column prefix) | `prop{i}` |
+| `backend` | `energy` (DP potential energy via ASE) or `property` (DP `DeepProperty` head) | `property` |
+| `models` (or legacy `dp_models`) | Ensemble checkpoint list | required |
+| `head` | DP head (energy: calculator head; property: `DeepProperty` head) | none |
+| `direction` | `max` / `min` (energy: use `min` for "lower is better") | `max` |
+| `weight` / `scale` | Combine weight / unit scale | `1.0` / `1.0` |
+| `objective` | `mean_minus_kstd` / `mean` / `mean_plus_kstd` | `mean_minus_kstd` |
+| `energy_per_atom` *(energy backend)* | Normalize by atom count | `true` |
+| `output_index` / `output_aggregator` *(property backend)* | Which vector component / collapse mode | `0` / `index` (`index`/`mean`/`max`) |
+
+Reward = `sum weight * objective_from_mean_std(direction*mean, std, objective, k) / scale`
+over the properties (identical formula in both `share_structure` regimes).
+
+**Migration cheatsheet** (old -> `structure_score`):
+
+| Old predictor | Now |
+|---|---|
+| `dp_structure` | `builder: substitute`, one property `backend: energy`, `direction: min` |
+| `dp_property` | `builder: substitute`, one property `backend: property` |
+| `hea` / `perovskite` | as `dp_structure`, with `site_symbol: X` / `Fe` |
+| `structure_pipeline` | `share_structure: true` (default), N `backend: property` objectives |
+| `composite` | `share_structure: false`, the `objectives:` list becomes `properties:` |
 
 ## `ooh` keys
 
@@ -180,7 +182,18 @@ Reward = `sum weight * (direction*mean - k*std) / scale` over the properties.
 
 \newpage
 
-# 5. Builder (`builder: sse`) keys
+# 5. Builders (`builder:`)
+
+A builder turns the agent's pick (a flat `{element: fraction}` or a structured
+`{group: {…}}`) into ASE structures. Built-ins:
+
+| `builder:` | What it does |
+|---|---|
+| `substitute` | Fixed-lattice element swap onto `site_symbol` placeholder sites (no vacancies). Keys: `base_poscar` (or `poscar`), `site_symbol` (default `X`). |
+| `sse` | Doped-supercell recipe (P->metal, S->O/Cl/Br, charge-neutral Li vacancies). Keys below. |
+| `"pkg.mod:Class"` | Your own builder (FQN) with `build(candidate, *, n_configs, rng)`. |
+
+## `sse` builder keys
 
 | Key | What it does | Default |
 |---|---|---|

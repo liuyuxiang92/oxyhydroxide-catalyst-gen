@@ -13,7 +13,8 @@ Two layers live here:
 
   :func:`substitute_sites` is a thin one-operation wrapper over the engine,
   preserving the original Random-Solid-Solution behavior (fill all placeholder
-  sites by fractional composition) for HEA / perovskite / ti_alloy / dp_structure.
+  sites by fractional composition); it backs the ``substitute`` builder used by
+  the HEA / perovskite / ti_alloy ``structure_score`` configs.
 
 * **Relaxation.** :func:`relax_structure` is the shared geometry-optimization
   capability (LBFGS + cell filter + a DeepMD calculator with a named head),

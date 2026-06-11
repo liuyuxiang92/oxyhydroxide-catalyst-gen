@@ -34,7 +34,7 @@ def load_ase_calculators(
         from deepmd.calculator import DP as DPCalculator
     except ImportError as exc:
         raise ImportError(
-            "DPStructurePredictor requires deepmd-kit (ASE calculator): "
+            "The energy backend requires deepmd-kit (ASE calculator): "
             "`pip install deepmd-kit`."
         ) from exc
     kwargs = {"head": head} if head is not None else {}
@@ -108,8 +108,8 @@ def eval_property_ensemble(
 
     Returns one scalar per (structure, model) pair (so an ensemble of M models on
     N structures yields N*M values), each collapsed from the model's output
-    vector via :func:`pick_scalar`. Shared by ``dp_property`` and the
-    ``structure_pipeline`` predictor.
+    vector via :func:`pick_scalar`. Used by the ``structure_score`` predictor's
+    ``property`` backend.
     """
     nframes = len(structures)
     natoms = len(structures[0])
