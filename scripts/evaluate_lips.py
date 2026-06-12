@@ -291,7 +291,10 @@ def _save_poscar(predictor: Any, candidate: Dict[str, Dict[str, float]], args: a
     relaxed = getattr(predictor, "geo_opt_enabled", False)
     if relaxed:
         atoms = predictor._relax(atoms)
-    ase_write(args.save_poscar, atoms, format="vasp")
+    # sort=True groups atoms by element so the POSCAR species/count lines are one
+    # clean run per element (Li In P S Cl O Br) instead of hundreds of site-order
+    # fragments. Scoring is order-invariant (mixed_type), so this is display-only.
+    ase_write(args.save_poscar, atoms, format="vasp", sort=True, vasp5=True)
     tag = "relaxed" if relaxed else "unrelaxed"
     print(f"  saved {tag} structure -> {args.save_poscar} ({len(atoms)} atoms)")
 
