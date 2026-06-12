@@ -1,9 +1,11 @@
 # Doped Li6PS6 solid-state electrolyte — a plain, friendly multi_group config.
 #
 # Two sublattice groups:
-#   P_site (composition) — pick ONE dopant metal; host P takes the rest.
-#   S_site (categorical) — pick the oxygen FORM (0 = metal form, 1 = metal-oxide,
-#                          masked by the metal's category) and the Cl count.
+#   P_site (independent) — pick TWO dopant metals from the same menu (repeats
+#                          allowed; the same element merges into one fraction);
+#                          host P takes the rest.
+#   S_site (categorical) — a per-metal oxygen FORM (0 = metal/sulfide, 1 = oxide,
+#                          each masked by its metal's category) + the Cl count.
 # Br = halide_total - Cl and the charge-neutral Li vacancy are derived by the
 # `sse` builder; formula_units is read from the POSCAR.
 #
@@ -90,10 +92,10 @@ valences:
   Lu: {sulfide: 3, oxide: 3}
 
 geo_opt:
-  model: models/DPA-3.1-3M.pt
+  model: ./models/DPA-3.1-3M_1.pt
   head: SSE_ABACUS
   fmax: 0.001
-  steps: 1000
+  steps: 10
   relax_cell: true
 
 # Inner per-composition optimization over the operating temperature. For each
@@ -114,9 +116,9 @@ properties:
     fparam: [0.00336, null, 6]        # [C, T, 6]; C = 1/(25+273), null = swept T slot
     transform: exp                    # head emits log(conductivity); report real value
     direction: max
-    weight: 1.0
+    weight: 0.5
     scale: 1.0
-    objective: mean_minus_kstd
+    objective: mean_plus_kstd
   - name: stability
     backend: property
     models: [SSE-models/models_stab/model1.pt, SSE-models/models_stab/model2.pt,
@@ -126,15 +128,15 @@ properties:
     fparam: [.00336, null, 6, 4]      # [C, T, 6, 4]; C = 1/(25+273), null = swept T slot
     transform: exp                    # head emits log(stability); report real value
     direction: max
-    weight: 1.0
+    weight: 0.5
     scale: 1.0
-    objective: mean_minus_kstd
+    objective: mean_plus_kstd
 k: 1.0
 
 # ---- RL hyperparameters ----
 method: a2c
 pg_warmup_eps: 200
-pg_num_iters: 300
+pg_num_iters: 500
 pg_batch_eps: 16
 pg_lr_actor: 0.001
 pg_lr_critic: 0.001
