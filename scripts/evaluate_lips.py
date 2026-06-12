@@ -192,20 +192,33 @@ def _fmt(x: float) -> str:
 def evaluate_one(
     predictor: Any, candidate: Dict[str, Dict[str, float]], sweep_name: str,
 ) -> Dict[str, Any]:
-    """Run the predictor and collect reward, dp_mean, per-property + breakdown."""
+    """Run the predictor and collect reward, dp_mean, per-property + breakdown.
+
+    Everything is derived from a **single** ``score_breakdown`` (one build + one
+    relax). ``best["reward"]`` already is the full objective (``_combine``, incl.
+    the std penalty), so we don't call ``predict`` / ``predict_raw`` again — those
+    would each rebuild and re-relax the cell.
+    """
     breakdown = predictor.score_breakdown(candidate)
     best = breakdown["best"]
     stats = best["stats"]                              # {prop: (mean, std)} at best T
-    reward, _std = predictor.predict(candidate)        # full objective (with std penalty)
-    raw_mean, _ = predictor.predict_raw(candidate)     # dp_mean column = Σ direction·mean
+    reward = float(best["reward"])                     # == predictor.predict(...)[0]
+    raw_mean = float(predictor.raw_combine(stats))     # dp_mean = Σ direction·mean
     formula = predictor.composition_formula(candidate) or "?"
+    # The exact (relaxed) cell that was scored, for optional saving.
+    structure = None
+    for lst in (breakdown.get("structures") or {}).values():
+        if lst:
+            structure = lst[0]
+            break
     return {
         "formula": formula,
-        "reward": float(reward),
-        "dp_mean": float(raw_mean),
+        "reward": reward,
+        "dp_mean": raw_mean,
         f"{sweep_name}": best["value"],
         "stats": stats,
         "rows": breakdown["rows"],
+        "structure": structure,
     }
 
 
@@ -324,7 +337,7 @@ def main() -> None:
         rows.append(res)
 
         if args.save_poscar:
-            _save_poscar(predictor, cand, args)
+            _save_poscar(predictor, cand, args, structure=res.get("structure"))
 
     if args.out_csv and rows:
         _write_csv(args.out_csv, rows, sweep_name)
@@ -336,21 +349,26 @@ def main() -> None:
             print(f"  {label}: {reason}")
 
 
-def _save_poscar(predictor: Any, candidate: Dict[str, Dict[str, float]], args: argparse.Namespace) -> None:
+def _save_poscar(
+    predictor: Any, candidate: Dict[str, Dict[str, float]], args: argparse.Namespace,
+    *, structure: Any = None,
+) -> None:
     from ase.io import write as ase_write
 
-    builder = getattr(predictor, "_shared_builder", None)
-    if builder is None:
-        builders = getattr(predictor, "_builders", None)
-        builder = builders[0] if builders else None
-    if builder is None:
-        print("[WARN] predictor exposes no builder; cannot save POSCAR.", flush=True)
-        return
-    structures = builder.build(candidate, n_configs=1)
-    atoms = structures[0]
     relaxed = getattr(predictor, "geo_opt_enabled", False)
-    if relaxed:
-        atoms = predictor._relax(atoms)
+    atoms = structure
+    if atoms is None:
+        # Fallback: no scored structure handed in — rebuild (and relax) once.
+        builder = getattr(predictor, "_shared_builder", None)
+        if builder is None:
+            builders = getattr(predictor, "_builders", None)
+            builder = builders[0] if builders else None
+        if builder is None:
+            print("[WARN] predictor exposes no builder; cannot save POSCAR.", flush=True)
+            return
+        atoms = builder.build(candidate, n_configs=1)[0]
+        if relaxed:
+            atoms = predictor._relax(atoms)
     # sort=True groups atoms by element so the POSCAR species/count lines are one
     # clean run per element (Li In P S Cl O Br) instead of hundreds of site-order
     # fragments. Scoring is order-invariant (mixed_type), so this is display-only.

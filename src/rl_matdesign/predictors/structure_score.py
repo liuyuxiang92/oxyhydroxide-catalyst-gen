@@ -213,7 +213,17 @@ class StructureScorePredictor:
         self._calc_cache: Dict[str, Any] = {}     # name -> ase calculators (energy backend)
         self._prop_cache: Dict[str, Tuple[List[Any], Dict[str, int]]] = {}  # name -> property models
         self._geo_calc: Optional[Any] = None
-        self._stats_cache: Dict[tuple, Dict[str, Tuple[float, float]]] = {}
+        # Persistent per-composition stats cache (LRU). Keyed by the canonical
+        # candidate key, it makes each unique composition build+relax+score
+        # exactly ONCE for the predictor's lifetime — so training repeats and
+        # duplicate generation rollouts of the same composition are free (the
+        # single biggest saving when geo_opt is expensive). `predict_cache_size`
+        # caps entries (<=0 = unbounded); each entry is a few floats, so a large
+        # cap is cheap. Set to 0/1 to effectively disable.
+        from collections import OrderedDict
+
+        self._stats_cache: "OrderedDict[tuple, Dict[str, Tuple[float, float]]]" = OrderedDict()
+        self._stats_cache_size: int = int(cfg.get("predict_cache_size", 200000))
 
     # ------------------------------------------------------------------
     # PropertyPredictor protocol
@@ -274,26 +284,44 @@ class StructureScorePredictor:
         at each sweep value (or just once if no sweep). Returns::
 
             {"rows": [{"value": v, "stats": {name: (mean, std)}, "reward": r}, ...],
-             "best": {"value": v*, "stats": {...}, "reward": r*}}
+             "best": {"value": v*, "stats": {...}, "reward": r*},
+             "structures": {prop_name: [relaxed Atoms, ...]}}
 
-        ``value`` is ``None`` when no sweep is configured. Used by
-        ``scripts/evaluate_lips.py`` to print how each property varies with the
-        swept condition without paying for repeated relaxations.
+        ``value`` is ``None`` when no sweep is configured. ``structures`` are the
+        exact (relaxed) cells that were scored, so a caller can save/inspect them
+        without re-building or re-relaxing. Used by ``scripts/evaluate_lips.py``.
         """
         prop_structures = self._materialize_structures(candidate)
         values = self.sweep["values"] if self.sweep is not None else [None]
         rows: List[Dict[str, Any]] = []
         for v in values:
-            stats = {
-                p["name"]: self._score(
-                    p, prop_structures[p["name"]],
-                    fparam=self._fparam_at(p, v) if v is not None else None,
-                )
-                for p in self.properties
-            }
+            if v is None:                       # no sweep — score each property once
+                stats = {
+                    p["name"]: self._score(p, prop_structures[p["name"]])
+                    for p in self.properties
+                }
+            else:
+                stats = {
+                    p["name"]: self._score(
+                        p, prop_structures[p["name"]], fparam=self._fparam_at(p, v)
+                    )
+                    for p in self.properties
+                }
             rows.append({"value": v, "stats": stats, "reward": self._combine(stats)})
         best = max(rows, key=lambda r: r["reward"])
-        return {"rows": rows, "best": best}
+        return {"rows": rows, "best": best, "structures": prop_structures}
+
+    def raw_combine(self, stats: Dict[str, Tuple[float, float]]) -> float:
+        """Σ weight·direction·mean/scale (no std penalty) — the dp_mean fold.
+
+        Mirrors :meth:`predict_raw` but operates on already-computed stats, so a
+        caller holding a ``score_breakdown`` result need not re-score.
+        """
+        raw = 0.0
+        for prop in self.properties:
+            m, _s = stats[prop["name"]]
+            raw += prop["weight"] * prop["direction"] * m / prop["scale"]
+        return float(raw)
 
     # ------------------------------------------------------------------
     # Internal
@@ -328,6 +356,7 @@ class StructureScorePredictor:
         key = self._key(candidate)
         cached = self._stats_cache.get(key)
         if cached is not None:
+            self._stats_cache.move_to_end(key)   # LRU: mark most-recently used
             return cached
 
         # 1. Materialize structures once (build + optional relax) — independent
@@ -359,9 +388,14 @@ class StructureScorePredictor:
             stats = dict(best_stats)  # type: ignore[arg-type]
             stats[self.sweep["name"]] = (float(best_value), 0.0)
 
-        # Single-entry cache: the generation loop already memoizes by comp key
-        # at the outer level; this guards accidental double-eval within one call.
-        self._stats_cache = {key: stats}
+        # Persistent LRU cache: each unique composition is built+relaxed+scored
+        # exactly once for the predictor's lifetime; all later occurrences (across
+        # training episodes / duplicate generation rollouts) are hits.
+        self._stats_cache[key] = stats
+        cap = self._stats_cache_size
+        if cap and cap > 0:
+            while len(self._stats_cache) > cap:
+                self._stats_cache.popitem(last=False)   # evict least-recently used
         return stats
 
     @staticmethod

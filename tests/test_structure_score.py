@@ -158,6 +158,56 @@ def test_per_objective_stats_and_predict_raw():
     assert abs(raw - 21.0) < 1e-9
 
 
+def test_persistent_cache_recomputes_each_composition_once():
+    p = StructureScorePredictor(_shared_cfg())
+    calls = {"build": 0}
+
+    def _build(self, cand, *, n_configs, rng):
+        calls["build"] += 1
+        return [object()]
+
+    p._shared_builder = type("B", (), {"build": _build})()
+    fixed = {"conductivity": (10.0, 1.0), "stability": (5.0, 0.5)}
+    p._score = lambda prop, structures: fixed[prop["name"]]
+
+    A = {"P_site": {"Mn": 0.05}}
+    B = {"P_site": {"Fe": 0.05}}
+    p.predict(A); p.predict(A)        # second A is a cache hit
+    p.predict(B)                      # different composition -> miss
+    p.predict(A)                      # A STILL cached (multi-entry, not single)
+    # Old single-entry cache would rebuild A here (3 builds); persistent cache: 2.
+    assert calls["build"] == 2
+    assert len(p._stats_cache) == 2
+
+
+def test_cache_size_cap_evicts_lru():
+    p = StructureScorePredictor(_shared_cfg(predict_cache_size=2))
+    p._shared_builder = type("B", (), {
+        "build": lambda self, cand, *, n_configs, rng: [object()]})()
+    fixed = {"conductivity": (10.0, 1.0), "stability": (5.0, 0.5)}
+    p._score = lambda prop, structures: fixed[prop["name"]]
+    for el in ("Mn", "Fe", "Co"):     # 3 comps, cap 2 -> oldest (Mn) evicted
+        p.predict({"P_site": {el: 0.05}})
+    assert len(p._stats_cache) == 2
+
+
+def test_score_breakdown_returns_structures_and_raw_combine_matches():
+    p = StructureScorePredictor(_shared_cfg())
+    sentinel = object()
+    p._shared_builder = type("B", (), {
+        "build": lambda self, cand, *, n_configs, rng: [sentinel]})()
+    fixed = {"conductivity": (10.0, 1.0), "stability": (5.0, 0.5)}
+    p._score = lambda prop, structures: fixed[prop["name"]]
+
+    bd = p.score_breakdown({"x": 1.0})
+    # The exact (relaxed) cell that was scored is returned for reuse (no re-build).
+    assert bd["structures"]["conductivity"] == [sentinel]
+    # raw_combine on the breakdown stats == predict_raw (no extra scoring needed).
+    assert abs(p.raw_combine(bd["best"]["stats"]) - p.predict_raw({"x": 1.0})[0]) < 1e-9
+    # best reward == predict's full objective.
+    assert abs(bd["best"]["reward"] - p.predict({"x": 1.0})[0]) < 1e-9
+
+
 # --------------------------------------------------------------------------- #
 # share_structure: false  (old composite)
 # --------------------------------------------------------------------------- #
