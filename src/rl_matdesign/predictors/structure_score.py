@@ -58,6 +58,9 @@ import numpy as np
 
 _DIRECTION_ALIASES = {"min": -1.0, "minimize": -1.0, "max": +1.0, "maximize": +1.0}
 _OBJECTIVES = ("mean", "mean_minus_kstd", "mean_plus_kstd")
+# Per-property output transforms, applied to each ensemble member before the
+# mean/std fold (so heads that regress log(value) report the real value).
+_TRANSFORMS = ("none", "exp")
 # Builder knobs inherited by per-objective builders (share_structure: false)
 # when the objective entry doesn't set them. Mirrors the old composite behavior.
 _SHARED_BUILDER_KEYS = (
@@ -166,6 +169,13 @@ class StructureScorePredictor:
                     "(e.g. {name: temperature, values: [...]}) or fill the fparam."
                 )
 
+            transform = str(p.get("transform", "none")).lower()
+            if transform not in _TRANSFORMS:
+                raise ValueError(
+                    f"properties[{i}].transform = {transform!r}; expected one of "
+                    f"{sorted(_TRANSFORMS)}. Use 'exp' for heads that emit log(value)."
+                )
+
             self.properties.append({
                 "name": name,
                 "backend": backend,
@@ -181,6 +191,7 @@ class StructureScorePredictor:
                 "weight": float(p.get("weight", 1.0)),
                 "scale": scale,
                 "objective": objective,
+                "transform": transform,
                 "n_random_configs": int(p.get("n_random_configs", self.n_random_configs)),
             })
 
@@ -383,6 +394,11 @@ class StructureScorePredictor:
                 aparam=prop["aparam"],
             )
         arr = np.asarray(values, dtype=float)
+        # Map each ensemble member back to real units before folding, so a head
+        # that emits log(value) reports the real mean/std (and the objective's
+        # std penalty is taken on the real distribution).
+        if prop.get("transform") == "exp":
+            arr = np.exp(arr)
         return float(np.mean(arr)), float(np.std(arr))
 
     def _get_calculators(self, prop: Dict[str, Any]) -> List[Any]:

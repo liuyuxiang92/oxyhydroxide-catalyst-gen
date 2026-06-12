@@ -86,6 +86,32 @@ def test_legacy_dp_models_key_accepted():
     assert p.properties[0]["models"] == ["a.pt", "b.pt"]
 
 
+def test_bad_transform_raises():
+    with pytest.raises(ValueError) as info:
+        StructureScorePredictor({"base_poscar": "x", "properties": [
+            {"name": "p", "backend": "property", "models": ["m"], "transform": "sqrt"}]})
+    assert "transform" in str(info.value)
+
+
+def test_transform_exp_maps_log_outputs_to_real_units(monkeypatch):
+    import numpy as np
+    import rl_matdesign.utils.dp_eval as dp_eval
+
+    p = StructureScorePredictor({"base_poscar": "x", "properties": [
+        {"name": "conductivity", "backend": "property", "models": ["m1.pt", "m2.pt"],
+         "direction": "max", "transform": "exp", "objective": "mean"}]})
+    # Avoid loading real DeepProperty models; ensemble emits *log* values.
+    p._get_prop_models = lambda prop: ([object(), object()], {})
+    monkeypatch.setattr(
+        dp_eval, "eval_property_ensemble",
+        lambda *a, **k: [float(np.log(12.0)), float(np.log(8.0))],
+    )
+    mean, std = p._score(p.properties[0], [object()])
+    # exp applied per ensemble member, then mean/std on the real distribution.
+    assert abs(mean - float(np.mean([12.0, 8.0]))) < 1e-9
+    assert abs(std - float(np.std([12.0, 8.0]))) < 1e-9
+
+
 def test_default_builder_is_substitute():
     from rl_matdesign.predictors.builders.substitute import SubstituteBuilder
     p = StructureScorePredictor({"base_poscar": "x", "properties": [

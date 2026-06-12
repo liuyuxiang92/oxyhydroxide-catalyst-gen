@@ -108,6 +108,7 @@ properties:
              SSE-models/models/model5.pt]
     head: experiment
     fparam: [0.00336, null, 6]        # [C, T, 6]; C = 1/(25+273), null = swept T slot
+    transform: exp                    # head emits log(conductivity); report real value
     direction: max
     weight: 1.0
     scale: 1.0
@@ -119,6 +120,7 @@ properties:
              SSE-models/models_stab/model5.pt]
     head: null
     fparam: [.00336, null, 6, 4]      # [C, T, 6, 4]; C = 1/(25+273), null = swept T slot
+    transform: exp                    # head emits log(stability); report real value
     direction: max
     weight: 1.0
     scale: 1.0
