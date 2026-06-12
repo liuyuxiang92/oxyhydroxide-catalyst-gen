@@ -245,19 +245,55 @@ class StructureScorePredictor:
     def batch_predict(self, candidates: List[Any]) -> List[Tuple[float, float]]:
         return [self.predict(c) for c in candidates]
 
+    def composition_formula(self, candidate: Any) -> Optional[str]:
+        """Full composition label of the built structure, if the builder exposes it.
+
+        Delegates to the (shared, or first per-objective) builder's
+        ``composition_formula``. Builders that don't implement it (most) return
+        ``None``, so callers fall back to the env's ``terminal_formula``.
+        """
+        builder = self._shared_builder or (self._builders[0] if self._builders else None)
+        fn = getattr(builder, "composition_formula", None)
+        return fn(candidate) if callable(fn) else None
+
+    def score_breakdown(self, candidate: Any) -> Dict[str, Any]:
+        """Diagnostic: per-sweep-value property stats + combined reward.
+
+        Builds (and relaxes) the structure **once**, then scores every property
+        at each sweep value (or just once if no sweep). Returns::
+
+            {"rows": [{"value": v, "stats": {name: (mean, std)}, "reward": r}, ...],
+             "best": {"value": v*, "stats": {...}, "reward": r*}}
+
+        ``value`` is ``None`` when no sweep is configured. Used by
+        ``scripts/evaluate_lips.py`` to print how each property varies with the
+        swept condition without paying for repeated relaxations.
+        """
+        prop_structures = self._materialize_structures(candidate)
+        values = self.sweep["values"] if self.sweep is not None else [None]
+        rows: List[Dict[str, Any]] = []
+        for v in values:
+            stats = {
+                p["name"]: self._score(
+                    p, prop_structures[p["name"]],
+                    fparam=self._fparam_at(p, v) if v is not None else None,
+                )
+                for p in self.properties
+            }
+            rows.append({"value": v, "stats": stats, "reward": self._combine(stats)})
+        best = max(rows, key=lambda r: r["reward"])
+        return {"rows": rows, "best": best}
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
-    def _raw_stats(self, candidate: Any) -> Dict[str, Tuple[float, float]]:
-        key = self._key(candidate)
-        cached = self._stats_cache.get(key)
-        if cached is not None:
-            return cached
+    def _materialize_structures(self, candidate: Any) -> Dict[str, List[Any]]:
+        """Build (and optionally relax) the structure(s) for each property once.
 
-        # 1. Materialize structures once (build + optional relax) — independent
-        #    of any sweep value. Shared: one relaxed cell scored by every
-        #    property; else: each property builds (and relaxes) its own.
+        Independent of any sweep value. Shared: one relaxed cell reused by every
+        property; else: each property builds (and relaxes) its own.
+        """
         prop_structures: Dict[str, List[Any]] = {}
         if self.share_structure:
             structures = self._shared_builder.build(
@@ -275,6 +311,17 @@ class StructureScorePredictor:
                 if self.geo_opt_enabled:
                     structures = [self._relax(s) for s in structures]
                 prop_structures[prop["name"]] = structures
+        return prop_structures
+
+    def _raw_stats(self, candidate: Any) -> Dict[str, Tuple[float, float]]:
+        key = self._key(candidate)
+        cached = self._stats_cache.get(key)
+        if cached is not None:
+            return cached
+
+        # 1. Materialize structures once (build + optional relax) — independent
+        #    of any sweep value.
+        prop_structures = self._materialize_structures(candidate)
 
         # 2. Score. No sweep: score each property once. Sweep: try each value,
         #    keep the single (shared) value maximizing the combined reward — the

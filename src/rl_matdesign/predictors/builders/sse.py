@@ -156,6 +156,34 @@ class SSESupercellBuilder:
             "Li": n_Li, "Li_delete": n_Li_delete, "metal_symbol": metal,  # type: ignore[dict-item]
         }
 
+    def composition_formula(self, candidate: Dict[str, Dict[str, float]]) -> str:
+        """Full per-formula-unit composition of the *built* structure.
+
+        Unlike the env's `terminal_formula` (which only sees the agent's picks —
+        the P-site metal and the S-site O/Cl), this reports every element the
+        builder actually places, including the host ``S`` that survives, the
+        derived ``Br`` (``halide_total − Cl``), and the charge-balanced ``Li``.
+        Used for the ``formula`` column in generated.csv so the label matches the
+        structure that was scored.
+        """
+        c = self.counts(candidate)
+        fu = self.fu
+        raw = {
+            c["metal_symbol"]: c["metal"],
+            self.host_P: c["P"],
+            "O": c["O"],
+            "Cl": c["Cl"],
+            "Br": c["Br"],
+            self.host_S: c["S"],
+            self.host_Li: c["Li"],
+        }
+        merged: Dict[str, float] = {}
+        for el, n in raw.items():
+            if n > 0:
+                merged[el] = merged.get(el, 0.0) + n / fu
+        items = sorted(merged.items(), key=lambda t: (-t[1], t[0]))
+        return "".join(f"{el}{n:.3g}" for el, n in items)
+
     def build(
         self, candidate: Dict[str, Dict[str, float]], *, n_configs: int = 1, rng=None
     ) -> List["ase.Atoms"]:

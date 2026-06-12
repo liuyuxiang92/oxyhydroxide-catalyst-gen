@@ -1308,8 +1308,21 @@ def generate_candidates(
                 raw_mean, std = predictor.predict(comp)
                 predictor_raw_cache[comp_key] = (raw_mean, std)
 
+            # Prefer the builder's full composition label (includes host/derived
+            # elements the env never sees — e.g. SSE's surviving S, derived Br,
+            # charge-balanced Li); fall back to the env's pick-only formula.
+            formula = env.terminal_formula
+            comp_formula = getattr(predictor, "composition_formula", None)
+            if callable(comp_formula):
+                try:
+                    full = comp_formula(comp)
+                    if full:
+                        formula = full
+                except Exception:
+                    pass
+
             row: dict = {
-                "formula": env.terminal_formula,
+                "formula": formula,
                 "reward": reward,
                 "dp_mean": raw_mean,
             }

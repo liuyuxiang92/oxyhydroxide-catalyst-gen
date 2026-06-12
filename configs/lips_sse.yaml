@@ -104,7 +104,7 @@ properties:
              SSE-models/models/model3.pt, SSE-models/models/model4.pt,
              SSE-models/models/model5.pt]
     head: experiment
-    fparam: [3.9568e-05, null, 6]     # [C, T, 6]; C = 1/25273, null = swept T slot
+    fparam: [0.00336, null, 6]        # [C, T, 6]; C = 1/(25+273), null = swept T slot
     direction: max
     weight: 1.0
     scale: 1.0
@@ -115,7 +115,7 @@ properties:
              SSE-models/models_stab/model3.pt, SSE-models/models_stab/model4.pt,
              SSE-models/models_stab/model5.pt]
     head: null
-    fparam: [3.9568e-05, null, 6, 4]  # [C, T, 6, 4]; C = 1/25273, null = swept T slot
+    fparam: [.00336, null, 6, 4]      # [C, T, 6, 4]; C = 1/(25+273), null = swept T slot
     direction: max
     weight: 1.0
     scale: 1.0
