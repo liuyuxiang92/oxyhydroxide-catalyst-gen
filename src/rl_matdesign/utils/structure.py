@@ -168,9 +168,15 @@ def build_substituted_structure(
             n_put = sum(int(c) for c in op.put.values())
             n_rm = int(op.remove)
             if n_put + n_rm > n_sel:
+                sel_repr = op.sites if not isinstance(op.sites, (list, tuple)) else (
+                    f"<{n_sel} sites: {list(op.sites[:6])}…>" if n_sel > 6 else list(op.sites)
+                )
                 raise ValueError(
                     f"SublatticeOp wants to place {n_put} + delete {n_rm} on only "
-                    f"{n_sel} selected sites (selector={op.sites!r})."
+                    f"{n_sel} selected sites (selector={sel_repr}). The eligible "
+                    "region is too small for this composition — enlarge it (for the "
+                    "SSE builder, set a bigger `eligible_region` or an "
+                    "`eligible_region_fallback` that holds all of O+Cl+Br)."
                 )
             order = [int(i) for i in rng.permutation(sel)]
             cursor = 0

@@ -39,6 +39,10 @@ groups:
 # ---- Predictor: build once -> relax once -> conductivity + stability ----
 predictor: structure_score      # share_structure: true (default) = one relaxed cell, scored twice
 builder: sse
+# S-site substitution region: dope the last 1000 S by default; only when a
+# composition's O+Cl+Br won't fit (e.g. two oxide dopants) expand to the first 2000.
+eligible_region: {symbol: S, take: last, count: 1000}
+eligible_region_fallback: {symbol: S, take: first, count: 2000}
 base_poscar: POSCAR_supercell         # (Li6PS6)*500 ; edit to your absolute path
 halide_total: 1.7                     # Cl + Br per formula unit
 host: {P: P, S: S, Li: Li}

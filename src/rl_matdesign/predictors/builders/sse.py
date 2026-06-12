@@ -34,7 +34,15 @@ class SSESupercellBuilder:
 
         self.valences: Dict[str, Any] = dict(cfg["valences"])  # {el: int | {sulfide,oxide}}
         self.halide_total: float = float(cfg.get("halide_total", 1.7))  # per f.u.
-        self.eligible_region = cfg.get("eligible_region", {"symbol": "S", "take": "last", "count": 1000})
+        # Primary substitution region (default: last 1000 host-S sites). A larger
+        # `eligible_region_fallback` is used ONLY for compositions whose O+Cl+Br
+        # exceeds the primary region — so the common case keeps the bounded region
+        # and only the "not enough room" case expands (e.g. last 1000 -> first 2000).
+        _host_S = str(cfg.get("host", {}).get("S", "S"))
+        self.eligible_region = cfg.get(
+            "eligible_region", {"symbol": _host_S, "take": "last", "count": 1000}
+        )
+        self.eligible_region_fallback = cfg.get("eligible_region_fallback")
         # formula_units is normally inferred from the POSCAR (host-P count /
         # p_site_per_fu); an explicit config value overrides.
         self._fu_cfg = cfg.get("formula_units")
@@ -240,7 +248,13 @@ class SSESupercellBuilder:
 
         c = self.counts(candidate)
         template = ase_read(self.base_poscar)
+
+        # Place O/Cl/Br in the primary region; if it can't hold them, fall back to
+        # the larger region (only this overflow case expands).
+        n_sub = c["O"] + c["Cl"] + c["Br"]
         s_region = resolve_region(template, self.eligible_region)
+        if n_sub > len(s_region) and self.eligible_region_fallback is not None:
+            s_region = resolve_region(template, self.eligible_region_fallback)
 
         metal_put = {m: n for m, n in c["metals"].items() if n > 0}
         ops = [

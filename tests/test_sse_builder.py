@@ -140,6 +140,65 @@ def test_build_produces_correct_atom_counts(tmp_path):
         assert len(st) == len(syms) - c["Li_delete"]
 
 
+def _lips_supercell(tmp_path, fu):
+    from ase import Atoms
+    from ase.io import write
+
+    syms = ["Li"] * (6 * fu) + ["P"] * fu + ["S"] * (6 * fu)
+    path = str(tmp_path / "base.vasp")
+    write(path, Atoms(syms, positions=[(i, 0, 0) for i in range(len(syms))],
+                      cell=[5000, 5000, 5000], pbc=True), format="vasp")
+    return path
+
+
+def test_eligible_region_fallback_used_only_on_overflow(tmp_path):
+    # fu=20 -> 120 S. O+Cl+Br for two oxide dopants overflows a small primary
+    # region; the larger fallback is used only then (and the build succeeds).
+    base = _lips_supercell(tmp_path, fu=20)
+    cand = {"P_site": {"Mn": 0.1, "W": 0.1}, "S_site": {"O_a": 1, "O_b": 1, "Cl": 1.0}}
+
+    b = _builder(formula_units=20, base_poscar=base, groups=TWO_O_GROUPS,
+                 eligible_region={"symbol": "S", "take": "last", "count": 20},
+                 eligible_region_fallback={"symbol": "S", "take": "first", "count": 80})
+    c = b.counts(cand)
+    n_sub = c["O"] + c["Cl"] + c["Br"]
+    assert n_sub > 20                                    # overflows the primary region
+    st = b.build(cand, n_configs=1, rng=np.random.default_rng(0))[0]
+    cnt = Counter(st.get_chemical_symbols())
+    assert cnt["O"] == c["O"] and cnt["Cl"] == c["Cl"]
+    assert cnt["Br"] == c["Br"] and cnt["S"] == c["S"]
+
+
+def test_eligible_region_no_fallback_overflow_raises(tmp_path):
+    import pytest
+
+    base = _lips_supercell(tmp_path, fu=20)
+    cand = {"P_site": {"Mn": 0.1, "W": 0.1}, "S_site": {"O_a": 1, "O_b": 1, "Cl": 1.0}}
+    b = _builder(formula_units=20, base_poscar=base, groups=TWO_O_GROUPS,
+                 eligible_region={"symbol": "S", "take": "last", "count": 20})  # no fallback
+    with pytest.raises(ValueError, match="too small"):
+        b.build(cand, n_configs=1, rng=np.random.default_rng(0))
+
+
+def test_small_composition_stays_in_primary_region(tmp_path):
+    # When O+Cl+Br fits the primary region, the fallback is NOT used: the
+    # substituted sites must all be within the last-`count` S (the primary).
+    base = _lips_supercell(tmp_path, fu=20)
+    cand = {"P_site": {"Mn": 0.05}, "S_site": {"O_a": 0, "Cl": 0.6}}   # sulfide, low Cl
+    primary_count = 60
+    b = _builder(formula_units=20, base_poscar=base, groups=TWO_O_GROUPS,
+                 eligible_region={"symbol": "S", "take": "last", "count": primary_count},
+                 eligible_region_fallback={"symbol": "S", "take": "first", "count": 120})
+    c = b.counts(cand)
+    assert c["O"] + c["Cl"] + c["Br"] <= primary_count
+    st = b.build(cand, n_configs=1, rng=np.random.default_rng(0))[0]
+    syms = st.get_chemical_symbols()
+    n_S_total = 6 * 20
+    primary_idx = set(range(len(syms) - primary_count, len(syms)))   # last `count` indices
+    subbed = [i for i, s in enumerate(syms) if s in ("O", "Cl", "Br")]
+    assert subbed and all(i in primary_idx for i in subbed)          # stayed in primary
+
+
 def test_build_places_two_metals(tmp_path):
     from ase import Atoms
     from ase.io import write
