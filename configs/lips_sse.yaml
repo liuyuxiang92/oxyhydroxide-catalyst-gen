@@ -13,19 +13,22 @@
 env_type: multi_group
 
 groups:
-  - name: P_site                      # composition: 1 metal + host P
+  - name: P_site                      # independent: TWO dopant metals + host P
+    kind: independent                 # K independent (metal, amount) picks; repeats allowed
     cation_set:
       [Mn, Ni, Cu, Zn, Mo, In, Sn, Sb, W, Ru, Tm, Yb,
        Mg, Al, Si, Sc, Ti, V, Cr, Fe, Co, Ga, Ge, Y, Zr, Nb, Hf, Ta, Ho, Er, Lu]
     host: P
     sites: 1
-    amount: {min: 0.02, max: 0.08, step: 0.01}   # fraction of P replaced (=count, sites=1)
+    n_dopants: 2                      # pick the metal twice; same element merges (sums)
+    amount: {min: 0.02, max: 0.08, step: 0.01}   # fraction of P replaced, per pick
 
-  - name: S_site                      # categorical: O form + Cl count (real values)
+  - name: S_site                      # categorical: per-metal O form + Cl count (real values)
     kind: categorical
     sites: 6
     choices:
-      - {element: O,  values: [0, 1]}                 # 0 = metal form (no O), 1 = oxide form
+      - {name: O_a, element: O, values: [0, 1]}       # O-form for dopant metal #1 (sorted)
+      - {name: O_b, element: O, values: [0, 1]}       # O-form for dopant metal #2 (sorted)
       - {element: Cl, values: [0.6, 0.8, 1.0, 1.2, 1.4]}   # Cl atoms per formula unit
     constraint_filter: sse_doping
     o_element: O

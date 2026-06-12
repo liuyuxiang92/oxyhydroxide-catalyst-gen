@@ -45,6 +45,22 @@ from .env import CompositionEnv, EpisodeStep, _step_one_hot
 from .featurization import featurize_formula
 
 
+def _amounts_to_strs(amount: Any) -> Tuple[List[str], Optional[float]]:
+    """Expand an ``amount`` spec into 2-decimal fraction codes + the grid step.
+
+    ``amount`` is either an explicit list of fractions, or a ``{min, max, step}``
+    range. Returns ``(["0.02", ...], step)`` (``step`` is ``None`` for a list).
+    """
+    if isinstance(amount, (list, tuple)):
+        amounts = [float(x) for x in amount]
+        step: Optional[float] = None
+    else:
+        lo, hi, step = float(amount["min"]), float(amount["max"]), float(amount["step"])
+        n = int(round((hi - lo) / step))
+        amounts = [round(lo + i * step, 6) for i in range(n + 1)]
+    return [f"{a:.2f}" for a in amounts], step
+
+
 def normalize_group_spec(g: Dict[str, Any]) -> Dict[str, Any]:
     """Expand a *friendly* composition-group spec into full CompositionEnv params.
 
@@ -63,21 +79,32 @@ def normalize_group_spec(g: Dict[str, Any]) -> Dict[str, Any]:
     """
     g = dict(g)
     g.setdefault("sites", 1)
-    if g.get("kind", "composition") != "composition":
+    kind = g.get("kind", "composition")
+
+    if kind == "independent":
+        # K independent (element, amount) picks; repeats allowed; no host pick —
+        # the un-picked remainder is a host filled in downstream by the builder.
+        amount = g.pop("amount", None)
+        if amount is not None:
+            g["fraction_set"] = _amounts_to_strs(amount)[0]
+            _, step = _amounts_to_strs(amount)
+            g.setdefault("total_units", int(round(1.0 / step)) if step else 100)
+        n_dopants = int(g.get("n_dopants", g.get("n_components", g.get("sites", 1))))
+        g["n_components"] = n_dopants
+        host = g.get("host")
+        if host:
+            g["cation_set"] = [e for e in g["cation_set"] if e != host]
+        return g
+
+    if kind != "composition":
         return g
 
     amount = g.pop("amount", None)
     if amount is None:
         return g
 
-    if isinstance(amount, (list, tuple)):
-        amounts = [float(x) for x in amount]
-        step = None
-    else:
-        lo, hi, step = float(amount["min"]), float(amount["max"]), float(amount["step"])
-        n = int(round((hi - lo) / step))
-        amounts = [round(lo + i * step, 6) for i in range(n + 1)]
-    amt_strs = [f"{a:.2f}" for a in amounts]
+    amt_strs, step = _amounts_to_strs(amount)
+    amounts = [float(s) for s in amt_strs]
 
     host = g.get("host")
     if host:
@@ -106,16 +133,33 @@ class CategoricalGroup:
     scalar-amount input; the terminal returns the **original** values (so a builder reads
     the real ``Cl = 1.0`` / ``O = "oxide"`` directly — no selector/cl_map).
 
+    Each slot has a unique **name** (the key the terminal/builder reads) and an
+    underlying **element** (the real chemistry). They default to the same string,
+    so a plain ``{element: O, values: [...]}`` slot is named ``"O"``. Giving two
+    slots the *same* element but *different* names (``{name: O_a, element: O}`` and
+    ``{name: O_b, element: O}``) lets one categorical group carry **per-metal**
+    O-forms without the names colliding in the one-hot alphabet — the builder maps
+    each name back to its element via :attr:`slot_element`.
+
     Presents the minimal inner-group interface ``MultiGroupEnv`` drives.
     """
 
     def __init__(self, choices: Sequence[Dict[str, Any]], *, phase_filter=None) -> None:
-        self.slots: List[Tuple[str, List[Any]]] = [
-            (str(c["element"]), list(c["values"])) for c in choices
+        # (name, element, values) — name is the unique slot id used for encoding
+        # and as the terminal key; element is the real chemistry for the builder.
+        self.slots: List[Tuple[str, str, List[Any]]] = [
+            (str(c.get("name", c["element"])), str(c["element"]), list(c["values"]))
+            for c in choices
         ]
         if not self.slots:
             raise ValueError("categorical group needs a non-empty 'choices' list.")
-        self.cation_set: List[str] = [el for el, _ in self.slots]
+        self.cation_set: List[str] = [name for name, _el, _v in self.slots]
+        if len(set(self.cation_set)) != len(self.cation_set):
+            raise ValueError(
+                f"categorical slot names must be unique; got {self.cation_set}. "
+                "Give same-element slots distinct 'name' keys (e.g. O_a, O_b)."
+            )
+        self.slot_element: Dict[str, str] = {name: el for name, el, _v in self.slots}
         self.n_components: int = len(self.slots)
         self.phase_filter = phase_filter
 
@@ -123,7 +167,7 @@ class CategoricalGroup:
         self._slot_codes: List[List[Tuple[Any, str]]] = []
         self._code_to_value: List[Dict[str, Any]] = []
         codes: set[str] = set()
-        for _el, values in self.slots:
+        for _name, _el, values in self.slots:
             sc, c2v = [], {}
             for i, v in enumerate(values):
                 code = self._encode_value(v, i)
@@ -150,10 +194,10 @@ class CategoricalGroup:
     def allowed_actions(self, *, prior_groups=None):
         if self.counter >= self.n_components:
             return []
-        el = self.slots[self.counter][0]
+        name = self.slots[self.counter][0]
         actions = [
             (
-                tuple(encode_choice(el, self.cation_set).tolist()),
+                tuple(encode_choice(name, self.cation_set).tolist()),
                 tuple(encode_choice(code, self.fraction_set).tolist()),
             )
             for _v, code in self._slot_codes[self.counter]
@@ -172,14 +216,14 @@ class CategoricalGroup:
 
     def step(self, action) -> None:
         elem_oh, comp_oh = action
-        el = decode_one_hot(elem_oh, self.cation_set)
+        name = decode_one_hot(elem_oh, self.cation_set)
         expected = self.slots[self.counter][0]
-        if el != expected:
+        if name != expected:
             raise ValueError(
-                f"categorical slot {self.counter} expects {expected!r}, got {el!r}."
+                f"categorical slot {self.counter} expects {expected!r}, got {name!r}."
             )
         code = decode_one_hot(comp_oh, self.fraction_set)
-        self._picked[el] = self._code_to_value[self.counter][code]
+        self._picked[name] = self._code_to_value[self.counter][code]
         self.counter += 1
 
     def cation_fractions(self) -> Dict[str, Any]:
@@ -187,6 +231,102 @@ class CategoricalGroup:
 
     def terminal_comp_key(self) -> tuple:
         return tuple(sorted((k, str(v)) for k, v in self._picked.items()))
+
+
+class IndependentDopantsGroup:
+    """``K`` independent ``(element, amount)`` picks on one sublattice; repeats allowed.
+
+    Unlike a composition group, the picks need **not** be distinct and do **not**
+    sum to 1 — the un-picked remainder is a *host* that the downstream builder
+    fills in (e.g. the doped-Li₆PS₆ P-site: pick two dopant metals from the same
+    menu at the same amount range; host P takes the rest). Two picks of the *same*
+    element **merge** (their amounts add), so ``cation_fractions`` returns a
+    ``{element: summed_fraction}`` map with at most ``K`` distinct keys.
+
+    This is deliberately a separate, isolated inner-group type rather than a knob
+    on :class:`~rl_matdesign.env.CompositionEnv`, which hard-enforces *distinct*
+    cations and a sum-to-1 budget; bending those would risk every composition
+    scenario and the order-invariance guarantees. Presents the same minimal
+    inner-group interface ``MultiGroupEnv`` drives.
+    """
+
+    def __init__(
+        self,
+        *,
+        cation_set: Sequence[str],
+        fraction_set: Sequence[str],
+        n_components: int,
+        total_units: int = 100,
+        state_featurizer: Callable[[str], np.ndarray] = featurize_formula,
+        phase_filter=None,
+    ) -> None:
+        self.cation_set: List[str] = list(cation_set)
+        self.fraction_set: List[str] = list(fraction_set)
+        self.n_components: int = int(n_components)
+        self._total_units = int(total_units)
+        self.state_featurizer = state_featurizer
+        self.phase_filter = phase_filter
+        if not self.cation_set:
+            raise ValueError("independent group needs a non-empty 'cation_set'.")
+        if not self.fraction_set:
+            raise ValueError("independent group needs a non-empty 'fraction_set'.")
+        self.initialize()
+
+    def initialize(self) -> None:
+        self.counter = 0
+        self.state = ""                          # merged partial formula (for featurizer)
+        self._picks: List[Tuple[str, str]] = []  # ordered (element, comp_str) picks
+
+    def allowed_actions(self, *, prior_groups=None):
+        if self.counter >= self.n_components:
+            return []
+        actions = [
+            (
+                tuple(encode_choice(el, self.cation_set).tolist()),
+                tuple(encode_choice(comp, self.fraction_set).tolist()),
+            )
+            for el in self.cation_set
+            for comp in self.fraction_set
+        ]
+        if self.phase_filter is not None:
+            kw = dict(
+                actions=actions, units_map={},
+                steps_left=self.n_components - self.counter - 1,
+                allowed_units=[], possible_sums_by_k=[],
+                cation_set=self.cation_set, fraction_set=self.fraction_set,
+            )
+            if prior_groups is not None:
+                kw["prior_groups"] = prior_groups
+            actions = self.phase_filter.filter_actions(**kw)
+        return actions
+
+    def step(self, action) -> None:
+        elem_oh, comp_oh = action
+        el = decode_one_hot(elem_oh, self.cation_set)
+        comp = decode_one_hot(comp_oh, self.fraction_set)
+        self._picks.append((el, comp))
+        self.state = self._formula(self._picks)
+        self.counter += 1
+
+    def _formula(self, picks: List[Tuple[str, str]]) -> str:
+        merged: Dict[str, float] = {}
+        for el, comp in picks:
+            merged[el] = merged.get(el, 0.0) + float(comp)
+        return "".join(f"{el}{v:.2f}" for el, v in sorted(merged.items()))
+
+    def cation_fractions(self) -> Dict[str, float]:
+        merged: Dict[str, float] = {}
+        for el, comp in self._picks:
+            merged[el] = merged.get(el, 0.0) + float(comp)
+        return merged
+
+    def terminal_comp_key(self) -> tuple:
+        items = []
+        for el, frac in self.cation_fractions().items():
+            units = int(round(frac * self._total_units))
+            if units > 0:
+                items.append((str(el), units))
+        return tuple(sorted(items))
 
 
 class MultiGroupEnv:
@@ -221,6 +361,15 @@ class MultiGroupEnv:
             if kind == "categorical":
                 inner = CategoricalGroup(
                     g["choices"], phase_filter=g.get("constraint_filter"),
+                )
+            elif kind == "independent":
+                inner = IndependentDopantsGroup(
+                    cation_set=g["cation_set"],
+                    fraction_set=g["fraction_set"],
+                    n_components=int(g.get("n_components", g.get("n_dopants", 1))),
+                    total_units=int(g.get("total_units", 100)),
+                    state_featurizer=state_featurizer,
+                    phase_filter=g.get("constraint_filter"),
                 )
             else:
                 inner = CompositionEnv(

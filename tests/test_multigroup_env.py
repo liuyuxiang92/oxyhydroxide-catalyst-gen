@@ -16,6 +16,27 @@ from rl_matdesign.env import CompositionEnv  # noqa: E402
 from rl_matdesign.env_multigroup import MultiGroupEnv, normalize_group_spec  # noqa: E402
 from rl_matdesign.constraints.base import ConstraintFilter  # noqa: E402
 from rl_matdesign.registry import resolve_constraint  # noqa: E402
+from rl_matdesign.encoding import decode_one_hot  # noqa: E402
+
+
+def _pick(env, element, value):
+    """Step the allowed action whose (element/slot-name, value-code) match."""
+    for a in env.allowed_actions():
+        el = decode_one_hot(a[0], env.cation_set)
+        code = decode_one_hot(a[1], env.fraction_set)
+        if el == element and abs(float(code) - float(value)) < 1e-9:
+            env.step(a)
+            return
+    raise AssertionError(f"no allowed action for ({element}, {value})")
+
+
+def _allowed_values(env, slot_name):
+    """Decoded value-codes available for a given slot/element at the current step."""
+    return {
+        decode_one_hot(a[1], env.fraction_set)
+        for a in env.allowed_actions()
+        if decode_one_hot(a[0], env.cation_set) == slot_name
+    }
 
 
 def _drive_first_allowed(env):
@@ -157,6 +178,63 @@ def test_categorical_group_returns_real_values():
     asm = env.assembled_composition()
     assert asm.get("Cl") in (0.6, 0.8, 1.0, 1.2, 1.4)
     assert "none" not in asm and "oxide" not in asm
+
+
+def test_independent_group_two_picks_merge_and_repeat():
+    # kind: independent -> two (metal, amount) picks; repeats allowed; host dropped.
+    g = {"name": "P_site", "kind": "independent", "cation_set": ["Mn", "Ni", "P"],
+         "host": "P", "n_dopants": 2, "amount": {"min": 0.02, "max": 0.08, "step": 0.01}}
+    n = normalize_group_spec(g)
+    assert n["n_components"] == 2
+    assert "P" not in n["cation_set"]                       # host dropped (builder fills it)
+    assert n["fraction_set"] == [f"{x/100:.2f}" for x in range(2, 9)]
+
+    env = _build([g])
+    levels = {f"{x/100:.2f}" for x in range(2, 9)}
+    for _ in range(40):
+        env.initialize()
+        while env.counter < env.n_components:
+            env.step(env.allowed_actions()[int(np.random.randint(len(env.allowed_actions())))])
+        comp = env.terminal_cation_fractions()["P_site"]
+        assert 1 <= len(comp) <= 2                          # may merge to one metal
+        assert "P" not in comp                              # host not in the dopant map
+        total = sum(comp.values())
+        assert total <= 0.16 + 1e-9                         # two picks, each <= 0.08
+
+
+def test_independent_group_allows_same_element_merges():
+    g = {"name": "P_site", "kind": "independent", "cation_set": ["Mn", "Ni"],
+         "n_dopants": 2, "amount": {"min": 0.02, "max": 0.08, "step": 0.01}}
+    env = _build([g])
+    env.initialize()
+    _pick(env, "Mn", "0.06")
+    _pick(env, "Mn", "0.04")                                # same element twice
+    comp = env.terminal_cation_fractions()["P_site"]
+    assert comp == {"Mn": 0.10}                             # merged to combined fraction
+
+
+def test_sse_doping_two_metals_per_metal_masking():
+    # Two dopants Ru (metal_only) + Al (oxide_only); S-site has per-metal O slots.
+    p = {"name": "P_site", "kind": "independent", "cation_set": ["Ru", "Al", "Mn"],
+         "n_dopants": 2, "amount": {"min": 0.05, "max": 0.06, "step": 0.01}}
+    s = {"name": "S_site", "kind": "categorical", "sites": 6,
+         "choices": [{"name": "O_a", "element": "O", "values": [0, 1]},
+                     {"name": "O_b", "element": "O", "values": [0, 1]},
+                     {"element": "Cl", "values": [0.6, 1.0]}],
+         "constraint_filter": "sse_doping", "o_element": "O",
+         "metal_only": ["Ru"], "oxide_only": ["Al"]}
+    env = _build([p, s])
+
+    env.initialize()
+    _pick(env, "Ru", "0.05")
+    _pick(env, "Al", "0.06")
+    # Sorted metals = [Al, Ru] -> O_a ↔ Al (oxide_only: only 1), O_b ↔ Ru (metal_only: only 0).
+    assert _allowed_values(env, "O_a") == {"1.00"}
+    _pick(env, "O_a", "1.00")
+    assert _allowed_values(env, "O_b") == {"0.00"}
+    _pick(env, "O_b", "0.00")
+    # Cl slot is never masked.
+    assert _allowed_values(env, "Cl") == {"0.60", "1.00"}
 
 
 def test_categorical_filter_sees_prior_groups():

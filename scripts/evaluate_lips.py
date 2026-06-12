@@ -13,17 +13,26 @@ and it optimises the operating temperature per composition. This wraps that
 plumbing and prints a per-temperature breakdown so you can see how each property
 trades off (conductivity ↑ with T, stability ↓) and which T was selected.
 
+Two dopant metals (P-site ``kind: independent``) are supported: pass one
+``--dopant METAL:LEVEL:OFORM`` per metal (repeat for two; same element merges),
+or a ``--formula`` from which the dopant metals/levels are parsed. Per-metal
+O-form is paired to the **sorted** metals just as the builder/filter do it.
+
 Examples
 --------
-    # By explicit picks (unambiguous):
+    # Two metals, explicit O-forms (unambiguous), save the built POSCAR:
     python scripts/evaluate_lips.py --config configs/lips_sse.yaml \
-        --metal Sn --level 0.06 --o-form 1 --cl 1.2 \
-        --save-poscar built_Sn0.06.vasp
+        --dopant Sn:0.06:1 --dopant Mn:0.04:0 --cl 1.2 \
+        --save-poscar built.vasp
 
-    # By formula (metal/level/O/Cl are parsed; Li/S/Br are recomputed by the
-    # builder's charge balance, so any values you give for them are ignored):
+    # Same element twice (merges to Mn 0.10, shares one O-form):
     python scripts/evaluate_lips.py --config configs/lips_sse.yaml \
-        --formula "Cl1.2O1P0.94Sn0.06"
+        --dopant Mn:0.06:1 --dopant Mn:0.04:1 --cl 1.0
+
+    # By formula (dopant metals/levels + Cl parsed; Li/S/Br/O recomputed by the
+    # builder's charge balance; per-metal O-form inferred by category):
+    python scripts/evaluate_lips.py --config configs/lips_sse.yaml \
+        --formula "Mn0.06Sn0.04Cl1.2"
 
     # Several at once, from a file (one spec per line, same syntax as --formula):
     python scripts/evaluate_lips.py --config configs/lips_sse.yaml \
@@ -59,33 +68,57 @@ def _load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def _group_meta(cfg: dict) -> Tuple[str, str, str, List[str]]:
-    """Return (p_site_group, s_site_group, host_P, p_site_cation_set)."""
-    groups = cfg.get("groups", [])
-    p_group = s_group = None
-    host_p = str(cfg.get("host", {}).get("P", "P"))
-    cation_set: List[str] = []
-    for g in groups:
-        if str(g.get("kind", "composition")) == "categorical":
-            s_group = g.get("name")
-        else:
-            p_group = g.get("name")
-            host_p = str(g.get("host", host_p))
-            cation_set = list(g.get("cation_set", []))
-    # Fall back to the builder's defaults / config keys.
-    p_group = p_group or cfg.get("p_site_group", "P_site")
-    s_group = s_group or cfg.get("s_site_group", "S_site")
-    return p_group, s_group, host_p, cation_set
+class SceneMeta:
+    """Group names + S-site slot wiring discovered from the scenario YAML."""
+
+    def __init__(self, cfg: dict) -> None:
+        self.p_group = self.s_group = None
+        self.host_p = str(cfg.get("host", {}).get("P", "P"))
+        self.cation_set: List[str] = []
+        self.o_element = "O"
+        self.cl_element = "Cl"
+        self.o_form_slots: List[str] = []
+        self.cl_slot = "Cl"
+        self.metal_only: set = set()
+        self.oxide_only: set = set()
+        for g in cfg.get("groups", []) or []:
+            if str(g.get("kind", "composition")) == "categorical":
+                self.s_group = g.get("name")
+                self.o_element = str(g.get("o_element", "O"))
+                self.metal_only = set(g.get("metal_only", []))
+                self.oxide_only = set(g.get("oxide_only", []))
+                for c in g.get("choices", []) or []:
+                    name, el = str(c.get("name", c["element"])), str(c["element"])
+                    if el == self.o_element:
+                        self.o_form_slots.append(name)
+                    elif el == self.cl_element:
+                        self.cl_slot = name
+            else:
+                self.p_group = g.get("name")
+                self.host_p = str(g.get("host", self.host_p))
+                self.cation_set = list(g.get("cation_set", []))
+        self.p_group = self.p_group or cfg.get("p_site_group", "P_site")
+        self.s_group = self.s_group or cfg.get("s_site_group", "S_site")
+        if not self.o_form_slots:
+            self.o_form_slots = [self.o_element]
+
+    def infer_o_form(self, metal: str) -> Tuple[float, bool]:
+        """O-form a metal must take by category; (value, ambiguous?) for 'both' metals."""
+        if metal in self.metal_only:
+            return 0.0, False
+        if metal in self.oxide_only:
+            return 1.0, False
+        return 0.0, True            # 'both' — formula can't disambiguate; default sulfide
 
 
-def parse_spec(
-    spec: str, *, host_p: str, cation_set: List[str], s_o_element: str = "O",
-) -> Tuple[str, float, float, float]:
-    """Parse a formula-like spec into (metal, level, o_form, cl_count).
+def parse_formula(spec: str, meta: SceneMeta) -> Tuple[List[Tuple[str, float, float]], float, bool]:
+    """Parse a formula into ([(metal, level, o_form), ...], cl_count, ambiguous?).
 
-    Only the four builder inputs are extracted; host/derived elements (Li, S, Br,
-    and the host metal P) in the spec are ignored — the builder recomputes them.
-    The metal is the parsed element that appears in the P-site ``cation_set``.
+    Dopant metals are the parsed elements found in the P-site ``cation_set``;
+    host/derived elements (Li, S, Br, P, O) are ignored — the builder recomputes
+    them. Per-metal O-form can't be recovered from the single merged O count, so
+    it is inferred by category (returns ``ambiguous=True`` if any 'both' metal is
+    present, since its form is a guess).
     """
     pairs = re.findall(r"([A-Z][a-z]?)([0-9]*\.?[0-9]+)", spec)
     if not pairs:
@@ -93,30 +126,51 @@ def parse_spec(
     amounts: Dict[str, float] = {}
     for el, num in pairs:
         amounts[el] = amounts.get(el, 0.0) + float(num)
-
-    cset = set(cation_set)
+    cset = set(meta.cation_set)
     metals = [el for el in amounts if el in cset]
-    if len(metals) != 1:
+    if not metals:
         raise ValueError(
-            f"Expected exactly one P-site dopant metal from the cation_set in "
-            f"{spec!r}; found {metals or 'none'}. Pass --metal/--level explicitly."
+            f"No P-site dopant metal from the cation_set found in {spec!r}. "
+            "Pass --dopant METAL:LEVEL:OFORM explicitly."
         )
-    metal = metals[0]
-    level = amounts[metal]
-    o_form = 1.0 if amounts.get(s_o_element, 0.0) > 0 else 0.0
-    cl_count = amounts.get("Cl", 0.0)
-    return metal, level, o_form, cl_count
+    dopants, ambiguous = [], False
+    for m in metals:
+        of, amb = meta.infer_o_form(m)
+        ambiguous = ambiguous or amb
+        dopants.append((m, amounts[m], of))
+    return dopants, amounts.get(meta.cl_element, 0.0), ambiguous
+
+
+def parse_dopant_flag(spec: str) -> Tuple[str, float, float]:
+    """Parse ``METAL:LEVEL[:OFORM]`` (e.g. ``Mn:0.06:1``) -> (metal, level, o_form)."""
+    parts = spec.split(":")
+    if len(parts) not in (2, 3):
+        raise ValueError(f"--dopant expects METAL:LEVEL[:OFORM], got {spec!r}.")
+    metal = parts[0].strip()
+    level = float(parts[1])
+    o_form = float(parts[2]) if len(parts) == 3 else 0.0
+    return metal, level, o_form
 
 
 def build_candidate(
-    p_group: str, s_group: str, host_p: str,
-    metal: str, level: float, o_form: float, cl_count: float,
+    meta: SceneMeta, dopants: List[Tuple[str, float, float]], cl_count: float,
 ) -> Dict[str, Dict[str, float]]:
-    """Assemble the structured candidate the SSE builder expects."""
-    return {
-        p_group: {metal: float(level), host_p: 1.0 - float(level)},
-        s_group: {"O": float(o_form), "Cl": float(cl_count)},
-    }
+    """Assemble the structured candidate the SSE builder expects (two-metal aware).
+
+    Same-element picks merge (levels add); per Option A they share one O-form (the
+    first given wins). Each metal's form is placed in the O-slot that the builder
+    pairs with the sorted metal order.
+    """
+    p_site: Dict[str, float] = {}
+    forms: Dict[str, float] = {}
+    for m, lv, of in dopants:
+        p_site[m] = p_site.get(m, 0.0) + float(lv)
+        forms.setdefault(m, float(of))
+    s_site: Dict[str, float] = {meta.cl_slot: float(cl_count)}
+    for i, m in enumerate(sorted(p_site)):
+        if i < len(meta.o_form_slots):
+            s_site[meta.o_form_slots[i]] = forms[m]
+    return {meta.p_group: p_site, meta.s_group: s_site}
 
 
 def iter_specs(args: argparse.Namespace) -> Iterable[str]:
@@ -184,16 +238,17 @@ def main() -> None:
     )
     ap.add_argument("--config", required=True, help="Scenario YAML (e.g. configs/lips_sse.yaml).")
     ap.add_argument("--formula", action="append", default=[],
-                    help="Formula-like spec, e.g. 'Cl1.2O1P0.94Sn0.06'. Repeatable. "
-                         "Only metal/level/O/Cl are read; Li/S/Br are recomputed.")
+                    help="Formula-like spec, e.g. 'Mn0.06Sn0.04Cl1.2'. Repeatable. Dopant "
+                         "metals/levels + Cl are read; per-metal O-form is inferred by "
+                         "category (use --dopant to set O-form exactly).")
     ap.add_argument("--formulas-file", default=None,
                     help="Text file with one spec per line (# comments allowed).")
-    # Explicit picks (override / alternative to --formula). Apply to a single eval.
-    ap.add_argument("--metal", default=None, help="P-site dopant metal symbol.")
-    ap.add_argument("--level", type=float, default=None, help="Dopant fraction of P replaced.")
-    ap.add_argument("--o-form", type=float, default=None,
-                    help="S-site oxygen form flag: 0 = sulfide, 1 = oxide.")
-    ap.add_argument("--cl", type=float, default=None, help="Cl atoms per formula unit.")
+    # Explicit picks (alternative to --formula). One --dopant per metal; repeat
+    # for two metals. Same element repeated merges (levels add, Option A).
+    ap.add_argument("--dopant", action="append", default=[], metavar="METAL:LEVEL[:OFORM]",
+                    help="A dopant pick, e.g. 'Mn:0.06:1' (metal:level:o_form). OFORM is "
+                         "0=sulfide / 1=oxide (default 0). Repeat for two metals.")
+    ap.add_argument("--cl", type=float, default=None, help="Cl atoms per formula unit (with --dopant).")
     ap.add_argument("--seed", type=int, default=0, help="Builder/predictor RNG seed.")
     geo = ap.add_mutually_exclusive_group()
     geo.add_argument("--geo-opt", dest="geo_opt", action="store_true", default=None,
@@ -208,7 +263,7 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg = _load_config(args.config)
-    p_group, s_group, host_p, cation_set = _group_meta(cfg)
+    meta = SceneMeta(cfg)
     sweep_name = str((cfg.get("sweep") or {}).get("name", "sweep"))
 
     from rl_matdesign.registry import resolve_predictor
@@ -227,27 +282,32 @@ def main() -> None:
 
     # Collect (label, candidate) work items.
     items: List[Tuple[str, Dict[str, Dict[str, float]]]] = []
-    if args.metal is not None or args.level is not None:
-        if args.metal is None or args.level is None:
-            ap.error("--metal and --level must be given together.")
-        cand = build_candidate(
-            p_group, s_group, host_p, args.metal, args.level,
-            args.o_form if args.o_form is not None else 0.0,
-            args.cl if args.cl is not None else 0.0,
-        )
-        items.append((f"{args.metal}{args.level:g}", cand))
-
     skipped: List[Tuple[str, str]] = []
+
+    if args.dopant:
+        if args.cl is None:
+            ap.error("--cl is required when using --dopant.")
+        try:
+            dopants = [parse_dopant_flag(d) for d in args.dopant]
+            label = "+".join(f"{m}{lv:g}{'ox' if of > 0 else ''}" for m, lv, of in dopants)
+            items.append((label, build_candidate(meta, dopants, args.cl)))
+        except Exception as exc:  # noqa: BLE001
+            ap.error(str(exc))
+
     for spec in iter_specs(args):
         try:
-            metal, level, o_form, cl = parse_spec(spec, host_p=host_p, cation_set=cation_set)
-            items.append((spec, build_candidate(p_group, s_group, host_p, metal, level, o_form, cl)))
+            dopants, cl, ambiguous = parse_formula(spec, meta)
+            if ambiguous:
+                print(f"[WARN] {spec!r}: a 'both'-category metal's O-form can't be read "
+                      "from the formula; defaulting to sulfide (0). Use --dopant to set it.",
+                      flush=True)
+            items.append((spec, build_candidate(meta, dopants, cl)))
         except Exception as exc:  # noqa: BLE001
             skipped.append((spec, str(exc)))
             print(f"[WARN] skipping {spec!r}: {exc}", flush=True)
 
     if not items:
-        ap.error("No compositions to evaluate. Pass --formula/--formulas-file or --metal/--level.")
+        ap.error("No compositions to evaluate. Pass --formula/--formulas-file or --dopant.")
 
     if args.save_poscar and len(items) != 1:
         ap.error("--save-poscar supports exactly one composition; narrow the input.")

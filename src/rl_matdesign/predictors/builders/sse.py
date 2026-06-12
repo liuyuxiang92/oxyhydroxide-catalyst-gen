@@ -51,7 +51,32 @@ class SSESupercellBuilder:
         self.s_site_per_fu: int = int(cfg.get("s_site_per_fu", 6))
         self.li_per_fu: int = int(cfg.get("li_per_fu", 6))
 
+        # S-site slot wiring. With multiple dopant metals the S-site carries one
+        # O-form slot per metal (e.g. names O_a, O_b sharing element O); the i-th
+        # O-form slot pairs with the i-th *sorted* dopant metal. Discover the
+        # ordered O-form slot names and the Cl slot name from the categorical
+        # group's `choices`; fall back to bare element names for legacy configs.
+        self.o_element: str = str(cfg.get("o_element", "O"))
+        self.cl_element: str = str(cfg.get("cl_element", "Cl"))
+        self.o_form_slots, self.cl_slot = self._discover_s_slots(cfg)
+
         self._seed = seed
+
+    def _discover_s_slots(self, cfg: Dict[str, Any]):
+        """Ordered O-form slot names + the Cl slot name, read from the S-site group."""
+        o_slots: List[str] = []
+        cl_slot = self.cl_element
+        for g in cfg.get("groups", []) or []:
+            if str(g.get("name", "")) != self.s_site_group:
+                continue
+            for c in g.get("choices", []) or []:
+                name = str(c.get("name", c["element"]))
+                el = str(c["element"])
+                if el == self.o_element:
+                    o_slots.append(name)
+                elif el == self.cl_element:
+                    cl_slot = name
+        return (o_slots or [self.o_element]), cl_slot
 
     # ------------------------------------------------------------------
 
@@ -81,7 +106,13 @@ class SSESupercellBuilder:
         return float(v)
 
     def _decode(self, candidate: Dict[str, Dict[str, float]]):
-        """Return (metal, level, o_frac, cl_frac) from the structured picks."""
+        """Return (metals, levels, o_forms, cl_count) from the structured picks.
+
+        ``metals`` is the **sorted** list of distinct dopant symbols (same-element
+        picks already merged upstream into one summed fraction); ``levels`` /
+        ``o_forms`` map each metal to its fraction-of-P and its O-form flag (the
+        i-th sorted metal reads the i-th O-form slot). ``cl_count`` is per-f.u.
+        """
         try:
             p_site = candidate[self.p_site_group]
             s_site = candidate[self.s_site_group]
@@ -91,69 +122,78 @@ class SSESupercellBuilder:
                 f"{self.s_site_group!r} in the candidate, got {candidate!r}."
             ) from exc
 
-        metals = [el for el in p_site if el != self.host_P and p_site[el] > 0]
-        if len(metals) != 1:
+        metals = sorted(el for el in p_site if el != self.host_P and p_site[el] > 0)
+        if not metals:
             raise ValueError(
-                f"P-site must contain exactly one dopant metal (besides host "
-                f"{self.host_P!r}); got {p_site!r}."
+                f"P-site has no dopant metal (besides host {self.host_P!r}): {p_site!r}."
             )
-        metal = metals[0]
-        level = float(p_site[metal])
-        # S-site is the categorical group: O is a numeric form flag (0 = metal form,
-        # >0 = metal-oxide form); Cl is the real per-formula-unit count.
-        o_form = float(s_site.get("O", 0.0))
-        cl_count = float(s_site.get("Cl", 0.0))
-        return metal, level, o_form, cl_count
+        levels = {m: float(p_site[m]) for m in metals}
+        # Per-metal O-form: O is a numeric flag (0 = metal/sulfide form, >0 = oxide
+        # form). The i-th sorted metal reads the i-th O-form slot; extra metals
+        # beyond the available slots default to sulfide.
+        o_forms: Dict[str, float] = {}
+        for i, m in enumerate(metals):
+            slot = self.o_form_slots[i] if i < len(self.o_form_slots) else None
+            o_forms[m] = float(s_site.get(slot, 0.0)) if slot is not None else 0.0
+        cl_count = float(s_site.get(self.cl_slot, 0.0))
+        return metals, levels, o_forms, cl_count
 
-    def counts(self, candidate: Dict[str, Dict[str, float]]) -> Dict[str, int]:
-        """Integer supercell counts + the charge-neutral Li vacancy (table-driven)."""
-        metal, level, o_form, cl_count = self._decode(candidate)
-        scenario = "oxide" if o_form > 0 else "sulfide"
+    def counts(self, candidate: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
+        """Integer supercell counts + the charge-neutral Li vacancy (table-driven).
+
+        Handles one or more dopant metals, each in its own sulfide/oxide form.
+        """
+        metals, levels, o_forms, cl_count = self._decode(candidate)
 
         fu = self.fu
         n_P_total = self.p_site_per_fu * fu
         n_S_total = self.s_site_per_fu * fu
         n_Li_total = self.li_per_fu * fu
 
-        n_metal = int(round(level * n_P_total))
-        n_P = n_P_total - n_metal
-        # O is derived from the metal oxide stoichiometry: n_O = (oxide_valence/2)·n_metal.
-        if scenario == "oxide":
-            n_O = int(round(0.5 * self._valence(metal, scenario="oxide") * n_metal))
-        else:
-            n_O = 0
+        metal_counts = {m: int(round(levels[m] * n_P_total)) for m in metals}
+        n_metal_total = sum(metal_counts.values())
+        n_P = n_P_total - n_metal_total
+
+        # O is derived per oxide-form metal: n_O = Σ (oxide_valence/2)·n_metal.
+        n_O = 0
+        for m in metals:
+            if o_forms[m] > 0:
+                n_O += int(round(0.5 * self._valence(m, scenario="oxide") * metal_counts[m]))
+
         n_Cl = int(round(cl_count * fu))                       # Cl is a real per-f.u. count
         n_Br = int(round(self.halide_total * fu)) - n_Cl
         n_S = n_S_total - n_O - n_Cl - n_Br
-        if n_Br < 0 or n_S < 0:
+        if n_Br < 0 or n_S < 0 or n_P < 0:
             raise ValueError(
-                f"Infeasible S-site allocation: O={n_O} Cl={n_Cl} Br={n_Br} S={n_S} "
-                f"(of {n_S_total}). Check halide_total / fractions."
+                f"Infeasible allocation: P={n_P} O={n_O} Cl={n_Cl} Br={n_Br} S={n_S} "
+                f"(metals={metal_counts}). Check halide_total / amounts."
             )
 
-        # Generic charge balance: solve for neutral Li count.
+        # Generic charge balance: solve for the neutral Li count. Anions and the
+        # host cations are constant-valence; each metal contributes with the
+        # valence of *its* form (oxide or sulfide).
         anion_charge = (
-            n_S * abs(self._valence(self.host_S, scenario=scenario))
-            + n_O * abs(self._valence("O", scenario=scenario))
-            + n_Cl * abs(self._valence("Cl", scenario=scenario))
-            + n_Br * abs(self._valence("Br", scenario=scenario))
+            n_S * abs(self._valence(self.host_S, scenario="sulfide"))
+            + n_O * abs(self._valence("O", scenario="sulfide"))
+            + n_Cl * abs(self._valence("Cl", scenario="sulfide"))
+            + n_Br * abs(self._valence("Br", scenario="sulfide"))
         )
-        non_li_cation_charge = (
-            n_P * self._valence(self.host_P, scenario=scenario)
-            + n_metal * self._valence(metal, scenario=scenario)
-        )
-        v_li = self._valence(self.host_Li, scenario=scenario)
+        non_li_cation_charge = n_P * self._valence(self.host_P, scenario="sulfide")
+        for m in metals:
+            scen = "oxide" if o_forms[m] > 0 else "sulfide"
+            non_li_cation_charge += metal_counts[m] * self._valence(m, scenario=scen)
+        v_li = self._valence(self.host_Li, scenario="sulfide")
         n_Li = int(round((anion_charge - non_li_cation_charge) / v_li))
         n_Li_delete = n_Li_total - n_Li
         if not (0 <= n_Li_delete <= n_Li_total):
             raise ValueError(
                 f"Charge-neutral Li ({n_Li}) out of range [0,{n_Li_total}] for "
-                f"metal={metal} level={level} O_form={o_form} Cl={cl_count}."
+                f"metals={levels} O_forms={o_forms} Cl={cl_count}."
             )
 
         return {
-            "metal": n_metal, "P": n_P, "O": n_O, "Cl": n_Cl, "Br": n_Br, "S": n_S,
-            "Li": n_Li, "Li_delete": n_Li_delete, "metal_symbol": metal,  # type: ignore[dict-item]
+            "metals": metal_counts, "P": n_P, "O": n_O, "Cl": n_Cl, "Br": n_Br,
+            "S": n_S, "Li": n_Li, "Li_delete": n_Li_delete, "o_forms": dict(o_forms),
         }
 
     def composition_formula(self, candidate: Dict[str, Dict[str, float]]) -> str:
@@ -168,19 +208,20 @@ class SSESupercellBuilder:
         """
         c = self.counts(candidate)
         fu = self.fu
-        raw = {
-            c["metal_symbol"]: c["metal"],
-            self.host_P: c["P"],
-            "O": c["O"],
-            "Cl": c["Cl"],
-            "Br": c["Br"],
-            self.host_S: c["S"],
-            self.host_Li: c["Li"],
-        }
         merged: Dict[str, float] = {}
-        for el, n in raw.items():
+
+        def _add(el: str, n: float) -> None:
             if n > 0:
                 merged[el] = merged.get(el, 0.0) + n / fu
+
+        for sym, cnt in c["metals"].items():
+            _add(sym, cnt)
+        _add(self.host_P, c["P"])
+        _add("O", c["O"])
+        _add("Cl", c["Cl"])
+        _add("Br", c["Br"])
+        _add(self.host_S, c["S"])
+        _add(self.host_Li, c["Li"])
         items = sorted(merged.items(), key=lambda t: (-t[1], t[0]))
         return "".join(f"{el}{n:.3g}" for el, n in items)
 
@@ -201,8 +242,9 @@ class SSESupercellBuilder:
         template = ase_read(self.base_poscar)
         s_region = resolve_region(template, self.eligible_region)
 
+        metal_put = {m: n for m, n in c["metals"].items() if n > 0}
         ops = [
-            SublatticeOp(sites=self.host_P, put={c["metal_symbol"]: c["metal"]}),
+            SublatticeOp(sites=self.host_P, put=metal_put),
             SublatticeOp(sites=s_region, put={"O": c["O"], "Cl": c["Cl"], "Br": c["Br"]}),
             SublatticeOp(sites=self.host_Li, put={}, remove=c["Li_delete"]),
         ]

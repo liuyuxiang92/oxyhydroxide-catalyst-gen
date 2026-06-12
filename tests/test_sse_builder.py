@@ -1,8 +1,10 @@
 """Tests for the SSE (doped Li6PS6) builder recipe — chemistry + structure assembly.
 
-The S-site is now a categorical group: O is a form flag (0 = metal form, 1 = oxide)
-and Cl is a real per-formula-unit count. No cl_map / selectors. DeepMD eval /
-geo-opt are GPU-gated and not exercised here.
+The S-site is a categorical group: each O slot is a form flag (0 = metal/sulfide
+form, 1 = oxide) and Cl is a real per-formula-unit count. The P-site picks one or
+more dopant metals (``kind: independent``); with two metals the S-site carries one
+O-form slot per metal (``O_a``, ``O_b``), paired to the sorted metals. DeepMD eval
+/ geo-opt are GPU-gated and not exercised here.
 """
 import os
 import sys
@@ -19,7 +21,18 @@ VALENCES = {
     "Mn": {"sulfide": 2, "oxide": 4},
     "Mg": {"sulfide": 2, "oxide": 2},
     "W": {"sulfide": 4, "oxide": 6},
+    "Sn": {"sulfide": 4, "oxide": 4},
 }
+
+# Two-O-slot S-site (per-metal forms), passed via `groups` so the builder
+# discovers the ordered O-form slot names O_a, O_b and the Cl slot.
+TWO_O_GROUPS = [
+    {"name": "S_site", "kind": "categorical", "choices": [
+        {"name": "O_a", "element": "O", "values": [0, 1]},
+        {"name": "O_b", "element": "O", "values": [0, 1]},
+        {"element": "Cl", "values": [0.6, 0.8, 1.0, 1.2, 1.4]},
+    ]},
+]
 
 
 def _builder(**over):
@@ -36,7 +49,7 @@ def test_metal_form_charge_neutral_matches_derivation():
     c = b.counts(cand)
     assert c["Li_delete"] == 275                      # v = 0.7 - 0.05*3 = 0.55 -> 275/3000
     assert c["Br"] == int(round(1.7 * 500)) - c["Cl"]  # Br = 1.7*fu - Cl
-    cation = c["Li"] * 1 + c["P"] * 5 + c["metal"] * 2  # Mn sulfide = +2
+    cation = c["Li"] * 1 + c["P"] * 5 + c["metals"]["Mn"] * 2  # Mn sulfide = +2
     anion = c["S"] * 2 + c["O"] * 2 + c["Cl"] * 1 + c["Br"] * 1
     assert cation == anion
 
@@ -48,9 +61,47 @@ def test_oxide_form_uses_oxide_valence_and_derives_O():
     c = b.counts(cand)
     assert c["O"] == 90
     assert c["Li_delete"] == int(round(0.76 * 500))
-    cation = c["Li"] * 1 + c["P"] * 5 + c["metal"] * 6  # W oxide = +6
+    cation = c["Li"] * 1 + c["P"] * 5 + c["metals"]["W"] * 6  # W oxide = +6
     anion = c["S"] * 2 + c["O"] * 2 + c["Cl"] * 1 + c["Br"] * 1
     assert cation == anion
+
+
+def test_two_distinct_metals_mixed_forms_charge_neutral():
+    # Mn sulfide (O_a=0) + W oxide (O_b=1); sorted metals = [Mn, W] -> O_a↔Mn, O_b↔W.
+    b = _builder(groups=TWO_O_GROUPS)
+    cand = {"P_site": {"Mn": 0.05, "W": 0.06},
+            "S_site": {"O_a": 0, "O_b": 1, "Cl": 1.0}}
+    c = b.counts(cand)
+    assert c["metals"] == {"Mn": 25, "W": 30}
+    assert c["O"] == int(round(0.5 * 6 * 30))         # only W (oxide) contributes O
+    cation = (c["Li"] * 1 + c["P"] * 5
+              + c["metals"]["Mn"] * 2                 # Mn sulfide = +2
+              + c["metals"]["W"] * 6)                 # W oxide   = +6
+    anion = c["S"] * 2 + c["O"] * 2 + c["Cl"] * 1 + c["Br"] * 1
+    assert cation == anion
+
+
+def test_o_form_slot_pairs_with_sorted_metal():
+    # Swap which metal is oxide: Mn oxide (O_a=1), W sulfide (O_b=0).
+    b = _builder(groups=TWO_O_GROUPS)
+    cand = {"P_site": {"Mn": 0.05, "W": 0.06},
+            "S_site": {"O_a": 1, "O_b": 0, "Cl": 1.0}}
+    c = b.counts(cand)
+    assert c["O"] == int(round(0.5 * 4 * 25))         # only Mn (oxide, valence 4) -> O
+    cation = (c["Li"] + c["P"] * 5
+              + c["metals"]["Mn"] * 4                 # Mn oxide = +4
+              + c["metals"]["W"] * 4)                 # W sulfide = +4
+    anion = c["S"] * 2 + c["O"] * 2 + c["Cl"] + c["Br"]
+    assert cation == anion
+
+
+def test_same_element_merges_and_uses_first_slot():
+    # Same metal picked twice merges to one fraction; only the first O slot is read.
+    b = _builder(groups=TWO_O_GROUPS)
+    cand = {"P_site": {"Mn": 0.10}, "S_site": {"O_a": 0, "O_b": 1, "Cl": 1.0}}
+    c = b.counts(cand)
+    assert c["metals"] == {"Mn": 50}                  # 0.10 * 500
+    assert c["O"] == 0                                 # O_a=0 (sulfide); O_b ignored
 
 
 def test_formula_units_inferred_from_poscar(tmp_path):
@@ -83,7 +134,29 @@ def test_build_produces_correct_atom_counts(tmp_path):
     c = b.counts(cand)
     for st in b.build(cand, n_configs=3, rng=np.random.default_rng(0)):
         cnt = Counter(st.get_chemical_symbols())
-        assert cnt["Mn"] == c["metal"] and cnt["P"] == c["P"]
+        assert cnt["Mn"] == c["metals"]["Mn"] and cnt["P"] == c["P"]
         assert cnt["O"] == c["O"] and cnt["Cl"] == c["Cl"] and cnt["Br"] == c["Br"]
         assert cnt["S"] == c["S"] and cnt["Li"] == c["Li"]
         assert len(st) == len(syms) - c["Li_delete"]
+
+
+def test_build_places_two_metals(tmp_path):
+    from ase import Atoms
+    from ase.io import write
+
+    fu = 8
+    syms = ["Li"] * (6 * fu) + ["P"] * fu + ["S"] * (6 * fu)
+    write(str(tmp_path / "base.vasp"),
+          Atoms(syms, positions=[(i, 0, 0) for i in range(len(syms))], cell=[99, 99, 99], pbc=True),
+          format="vasp")
+    b = _builder(formula_units=fu, base_poscar=str(tmp_path / "base.vasp"),
+                 groups=TWO_O_GROUPS,
+                 eligible_region={"symbol": "S", "take": "last", "count": 48})
+    cand = {"P_site": {"Mn": 0.25, "W": 0.125},
+            "S_site": {"O_a": 0, "O_b": 1, "Cl": 1.0}}
+    c = b.counts(cand)
+    for st in b.build(cand, n_configs=2, rng=np.random.default_rng(0)):
+        cnt = Counter(st.get_chemical_symbols())
+        assert cnt["Mn"] == c["metals"]["Mn"]
+        assert cnt["W"] == c["metals"]["W"]
+        assert cnt["P"] == c["P"]
