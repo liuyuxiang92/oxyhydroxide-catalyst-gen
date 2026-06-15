@@ -176,6 +176,11 @@ def _make_host_complement(cfg: dict, *, env=None, **_):
     return HostComplementFilter(cfg, env=env)
 
 
+def _make_sum_bound(cfg: dict, *, env=None, **_):
+    from .constraints.sum_bound import IndependentSumBoundFilter
+    return IndependentSumBoundFilter(cfg, env=env)
+
+
 CONSTRAINTS: Dict[str, Factory] = {
     "smact_charge":      _make_smact_charge,
     "last_step_element": _make_last_step_element,
@@ -184,6 +189,7 @@ CONSTRAINTS: Dict[str, Factory] = {
     "chain":             _make_chain,
     "sse_doping":        _make_sse_doping,
     "host_complement":   _make_host_complement,
+    "sum_bound":         _make_sum_bound,
 }
 
 

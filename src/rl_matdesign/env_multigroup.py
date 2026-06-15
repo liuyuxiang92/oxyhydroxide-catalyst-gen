@@ -294,6 +294,7 @@ class IndependentDopantsGroup:
                 steps_left=self.n_components - self.counter - 1,
                 allowed_units=[], possible_sums_by_k=[],
                 cation_set=self.cation_set, fraction_set=self.fraction_set,
+                running_amount=sum(float(c) for _el, c in self._picks),
             )
             if prior_groups is not None:
                 kw["prior_groups"] = prior_groups

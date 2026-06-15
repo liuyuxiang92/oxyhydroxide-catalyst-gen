@@ -23,7 +23,9 @@ groups:
     host: P
     sites: 1
     n_dopants: 2                      # pick the metal twice; same element merges (sums)
-    amount: {min: 0.02, max: 0.08, step: 0.01}   # fraction of P replaced, per pick
+    amount: {min: 0.01, max: 0.07, step: 0.01}   # fraction of P replaced, per pick
+    constraint_filter: sum_bound      # cap the COMBINED two-metal doping (next line)
+    sum_amount: {min: 0.02, max: 0.08}   # both dopants together: 0.02–0.08 of P replaced
 
   - name: S_site                      # categorical: per-metal O form + Cl count (real values)
     kind: categorical
