@@ -90,7 +90,7 @@ constraint_filter: null        # per-element bounds handle the composition rules
 # (matching the units of the model output). Then `weight_k` controls the
 # relative pull each property exerts on the policy.
 
-predictor: structure_score
+# ---- Reward: two structure objectives (each builds its own cell) ----
 share_structure: false         # each objective builds its OWN structure independently
 
 # Shared builder knobs inherited by each objective (per-objective overrides win).
@@ -106,7 +106,7 @@ k: 1.0
 properties:
   # ---- Objective 1: property head output 0 (maximize, exploit) ----
   - name: prop0
-    backend: property
+    predictor: dp_property
     models:
       - /ABS/PATH/TO/ti_dp_prop_1.pt
       - /ABS/PATH/TO/ti_dp_prop_2.pt
@@ -122,7 +122,7 @@ properties:
 
   # ---- Objective 2: property head output 2 (minimize, exploit) ----
   - name: prop2
-    backend: property
+    predictor: dp_property
     models:
       - /ABS/PATH/TO/ti_dp_prop_1.pt
       - /ABS/PATH/TO/ti_dp_prop_2.pt

@@ -26,10 +26,10 @@ def _shared_cfg(**over):
         "site_symbol": "X",
         "k": 1.0,
         "properties": [
-            {"name": "conductivity", "backend": "property", "models": ["m1.pt"],
+            {"name": "conductivity", "predictor": "dp_property", "models": ["m1.pt"],
              "head": "experiment", "direction": "max", "weight": 2.0, "scale": 1.0,
              "objective": "mean_minus_kstd"},
-            {"name": "stability", "backend": "property", "models": ["s1.pt"],
+            {"name": "stability", "predictor": "dp_property", "models": ["s1.pt"],
              "head": None, "direction": "max", "weight": 1.0, "scale": 5.0,
              "objective": "mean_minus_kstd"},
         ],
@@ -46,50 +46,69 @@ def test_empty_properties_raises():
 
 def test_missing_models_raises():
     with pytest.raises(ValueError) as info:
-        StructureScorePredictor({"base_poscar": "x",
-                                 "properties": [{"name": "p", "backend": "energy"}]})
+        StructureScorePredictor({"base_poscar": "x", "properties": [
+            {"name": "p", "predictor": "dp_energy", "direction": "min"}]})
     assert "models" in str(info.value)
 
 
-def test_bad_backend_raises():
+def test_missing_predictor_raises():
     with pytest.raises(ValueError) as info:
         StructureScorePredictor({"base_poscar": "x", "properties": [
-            {"name": "p", "backend": "magic", "models": ["m"]}]})
-    assert "backend" in str(info.value)
+            {"name": "p", "models": ["m"], "direction": "min"}]})
+    assert "predictor" in str(info.value)
+
+
+def test_unknown_predictor_raises():
+    # A non-structure predictor name is resolved as a composition leaf; an
+    # unregistered name surfaces the registry's "Unknown predictor" error.
+    with pytest.raises(ValueError) as info:
+        StructureScorePredictor({"base_poscar": "x", "properties": [
+            {"name": "p", "predictor": "magic", "direction": "max"}]})
+    assert "magic" in str(info.value)
+
+
+def test_missing_direction_raises():
+    with pytest.raises(ValueError) as info:
+        StructureScorePredictor({"base_poscar": "x", "properties": [
+            {"name": "p", "predictor": "dp_energy", "models": ["m"]}]})
+    assert "direction" in str(info.value)
 
 
 def test_bad_direction_raises():
     with pytest.raises(ValueError) as info:
         StructureScorePredictor({"base_poscar": "x", "properties": [
-            {"name": "p", "backend": "energy", "models": ["m"], "direction": "down"}]})
+            {"name": "p", "predictor": "dp_energy", "models": ["m"], "direction": "down"}]})
     assert "direction" in str(info.value)
 
 
 def test_duplicate_names_raise():
     with pytest.raises(ValueError) as info:
         StructureScorePredictor({"base_poscar": "x", "properties": [
-            {"name": "p", "backend": "energy", "models": ["m"]},
-            {"name": "p", "backend": "energy", "models": ["m"]}]})
+            {"name": "p", "predictor": "dp_energy", "models": ["m"], "direction": "min"},
+            {"name": "p", "predictor": "dp_energy", "models": ["m"], "direction": "min"}]})
     assert "duplicates" in str(info.value)
 
 
 def test_zero_scale_raises():
     with pytest.raises(ValueError) as info:
         StructureScorePredictor({"base_poscar": "x", "properties": [
-            {"name": "p", "backend": "energy", "models": ["m"], "scale": 0.0}]})
+            {"name": "p", "predictor": "dp_energy", "models": ["m"],
+             "direction": "min", "scale": 0.0}]})
     assert "scale" in str(info.value)
 
 
 def test_legacy_dp_models_key_accepted():
     p = StructureScorePredictor({"base_poscar": "x", "properties": [
-        {"name": "p", "backend": "property", "dp_models": ["a.pt", "b.pt"]}]})
+        {"name": "p", "predictor": "dp_property", "dp_models": ["a.pt", "b.pt"],
+         "direction": "max"}]})
     assert p.properties[0]["models"] == ["a.pt", "b.pt"]
 
 
 def test_bad_transform_raises():
     with pytest.raises(ValueError) as info:
         StructureScorePredictor({"base_poscar": "x", "properties": [
-            {"name": "p", "backend": "property", "models": ["m"], "transform": "sqrt"}]})
+            {"name": "p", "predictor": "dp_property", "models": ["m"],
+             "direction": "max", "transform": "sqrt"}]})
     assert "transform" in str(info.value)
 
 
@@ -98,7 +117,7 @@ def test_transform_exp_maps_log_outputs_to_real_units(monkeypatch):
     import rl_matdesign.utils.dp_eval as dp_eval
 
     p = StructureScorePredictor({"base_poscar": "x", "properties": [
-        {"name": "conductivity", "backend": "property", "models": ["m1.pt", "m2.pt"],
+        {"name": "conductivity", "predictor": "dp_property", "models": ["m1.pt", "m2.pt"],
          "direction": "max", "transform": "exp", "objective": "mean"}]})
     # Avoid loading real DeepProperty models; ensemble emits *log* values.
     p._get_prop_models = lambda prop: ([object(), object()], {})
@@ -115,7 +134,7 @@ def test_transform_exp_maps_log_outputs_to_real_units(monkeypatch):
 def test_default_builder_is_substitute():
     from rl_matdesign.predictors.builders.substitute import SubstituteBuilder
     p = StructureScorePredictor({"base_poscar": "x", "properties": [
-        {"name": "p", "backend": "energy", "models": ["m"], "direction": "min"}]})
+        {"name": "p", "predictor": "dp_energy", "models": ["m"], "direction": "min"}]})
     assert isinstance(p._shared_builder, SubstituteBuilder)
 
 
@@ -220,9 +239,9 @@ def _independent_cfg(child_objective="mean"):
         "site_symbol": "Ti",
         "k": 1.0,
         "properties": [
-            {"name": "energy", "backend": "property", "models": ["m"],
+            {"name": "energy", "predictor": "dp_property", "models": ["m"],
              "direction": "min", "objective": child_objective, "weight": 1.0, "scale": 2.0},
-            {"name": "bulk", "backend": "property", "models": ["m"],
+            {"name": "bulk", "predictor": "dp_property", "models": ["m"],
              "direction": "max", "objective": child_objective, "weight": 0.5, "scale": 100.0},
         ],
     }
@@ -232,7 +251,7 @@ def test_independent_structures_built_per_objective():
     p = StructureScorePredictor(_independent_cfg())
     assert p.share_structure is False
     assert len(p._builders) == 2                       # one builder per objective
-    assert p._builders[0] is not p._builders[1]
+    assert p._builders["energy"] is not p._builders["bulk"]
 
     calls = {"energy": 0, "bulk": 0}
 
@@ -242,7 +261,7 @@ def test_independent_structures_built_per_objective():
             return [object()]
         return type("B", (), {"build": _build})()
 
-    p._builders = [_mk("energy"), _mk("bulk")]
+    p._builders = {"energy": _mk("energy"), "bulk": _mk("bulk")}
     fixed = {"energy": (4.0, 0.1), "bulk": (80.0, 5.0)}
     p._score = lambda prop, structures: fixed[prop["name"]]
 
@@ -254,8 +273,8 @@ def test_independent_structures_built_per_objective():
 
 def test_independent_mean_minus_kstd_matches_old_composite():
     p = StructureScorePredictor(_independent_cfg(child_objective="mean_minus_kstd"))
-    p._builders = [type("B", (), {"build": lambda self, c, *, n_configs, rng: [object()]})()
-                   for _ in range(2)]
+    _b = type("B", (), {"build": lambda self, c, *, n_configs, rng: [object()]})
+    p._builders = {"energy": _b(), "bulk": _b()}
     fixed = {"energy": (4.0, 0.1), "bulk": (80.0, 5.0)}
     p._score = lambda prop, structures: fixed[prop["name"]]
     # v_energy = (-1)*4 - 0.1 = -4.1 ; v_bulk = (+1)*80 - 5 = 75
@@ -276,10 +295,10 @@ def _sweep_cfg(**over):
         "k": 1.0,
         "sweep": {"name": "temperature", "values": [460, 470, 480, 490]},
         "properties": [
-            {"name": "conductivity", "backend": "property", "models": ["m"],
+            {"name": "conductivity", "predictor": "dp_property", "models": ["m"],
              "fparam": [0.0, None, 6], "direction": "max", "weight": 2.0,
              "scale": 1.0, "objective": "mean"},
-            {"name": "stability", "backend": "property", "models": ["s"],
+            {"name": "stability", "predictor": "dp_property", "models": ["s"],
              "fparam": [0.0, None, 6, 4], "direction": "max", "weight": 1.0,
              "scale": 1.0, "objective": "mean"},
         ],
@@ -304,8 +323,8 @@ def _bind_sweep_stub(p):
 def test_fparam_null_without_sweep_raises():
     with pytest.raises(ValueError) as info:
         StructureScorePredictor({"base_poscar": "x", "properties": [
-            {"name": "p", "backend": "property", "models": ["m"],
-             "fparam": [0.0, None, 6]}]})
+            {"name": "p", "predictor": "dp_property", "models": ["m"],
+             "direction": "max", "fparam": [0.0, None, 6]}]})
     assert "sweep" in str(info.value)
 
 
@@ -332,10 +351,10 @@ def test_sweep_with_temperature_independent_property():
     # One swept property + one T-independent property (no null in fparam):
     # the constant property is scored once and contributes equally at every T.
     cfg = _sweep_cfg(properties=[
-        {"name": "conductivity", "backend": "property", "models": ["m"],
+        {"name": "conductivity", "predictor": "dp_property", "models": ["m"],
          "fparam": [0.0, None, 6], "direction": "max", "weight": 1.0,
          "scale": 1.0, "objective": "mean"},
-        {"name": "fixed", "backend": "property", "models": ["m"],
+        {"name": "fixed", "predictor": "dp_property", "models": ["m"],
          "fparam": [7.0], "direction": "max", "weight": 1.0, "scale": 1.0,
          "objective": "mean"},
     ])

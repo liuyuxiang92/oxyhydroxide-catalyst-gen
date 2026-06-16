@@ -279,8 +279,8 @@ def main() -> None:
     meta = SceneMeta(cfg)
     sweep_name = str((cfg.get("sweep") or {}).get("name", "sweep"))
 
-    from rl_matdesign.registry import resolve_predictor
-    predictor = resolve_predictor(cfg.get("predictor", "structure_score"), cfg, seed=args.seed)
+    from rl_matdesign.registry import build_reward
+    predictor = build_reward(cfg, seed=args.seed)
 
     # Geometry-optimization override. Default (None) keeps the config's setting;
     # --geo-opt / --no-geo-opt force it for both scoring and the saved POSCAR.

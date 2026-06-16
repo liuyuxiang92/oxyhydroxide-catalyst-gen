@@ -162,6 +162,14 @@ class IntegerRatioEnv:
         items = [(el, n // g) for el, n in items]
         return tuple(sorted(items))
 
+    def current_state_features(self) -> np.ndarray:
+        """Material features of the current (partial) state, for action selection.
+
+        Uniform accessor shared with :class:`ABCDEOOHEnv` / :class:`MultiGroupEnv`
+        so training/generation code never reaches into env-specific state.
+        """
+        return np.asarray(self.state_featurizer(self.state), dtype=float)
+
     # ------------------------------------------------------------------
     # Action space
     # ------------------------------------------------------------------

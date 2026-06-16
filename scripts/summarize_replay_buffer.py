@@ -1,5 +1,32 @@
 from __future__ import annotations
 
+"""Summarize a DQN replay buffer into per-episode formulas and rewards.
+
+The classical online DQN (``train_dqn_online`` in ``rl_matdesign/training.py``)
+keeps its replay buffer in memory as a ``collections.deque`` of per-step
+transition rows. The buffer is persisted to disk only inside the periodic
+mid-run checkpoint (``checkpoint.pt``), under the ``"buffer"`` key. There is no
+longer a standalone ``random_dataset.npz``.
+
+Each buffer row is a dict with these keys (see ``add_episode_to_buffer``):
+
+    s_mat_raw         np.ndarray  unscaled material features of the state
+    s_step            np.ndarray  one-hot of the step counter
+    a_elem_idx        int         index into cation_set of the chosen cation
+    a_comp_val        float       chosen fraction value (e.g. 0.20)
+    reward            float       immediate reward (nonzero only at terminal)
+    s_mat_next_raw    np.ndarray  next-state material features (zeros if done)
+    s_step_next       np.ndarray  next-state step one-hot (zeros if done)
+    next_allowed_idx  list        (elem_idx, comp_idx) pairs for the next state
+    done              bool        terminal-step flag
+
+This script reconstructs episodes by splitting the row sequence on
+``done=True`` boundaries (rows are appended in episode/step order), decodes the
+composition from ``a_elem_idx`` + ``a_comp_val``, and reports the terminal
+reward. Optionally it recomputes the predictor mean/std for each unique
+composition using the run's configured predictor.
+"""
+
 import argparse
 import csv
 import json
@@ -7,27 +34,24 @@ import os
 import sys
 import warnings
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-# Avoid noisy matminer warnings triggered by importing abcde_ooh.env (which imports featurization).
-warnings.filterwarnings(
-    "ignore",
-    message=r"^MagpieData\(impute_nan=False\):.*",
-)
-warnings.filterwarnings(
-    "ignore",
-    message=r"^PymatgenData\(impute_nan=False\):.*",
-)
-warnings.filterwarnings(
-    "ignore",
-    message=r"^ValenceOrbital\(impute_nan=False\):.*",
-)
-warnings.filterwarnings(
-    "ignore",
-    message=r"^IonProperty\(impute_nan=False\):.*",
-)
+# Make the package importable without installation (mirrors run_experiment.py).
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SRC = os.path.join(_REPO_ROOT, "src")
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
+
+# Avoid noisy matminer warnings triggered by importing the featurizer.
+for _msg in (
+    r"^MagpieData\(impute_nan=False\):.*",
+    r"^PymatgenData\(impute_nan=False\):.*",
+    r"^ValenceOrbital\(impute_nan=False\):.*",
+    r"^IonProperty\(impute_nan=False\):.*",
+):
+    warnings.filterwarnings("ignore", message=_msg)
 
 
 def _load_run_config(run_dir: str) -> dict:
@@ -38,94 +62,131 @@ def _load_run_config(run_dir: str) -> dict:
         return json.load(f)
 
 
-def _decode_episode_formulas(
+def _load_buffer(checkpoint_path: str) -> List[dict]:
+    """Load the ``buffer`` list from a DQN mid-run checkpoint."""
+    import torch
+
+    raw = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if not isinstance(raw, dict) or raw.get("type") != "dqn" or "buffer" not in raw:
+        _type = raw.get("type") if isinstance(raw, dict) else type(raw).__name__
+        raise SystemExit(
+            f"{checkpoint_path} is not a DQN mid-checkpoint (type={_type!r}). "
+            "Pass a checkpoint.pt written by a --method dqn run."
+        )
+    return list(raw["buffer"])
+
+
+def _split_episodes(buffer: List[dict]) -> List[List[dict]]:
+    """Group consecutive rows into episodes, splitting after each ``done`` row.
+
+    Rows are appended in episode/step order, so a ``done=True`` row closes the
+    current episode. A FIFO eviction can leave a partial leading episode (its
+    first steps dropped); such a trailing-incomplete group at the *end* (no
+    closing ``done``) is discarded.
+    """
+    episodes: List[List[dict]] = []
+    current: List[dict] = []
+    for row in buffer:
+        current.append(row)
+        if bool(row.get("done", False)):
+            episodes.append(current)
+            current = []
+    return episodes
+
+
+def _episode_composition(episode: List[dict], cation_set: List[str]) -> Dict[str, float]:
+    """Reconstruct the {symbol: fraction} mapping from one episode's rows."""
+    comp: Dict[str, float] = {}
+    for row in episode:
+        idx = int(row["a_elem_idx"])
+        if idx < 0 or idx >= len(cation_set):
+            raise ValueError(
+                f"a_elem_idx={idx} out of range for cation_set of size {len(cation_set)}"
+            )
+        el = cation_set[idx]
+        comp[el] = comp.get(el, 0.0) + float(row["a_comp_val"])
+    return comp
+
+
+def _canonical_formula(
+    comp: Dict[str, float],
     *,
-    a_elem: np.ndarray,
-    a_comp: np.ndarray,
-    max_steps: int,
     anion_formula: str,
-) -> Tuple[List[str], List[Dict[str, float]]]:
-    from abcde_ooh.env import DEFAULT_CATION_SET, DEFAULT_FRACTIONS
-    from abcde_ooh.encoding import decode_one_hot
+    total_units: int,
+) -> str:
+    """Canonical formula string (major-first, alphabetical tie-break).
 
-    n = int(a_elem.shape[0])
-    if n % max_steps != 0:
-        raise ValueError(f"Expected a multiple of {max_steps} steps, got {n} rows")
-    neps = n // max_steps
+    Mirrors ``CompositionEnv.terminal_formula`` so formulas match generated.csv.
+    """
+    from rl_matdesign.env import _format_fraction
 
-    formulas: List[str] = []
-    comps: List[Dict[str, float]] = []
-
-    for e in range(neps):
-        state = ""
-        comp: Dict[str, float] = {}
-        for t in range(max_steps):
-            i = e * max_steps + t
-            el = decode_one_hot(a_elem[i], DEFAULT_CATION_SET)
-            frac_str = decode_one_hot(a_comp[i], DEFAULT_FRACTIONS)
-            if t == 0:
-                state = f"{el}{frac_str}"
-            else:
-                state = f"{state}{el}{frac_str}"
-            comp[el] = float(frac_str)
-        formulas.append(f"{state}{anion_formula}")
-        comps.append(comp)
-
-    return formulas, comps
-
-
-def _terminal_reward_from_y(y: np.ndarray, max_steps: int) -> np.ndarray:
-    y = np.asarray(y, dtype=float)
-    if y.ndim != 1:
-        y = y.reshape(-1)
-    if y.size % max_steps != 0:
-        raise ValueError(f"Expected y to be multiple of {max_steps}, got {y.size}")
-    neps = y.size // max_steps
-    Y = y.reshape(neps, max_steps)
-    return Y[:, max_steps - 1]
+    items: List[Tuple[str, int]] = []
+    for el, frac in comp.items():
+        units = int(round(float(frac) * total_units))
+        if units <= 0:
+            continue
+        items.append((el, units))
+    items.sort(key=lambda t: (-t[1], t[0]))
+    body = "".join(f"{el}{_format_fraction(units, total_units)}" for el, units in items)
+    return f"{body}{anion_formula}"
 
 
 @dataclass(frozen=True)
-class DPSpec:
-    model_files: Tuple[str, ...]
-    base_poscar: str
-    n_random_configs: int
-    ads_height: float
-    ads_dz: float
-    seed: int
-    uncertainty: str
-    objective_mode: str
-    k: float
+class Episode:
+    formula: str
+    comp: Dict[str, float]
+    terminal_reward: float
+    n_rows: int
 
 
-def _maybe_build_dp_predictor(dp: Optional[DPSpec]):
-    if dp is None:
-        return None, None
+def _decode_episodes(
+    buffer: List[dict],
+    *,
+    cation_set: List[str],
+    anion_formula: str,
+    total_units: int,
+) -> List[Episode]:
+    out: List[Episode] = []
+    for ep_rows in _split_episodes(buffer):
+        comp = _episode_composition(ep_rows, cation_set)
+        formula = _canonical_formula(
+            comp, anion_formula=anion_formula, total_units=total_units
+        )
+        # Reward is nonzero only on the terminal (done) row; sum is robust either way.
+        terminal_reward = float(sum(float(r.get("reward", 0.0)) for r in ep_rows))
+        out.append(Episode(formula, comp, terminal_reward, len(ep_rows)))
+    return out
 
-    from abcde_ooh.dp_predictor import DPConfig, DeepMDOverpotentialPredictor, objective_from_mean_std
 
-    cfg = DPConfig(
-        base_poscar=dp.base_poscar,
-        model_files=dp.model_files,
-        n_random_configs=dp.n_random_configs,
-        ads_height=dp.ads_height,
-        ads_dz=dp.ads_dz,
-        seed=dp.seed,
-    )
-    return DeepMDOverpotentialPredictor(cfg), objective_from_mean_std
+def _maybe_build_predictor(cfg: dict, seed: int):
+    """Build the run's configured predictor for optional reward recompute."""
+    from rl_matdesign.registry import build_reward
+
+    if not cfg.get("properties") and not cfg.get("predictor"):
+        raise SystemExit(
+            "--recompute requires a 'properties' list or a 'predictor' entry in "
+            "run_config.json (or rerun without --recompute)."
+        )
+    return build_reward(cfg, seed=seed)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Summarize a saved replay buffer (random_dataset.npz) into formulas and DP objective values. "
-            "Optionally recompute DeepMD mean/std if model checkpoints are available."
+            "Summarize a DQN replay buffer (from checkpoint.pt) into per-episode "
+            "formulas and terminal rewards. Optionally recompute predictor "
+            "mean/std for each unique composition."
         )
     )
     parser.add_argument(
         "--run-dir",
         required=True,
-        help="Run directory containing random_dataset.npz (and optionally run_config.json)",
+        help="Run directory containing checkpoint.pt and run_config.json",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        default=None,
+        help="Checkpoint path (default: <run-dir>/checkpoint.pt)",
     )
     parser.add_argument(
         "--out-csv",
@@ -138,144 +199,98 @@ def main() -> None:
         default=None,
         help="Optional cap on number of episodes written (for quick inspection)",
     )
-
-    # Optional DP recompute path
     parser.add_argument(
-        "--recompute-dp",
+        "--recompute",
         action="store_true",
-        help="If set, recompute dp_mean/dp_std for each unique composition using DeepMD models.",
+        help="Recompute predictor mean/std for each unique composition using "
+             "the predictor configured in run_config.json.",
     )
     parser.add_argument(
-        "--dp-model",
-        action="append",
-        default=[],
-        help="Path to a DeepMD .pt checkpoint. Repeat for ensemble (overrides run_config.json).",
+        "--seed",
+        type=int,
+        default=None,
+        help="Seed for the recompute predictor (default: run_config 'dp_seed' or 0).",
     )
-    parser.add_argument("--dp-poscar", type=str, default=None)
-    parser.add_argument("--dp-n-random-configs", type=int, default=None)
-    parser.add_argument("--dp-ads-height", type=float, default=None)
-    parser.add_argument("--dp-ads-dz", type=float, default=None)
-    parser.add_argument("--dp-uncertainty", type=str, default=None)
-    parser.add_argument("--dp-objective", type=str, default=None)
-    parser.add_argument("--dp-k", type=float, default=None)
 
     args = parser.parse_args()
 
     run_cfg = _load_run_config(args.run_dir)
+    cation_set = run_cfg.get("cation_set")
+    if not cation_set:
+        raise SystemExit(
+            "run_config.json missing 'cation_set' — cannot decode a_elem_idx. "
+            f"Looked in {os.path.join(args.run_dir, 'run_config.json')}"
+        )
+    anion_formula = run_cfg.get("anion_formula", "")
+    total_units = int(run_cfg.get("total_units", 20))
 
-    anion_formula = run_cfg.get("anion_formula", "O2H1")
-    max_steps = 5
-
-    ds_path = os.path.join(args.run_dir, "random_dataset.npz")
-    if not os.path.exists(ds_path):
-        raise SystemExit(f"Not found: {ds_path}")
-
-    data = np.load(ds_path)
-    for k in ("a_elem", "a_comp", "y"):
-        if k not in data.files:
-            raise SystemExit(f"random_dataset.npz missing key '{k}'. Keys: {sorted(data.files)}")
-
-    a_elem = data["a_elem"]
-    a_comp = data["a_comp"]
-    y = data["y"]
-
-    formulas, comps = _decode_episode_formulas(
-        a_elem=a_elem,
-        a_comp=a_comp,
-        max_steps=max_steps,
-        anion_formula=anion_formula,
-    )
-
-    terminal_reward = _terminal_reward_from_y(y, max_steps)
-    buffer_objective = -terminal_reward  # objective minimized by DP; reward is -objective
-
-    # Decide DP settings if recompute requested.
-    dp_spec: Optional[DPSpec] = None
-    if args.recompute_dp:
-        model_files = tuple(args.dp_model) if args.dp_model else tuple(run_cfg.get("dp_model", []))
-        if not model_files:
-            raise SystemExit("--recompute-dp requires at least one --dp-model or dp_model in run_config.json")
-
-        dp_spec = DPSpec(
-            model_files=tuple(model_files),
-            base_poscar=str(args.dp_poscar or run_cfg.get("dp_poscar", "POSCAR")),
-            n_random_configs=int(args.dp_n_random_configs or run_cfg.get("dp_n_random_configs", 10)),
-            ads_height=float(args.dp_ads_height or run_cfg.get("dp_ads_height", 1.9)),
-            ads_dz=float(args.dp_ads_dz or run_cfg.get("dp_ads_dz", 1.0)),
-            seed=int(run_cfg.get("seed", 0)),
-            uncertainty=str(args.dp_uncertainty or run_cfg.get("dp_uncertainty", "models")),
-            objective_mode=str(args.dp_objective or run_cfg.get("dp_objective", "mean_minus_kstd")),
-            k=float(args.dp_k or run_cfg.get("dp_k", 1.0)),
+    ckpt_path = args.checkpoint or os.path.join(args.run_dir, "checkpoint.pt")
+    if not os.path.exists(ckpt_path):
+        raise SystemExit(
+            f"Not found: {ckpt_path}. The DQN buffer is saved inside the periodic "
+            "checkpoint; ensure the run was DQN and checkpointing was enabled."
         )
 
-    dp_predictor, objective_from_mean_std = _maybe_build_dp_predictor(dp_spec)
+    buffer = _load_buffer(ckpt_path)
+    episodes = _decode_episodes(
+        buffer,
+        cation_set=cation_set,
+        anion_formula=anion_formula,
+        total_units=total_units,
+    )
+    if not episodes:
+        raise SystemExit("No complete episodes found in buffer (no 'done' rows).")
+
+    predictor = None
+    if args.recompute:
+        seed = args.seed if args.seed is not None else int(run_cfg.get("dp_seed", 0))
+        predictor = _maybe_build_predictor(run_cfg, seed)
 
     out_csv = args.out_csv or os.path.join(args.run_dir, "replay_buffer_summary.csv")
 
-    # DP recompute caching by composition key.
-    dp_cache: Dict[Tuple[Tuple[str, float], ...], Tuple[float, float, float]] = {}
+    # Cache predictor calls by canonical composition key.
+    pred_cache: Dict[Tuple[Tuple[str, float], ...], Tuple[float, float]] = {}
 
-    n = len(formulas)
+    n = len(episodes)
     limit = min(n, int(args.max_rows)) if args.max_rows is not None else n
 
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
-        fieldnames = [
-            "formula",
-            "buffer_objective",
-            "buffer_terminal_reward",
-            "dp_mean",
-            "dp_std",
-            "dp_mean_minus_kstd",
-        ]
+        fieldnames = ["formula", "terminal_reward", "n_buffer_rows"]
+        if predictor is not None:
+            fieldnames += ["pred_mean", "pred_std"]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
 
         for i in range(limit):
-            dp_mean = ""
-            dp_std = ""
-            dp_obj = ""
-
-            if dp_predictor is not None and dp_spec is not None and objective_from_mean_std is not None:
-                key = tuple(sorted((k, float(v)) for k, v in comps[i].items()))
-                if key in dp_cache:
-                    mean, std, obj = dp_cache[key]
+            ep = episodes[i]
+            row = {
+                "formula": ep.formula,
+                "terminal_reward": ep.terminal_reward,
+                "n_buffer_rows": ep.n_rows,
+            }
+            if predictor is not None:
+                key = tuple(sorted((k, float(v)) for k, v in ep.comp.items()))
+                if key in pred_cache:
+                    mean, std = pred_cache[key]
                 else:
-                    mean, std = dp_predictor.predict_overpotential(comps[i], uncertainty=dp_spec.uncertainty)
-                    obj = objective_from_mean_std(
-                        float(mean),
-                        float(std),
-                        mode=dp_spec.objective_mode,
-                        k=dp_spec.k,
-                    )
-                    dp_cache[key] = (float(mean), float(std), float(obj))
+                    mean, std = predictor.predict(ep.comp)
+                    mean, std = float(mean), float(std)
+                    pred_cache[key] = (mean, std)
+                row["pred_mean"] = mean
+                row["pred_std"] = std
+            writer.writerow(row)
 
-                dp_mean = mean
-                dp_std = std
-                dp_obj = obj
-
-            writer.writerow(
-                {
-                    "formula": formulas[i],
-                    "buffer_objective": float(buffer_objective[i]),
-                    "buffer_terminal_reward": float(terminal_reward[i]),
-                    "dp_mean": dp_mean,
-                    "dp_std": dp_std,
-                    "dp_mean_minus_kstd": dp_obj,
-                }
-            )
-
-    # Lightweight console summary
-    obj = buffer_objective[:limit]
-    print(f"Wrote {limit} episodes -> {out_csv}")
+    rewards = np.asarray([ep.terminal_reward for ep in episodes[:limit]], dtype=float)
+    print(f"Wrote {limit} episodes ({len(buffer)} buffer rows) -> {out_csv}")
     print(
-        "buffer_objective stats:",
+        "terminal_reward stats:",
         {
-            "min": float(np.min(obj)),
-            "p10": float(np.quantile(obj, 0.10)),
-            "median": float(np.median(obj)),
-            "mean": float(np.mean(obj)),
-            "p90": float(np.quantile(obj, 0.90)),
-            "max": float(np.max(obj)),
+            "min": float(np.min(rewards)),
+            "p10": float(np.quantile(rewards, 0.10)),
+            "median": float(np.median(rewards)),
+            "mean": float(np.mean(rewards)),
+            "p90": float(np.quantile(rewards, 0.90)),
+            "max": float(np.max(rewards)),
         },
     )
 

@@ -53,8 +53,7 @@ n_components: 5
 #     stoich: 3.0      # 3 O per formula unit → cations must provide +6 total
 constraint_filter: null   # Default: no constraint; DPA reward handles stability
 
-# ---- Predictor ----
-predictor: structure_score             # the one structure-based predictor
+# ---- Reward (one structure objective -> single-objective, auto-detected) ----
 builder: substitute                    # fixed-lattice element swap onto placeholder sites
 poscar: data/perovskite/LaBO3.POSCAR   # LaBO3 template; B-site marked as site_symbol
 site_symbol: "Fe"                      # placeholder for B-site atoms in the template POSCAR
@@ -62,7 +61,7 @@ n_random_configs: 5
 k: 1.0
 properties:
   - name: energy
-    backend: energy                    # DP potential energy (lower = more stable)
+    predictor: dp_energy               # DP potential energy (lower = more stable)
     models:
       - models/perovskite/model_1.pt
       - models/perovskite/model_2.pt

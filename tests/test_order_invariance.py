@@ -334,12 +334,12 @@ def test_contract_violation_is_detected():
     assert bad.predict(comp) != bad.predict(_permute_dict(comp, 1))
 
 
-@pytest.mark.parametrize("mode,filename", [
-    ("sinter", "optimal_sinter_RF.joblib"),
-    ("calcine", "optimal_calcine_RF.joblib"),
+@pytest.mark.parametrize("filename", [
+    "optimal_sinter_RF.joblib",
+    "optimal_calcine_RF.joblib",
 ])
-def test_sinter_calcine_predictor_is_order_invariant(mode, filename):
-    """SinterCalcineRFPredictor returns identical (mean, std) for permuted dicts."""
+def test_rf_magpie_predictor_is_order_invariant(filename):
+    """RFMagpiePredictor returns identical (mean, std) for permuted dicts."""
     pytest.importorskip("matminer")
     pytest.importorskip("joblib")
 
@@ -350,9 +350,9 @@ def test_sinter_calcine_predictor_is_order_invariant(mode, filename):
     if not rf_path.exists():
         pytest.skip(f"model file not found at {rf_path}")
 
-    from rl_matdesign.predictors.sinter_calcine import SinterCalcineRFPredictor
+    from rl_matdesign.predictors.rf_magpie import RFMagpiePredictor
 
-    pred = SinterCalcineRFPredictor(rf_model_path=str(rf_path), mode=mode)
+    pred = RFMagpiePredictor(model_path=str(rf_path))
     comp = {"Fe": 0.3, "Ni": 0.3, "Co": 0.2, "Mn": 0.1, "Cr": 0.1}
     base = pred.predict(comp)
     # Clear the per-call cache so we genuinely re-evaluate, not return cache hit.

@@ -45,8 +45,7 @@ n_components: 5           # Classic 5-component HEA
 
 constraint_filter: null   # No chemical constraint; DPA reward handles stability
 
-# ---- Predictor ----
-predictor: structure_score        # the one structure-based predictor
+# ---- Reward (one structure objective -> single-objective, auto-detected) ----
 builder: substitute               # fixed-lattice element swap onto placeholder sites
 poscar: data/hea/FCC.POSCAR       # FCC supercell template; change to BCC.POSCAR if needed
 site_symbol: "X"                  # placeholder element in the POSCAR template
@@ -54,7 +53,7 @@ n_random_configs: 5               # random configs per composition during RL tra
 k: 1.0
 properties:
   - name: energy
-    backend: energy               # DP potential energy (lower = more stable)
+    predictor: dp_energy          # DP potential energy (lower = more stable)
     models:
       - models/hea/model_1.pt
       - models/hea/model_2.pt

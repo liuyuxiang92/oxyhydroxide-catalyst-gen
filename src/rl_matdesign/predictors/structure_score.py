@@ -1,25 +1,29 @@
-"""StructureScorePredictor — the one structure-based predictor.
+"""The reward engine — a multi-objective combiner over a ``properties:`` list.
 
-Replaces the four near-twin predictors (``dp_structure``, ``dp_property``,
-``composite``, ``structure_pipeline``) with a single pipeline you steer with
-config dials:
+One predictor per objective, folded into a single reward:
 
-    builder.build(candidate)            # how to make the structure (default: substitute)
-      -> [relax once, optional]         # geo_opt: present  -> relax, absent -> score as-is
-      -> score each property            # backend: energy | property
-      -> reward = Σ weight·objective_from_mean_std(direction·mean, std, obj) / scale
+    for each property:
+      predictor: dp_energy | dp_property      -> build (+ optional relax) a
+                                                 structure, score with DeepMD
+      predictor: rf_magpie | <fqn> | ...      -> score the composition directly
+    reward = Σ weight·objective_from_mean_std(direction·mean, std, obj) / scale
 
-The two structural regimes are one boolean:
+Single vs multi-objective is **auto-detected** from the list length — one entry
+is the single-objective case, the same fold with one term. There is no separate
+mode and no ``backend``/``mode`` key.
+
+Structure objectives (``dp_energy``/``dp_property``) build a cell; the
+``share_structure`` boolean controls reuse:
 
 * ``share_structure: true`` (default) — build **one** structure with the
-  top-level builder, relax it **once**, score every property on that shared
-  cell. This is the old ``structure_pipeline`` (e.g. conductivity + stability of
-  the *same* relaxed Li6PS6 supercell). A single property with
-  ``backend: energy`` is the old ``dp_structure``; ``backend: property`` is the
-  old ``dp_property``.
-* ``share_structure: false`` — each objective builds (and optionally relaxes)
-  its **own** structure independently. This is the old ``composite`` (objectives
-  may use different builders / templates / site_symbols).
+  top-level builder, relax it **once**, score every structure objective on that
+  shared cell (e.g. conductivity + stability of the *same* relaxed Li6PS6 cell).
+* ``share_structure: false`` — each structure objective builds (and optionally
+  relaxes) its **own** cell independently (objectives may use different builders).
+
+Composition objectives (``rf_magpie`` and any FQN leaf) never build a structure;
+they receive the candidate composition. A config with no structure objective
+needs no builder / ``base_poscar`` at all.
 
 Consumer contract (``training.py``): exposes ``predict`` (reward, std),
 ``predict_raw`` (Σ weight·direction·mean/scale, for the ``dp_mean`` CSV column),
@@ -28,7 +32,8 @@ and ``per_objective_stats`` ({name: (mean, std)} for per-objective CSV columns).
 Config keys
 -----------
     builder:          builder registry name or ``pkg.mod:Class`` FQN (default
-                      ``substitute``). Gets the whole cfg.
+                      ``substitute``); only consulted when a structure objective
+                      is present.
     share_structure:  bool, default ``true`` (see above).
     n_random_configs: random realizations per candidate (default 1).
     geo_opt:          optional ``{model, head, fmax, steps, relax_cell, enabled}``;
@@ -42,12 +47,14 @@ Config keys
                       reported as a ``<name>`` stat (→ ``obj_<name>_mean`` CSV
                       column). Structures are built+relaxed once and reused.
     properties:       non-empty list; each entry:
-        name, backend (energy|property), models (or legacy dp_models), head,
-        output_index, output_aggregator, energy_per_atom, direction (max|min),
-        weight, scale, objective, fparam, aparam. A ``null`` in ``fparam`` marks
-        the slot filled by the sweep value (requires a top-level ``sweep``). In
-        ``share_structure: false`` an entry may also carry its own builder /
-        base_poscar / site_symbol / n_random_configs.
+        name, predictor (dp_energy|dp_property|rf_magpie|<fqn>), direction
+        (max|min, REQUIRED), weight, scale, objective. Structure predictors also
+        take models (or legacy dp_models), head, output_index, output_aggregator,
+        energy_per_atom, fparam, aparam; a ``null`` in ``fparam`` marks the slot
+        filled by the sweep value (requires a top-level ``sweep``). Composition
+        predictors take their own leaf args (e.g. ``model:`` for rf_magpie). In
+        ``share_structure: false`` a structure entry may also carry its own
+        builder / base_poscar / site_symbol / n_random_configs.
 """
 from __future__ import annotations
 
@@ -104,8 +111,8 @@ class StructureScorePredictor:
         raw_props = cfg.get("properties")
         if not raw_props:
             raise ValueError(
-                "structure_score needs a non-empty 'properties' list. Each entry "
-                "is one objective: {backend: energy|property, models: [...], "
+                "reward needs a non-empty 'properties' list. Each entry is one "
+                "objective: {name, predictor: dp_energy|dp_property|rf_magpie|<fqn>, "
                 "direction: max|min, ...}."
             )
 
@@ -113,7 +120,9 @@ class StructureScorePredictor:
         shared_builder_cfg = {k: cfg[k] for k in _SHARED_BUILDER_KEYS if k in cfg}
 
         self.properties: List[Dict[str, Any]] = []
-        self._builders: List[Any] = []      # per-property builder (share_structure: false)
+        # Per-property structure builder (share_structure: false), keyed by name;
+        # only structure predictors (dp_energy/dp_property) get one.
+        self._builders: Dict[str, Any] = {}
         seen: set[str] = set()
         for i, p in enumerate(raw_props):
             name = str(p.get("name", f"prop{i}"))
@@ -124,21 +133,24 @@ class StructureScorePredictor:
                 )
             seen.add(name)
 
-            backend = str(p.get("backend", "property")).lower()
-            if backend not in ("energy", "property"):
+            predictor_name = str(p.get("predictor", "")).strip()
+            if not predictor_name:
                 raise ValueError(
-                    f"properties[{i}].backend = {backend!r}; expected 'energy' "
-                    "(DP potential energy) or 'property' (DP property head)."
+                    f"properties[{i}] ({name!r}) needs a 'predictor' — one of "
+                    "'dp_energy', 'dp_property', a registry leaf (e.g. 'rf_magpie', "
+                    "'ooh'), or an FQN 'pkg.mod:Class'."
                 )
+            is_structure = predictor_name in ("dp_energy", "dp_property")
 
-            models = p.get("models") or p.get("dp_models")
-            if not models:
+            # direction is REQUIRED — the sign (lower vs higher is better) must be
+            # explicit, never implied.
+            direction_raw = p.get("direction")
+            if direction_raw is None:
                 raise ValueError(
-                    f"properties[{i}] ({name!r}) needs 'models' (list of DeepMD "
-                    "checkpoint paths)."
+                    f"properties[{i}] ({name!r}) needs an explicit 'direction' "
+                    "(max or min)."
                 )
-
-            direction = str(p.get("direction", "max")).lower()
+            direction = str(direction_raw).lower()
             if direction not in _DIRECTION_ALIASES:
                 raise ValueError(
                     f"properties[{i}].direction = {direction!r}; expected one of "
@@ -176,10 +188,31 @@ class StructureScorePredictor:
                     f"{sorted(_TRANSFORMS)}. Use 'exp' for heads that emit log(value)."
                 )
 
+            if is_structure:
+                models = p.get("models") or p.get("dp_models")
+                if not models:
+                    raise ValueError(
+                        f"properties[{i}] ({name!r}) with predictor={predictor_name!r} "
+                        "needs 'models' (list of DeepMD checkpoint paths)."
+                    )
+                backend = "energy" if predictor_name == "dp_energy" else "property"
+                instance = None
+            else:
+                # Composition predictor: resolve the leaf once (registry or FQN);
+                # it is scored on the candidate composition directly (no structure).
+                from ..registry import resolve_predictor
+
+                backend = "composition"
+                models = None
+                child_seed = None if seed is None else int(seed) + i
+                instance = resolve_predictor(predictor_name, p, seed=child_seed)
+
             self.properties.append({
                 "name": name,
+                "predictor": predictor_name,
                 "backend": backend,
-                "models": list(models),
+                "instance": instance,
+                "models": list(models) if models else None,
                 "head": p.get("head"),
                 "output_index": int(p.get("output_index", 0)),
                 "output_aggregator": str(p.get("output_aggregator", "index")),
@@ -195,18 +228,25 @@ class StructureScorePredictor:
                 "n_random_configs": int(p.get("n_random_configs", self.n_random_configs)),
             })
 
-            if not self.share_structure:
-                # Each objective builds independently: inherit top-level builder
-                # knobs, let the entry override. Decorrelate the per-objective RNG.
+            if is_structure and not self.share_structure:
+                # Each structure objective builds independently: inherit top-level
+                # builder knobs, let the entry override. Decorrelate the RNG.
                 sub_cfg = {**shared_builder_cfg, **p}
                 child_seed = None if seed is None else int(seed) + i
-                self._builders.append(
-                    resolve_builder(str(sub_cfg.get("builder", top_builder)), sub_cfg, seed=child_seed)
+                self._builders[name] = resolve_builder(
+                    str(sub_cfg.get("builder", top_builder)), sub_cfg, seed=child_seed
                 )
 
-        # Shared builder (share_structure: true) — build once, score all on it.
+        # Any structure predictor present? Only then do we need a builder / base
+        # POSCAR — a pure composition-predictor config (e.g. rf_magpie) builds
+        # nothing.
+        self._has_structure = any(p["backend"] != "composition" for p in self.properties)
+
+        # Shared builder (share_structure: true) — build once, score all structure
+        # objectives on it. Skipped entirely when no structure objective exists.
         self._shared_builder = (
-            resolve_builder(top_builder, cfg, seed=seed) if self.share_structure else None
+            resolve_builder(top_builder, cfg, seed=seed)
+            if (self.share_structure and self._has_structure) else None
         )
 
         self._rng = np.random.default_rng(seed)
@@ -327,30 +367,41 @@ class StructureScorePredictor:
     # Internal
     # ------------------------------------------------------------------
 
-    def _materialize_structures(self, candidate: Any) -> Dict[str, List[Any]]:
-        """Build (and optionally relax) the structure(s) for each property once.
+    def _materialize_structures(self, candidate: Any) -> Dict[str, Any]:
+        """Resolve the per-property scoring input once, independent of any sweep.
 
-        Independent of any sweep value. Shared: one relaxed cell reused by every
-        property; else: each property builds (and relaxes) its own.
+        For a **structure** objective (dp_energy/dp_property) the input is a list
+        of built (and optionally relaxed) cells — shared across objectives when
+        ``share_structure``, else built per objective. For a **composition**
+        objective (rf_magpie / FQN leaf) the input is just the candidate
+        composition — no structure is built. When no structure objective exists,
+        the builder is never touched (so ``base_poscar`` is not required).
         """
-        prop_structures: Dict[str, List[Any]] = {}
-        if self.share_structure:
-            structures = self._shared_builder.build(
-                candidate, n_configs=self.n_random_configs, rng=self._rng
-            )
-            if self.geo_opt_enabled:
-                structures = [self._relax(s) for s in structures]
-            for prop in self.properties:
-                prop_structures[prop["name"]] = structures
-        else:
-            for prop, builder in zip(self.properties, self._builders):
-                structures = builder.build(
-                    candidate, n_configs=prop["n_random_configs"], rng=self._rng
+        prop_inputs: Dict[str, Any] = {}
+        structure_props = [p for p in self.properties if p["backend"] != "composition"]
+        if structure_props:
+            if self.share_structure:
+                structures = self._shared_builder.build(
+                    candidate, n_configs=self.n_random_configs, rng=self._rng
                 )
                 if self.geo_opt_enabled:
                     structures = [self._relax(s) for s in structures]
-                prop_structures[prop["name"]] = structures
-        return prop_structures
+                for prop in structure_props:
+                    prop_inputs[prop["name"]] = structures
+            else:
+                for prop in structure_props:
+                    builder = self._builders[prop["name"]]
+                    structures = builder.build(
+                        candidate, n_configs=prop["n_random_configs"], rng=self._rng
+                    )
+                    if self.geo_opt_enabled:
+                        structures = [self._relax(s) for s in structures]
+                    prop_inputs[prop["name"]] = structures
+        # Composition objectives: scored directly on the candidate composition.
+        for prop in self.properties:
+            if prop["backend"] == "composition":
+                prop_inputs[prop["name"]] = candidate
+        return prop_inputs
 
     def _raw_stats(self, candidate: Any) -> Dict[str, Tuple[float, float]]:
         key = self._key(candidate)
@@ -409,8 +460,13 @@ class StructureScorePredictor:
         return out
 
     def _score(
-        self, prop: Dict[str, Any], structures: List[Any], *, fparam: Any = None,
+        self, prop: Dict[str, Any], structures: Any, *, fparam: Any = None,
     ) -> Tuple[float, float]:
+        if prop["backend"] == "composition":
+            # `structures` is the candidate composition; the leaf returns (mean, std)
+            # directly. Composition leaves don't use structures, sweep, or transform.
+            mean, std = prop["instance"].predict(structures)
+            return float(mean), float(std)
         if prop["backend"] == "energy":
             from ..utils.dp_eval import eval_energy_ase
             values = eval_energy_ase(

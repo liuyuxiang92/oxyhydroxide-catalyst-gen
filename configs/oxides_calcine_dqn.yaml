@@ -1,12 +1,11 @@
-# Oxide calcination-temperature RL benchmark.
-# Mirrors the reference npj repo's env rules exactly:
-#   - 80-element pool (including O).
-#   - Integer digit ratios 0..9, no sum-to-1 constraint.
-#   - Step 5 = O with digit 1..9 (forced by LastStepElementFilter).
+# Oxide CALCINATION-temperature DQN benchmark.
+# DQN vs reference (RL_materials_generation) on the oxide task.
+# Same 80-element env / constraints as the a2c configs; method: dqn with
+# hyperparameters mirroring oxides_driver.py where they map to online-TD DQN.
 #
 # Usage:
-#   python scripts/run_experiment.py --config configs/oxides_calcine.yaml \
-#       --method a2c --out runs/oxides_calcine_a2c_s0 --seed 0
+#   python scripts/run_experiment.py --config configs/oxides_calcine_dqn.yaml \
+#       --method dqn --out runs/oxides_calcine_dqn_s0 --seed 0
 
 
 # ---- Environment ----
@@ -128,7 +127,7 @@ properties:
     direction: min        # minimize calcination temperature
 
 # ---- RL hyperparameters ----
-method: a2c
+method: dqn
 pg_warmup_eps: 200
 pg_num_iters: 500
 pg_batch_eps: 15
@@ -138,7 +137,7 @@ pg_entropy_coef: 0.01
 gen_temperature: 1.0
 gen_top_frac: 0.0
 gen_epsilon: 0.0
-gamma: 0.99
+gamma: 0.9            # reference disc_factor
 
 pg_repeat_penalty_coef: 0.1
 pg_repeat_penalty_shape: log
@@ -147,14 +146,13 @@ pg_repeat_penalty_shape: log
 num_gen_eps: 1000          # 1000 final candidates per run (matches reference)
 exploration_gen_eps: 0
 
-# ---- DQN-specific ----
-dqn_lr: 0.001
+# ---- DQN-specific (mirrors RL_materials_generation/oxides_driver.py where mappable) ----
+dqn_lr: 0.001              # our stable online-TD value; their lr 1e-2 suits MC full-batch, not bootstrapped TD
 dqn_batch_size: 256
-# Classical online DQN
-dqn_warmup_eps: 200
-dqn_num_train_eps: 20000
-dqn_buffer_size: 50000
+dqn_warmup_eps: 1000       # their 1000 random-init episodes
+dqn_num_train_eps: 50000   # their 500 iters x 100 eps/iter interaction budget
+dqn_buffer_size: 50000     # their deque(maxlen=50000)
 dqn_grad_steps_per_ep: 5
 dqn_target_update_freq: 100
-dqn_eps_anneal_eps: 10000
+dqn_eps_anneal_eps: 30000  # their eps=0.99*0.99^iter reaches ~0.05 near iter ~295 (~29.5k eps)
 dqn_eps_min: 0.05

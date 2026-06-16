@@ -119,12 +119,13 @@ filters:
     smact_anions:
       - {symbol: O, charge: -2, stoich: 1.5}
 
-# ---- Predictor ----
-predictor: sinter_calcine
-rf_model: models/sinter_calcine/optimal_sinter_RF.joblib
-mode: sinter
-objective: mean
-k: 0.0   # std not used by the RF single-model reward
+# ---- Reward (one property -> single-objective, auto-detected) ----
+k: 0.0   # no std penalty; reward = direction * mean = -T
+properties:
+  - name: sinter
+    predictor: rf_magpie
+    model: models/sinter_calcine/optimal_sinter_RF.joblib
+    direction: min        # minimize sintering temperature
 
 # ---- RL hyperparameters ----
 method: a2c

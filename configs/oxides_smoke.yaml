@@ -91,11 +91,12 @@ required_elements: ["O"]
 nonzero_ratio_at_last: true
 reserve_for_last: true
 
-predictor: sinter_calcine
-rf_model: models/sinter_calcine/optimal_sinter_RF.joblib
-mode: sinter
-objective: mean
 k: 0.0
+properties:
+  - name: sinter
+    predictor: rf_magpie
+    model: models/sinter_calcine/optimal_sinter_RF.joblib
+    direction: min
 
 method: a2c
 pg_warmup_eps: 5

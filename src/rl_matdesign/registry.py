@@ -34,12 +34,9 @@ def _make_structure_score(cfg: dict, *, seed: Optional[int] = None, **_):
     return StructureScorePredictor(cfg, seed=seed)
 
 
-def _make_sinter_calcine(cfg: dict, **_):
-    from .predictors.sinter_calcine import SinterCalcineRFPredictor
-    return SinterCalcineRFPredictor(
-        rf_model_path=cfg["rf_model"],
-        mode=cfg.get("mode", "sinter"),
-    )
+def _make_rf_magpie(cfg: dict, **_):
+    from .predictors.rf_magpie import RFMagpiePredictor
+    return RFMagpiePredictor(model_path=cfg["model"])
 
 
 def _make_ooh(cfg: dict, *, seed: Optional[int] = None, **_):
@@ -73,9 +70,13 @@ def _make_dummy(cfg: dict, **_):
     return _DummyPredictor()
 
 
+# Leaf predictors usable as a flat `predictor:` or as a `properties[].predictor:`
+# inside the reward engine. `dp_energy`/`dp_property` are NOT here — they are
+# structure-scoring branches handled internally by the engine (they need its
+# build/relax machinery), not standalone composition leaves.
 PREDICTORS: Dict[str, Factory] = {
-    "structure_score":    _make_structure_score,
-    "sinter_calcine":     _make_sinter_calcine,
+    "structure_score":    _make_structure_score,   # the multi-objective reward engine
+    "rf_magpie":          _make_rf_magpie,
     "ooh":                _make_ooh,
     "dummy":              _make_dummy,
 }
@@ -234,6 +235,30 @@ def resolve_predictor(kind: str, cfg: dict, *, seed: Optional[int] = None):
             f"For a custom predictor, use the FQN form: 'pkg.module:ClassName'."
         )
     return factory(cfg, seed=seed)
+
+
+def build_reward(cfg: dict, *, seed: Optional[int] = None):
+    """Build the run's reward predictor from a config.
+
+    Routing is by the **shape** of the config, so there is no engine name to
+    learn and no single-vs-multi mode to set:
+
+    * ``properties:`` is a non-empty list  -> the multi-objective reward engine
+      (:class:`StructureScorePredictor`). It auto-detects single (one entry) vs
+      multi (many) objectives and combines them.
+    * otherwise -> a flat single predictor named by the legacy ``predictor:`` key
+      (registry short name or FQN).
+    """
+    props = cfg.get("properties")
+    if isinstance(props, list) and props:
+        return _make_structure_score(cfg, seed=seed)
+    kind = cfg.get("predictor")
+    if not kind:
+        raise ValueError(
+            "Reward config needs either a non-empty 'properties' list (the "
+            "reward engine) or a flat 'predictor' name."
+        )
+    return resolve_predictor(kind, cfg, seed=seed)
 
 
 def resolve_constraint(kind: Optional[str], cfg: dict, *, env=None):

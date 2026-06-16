@@ -168,8 +168,8 @@ def load_config(path: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def build_predictor(cfg: dict, seed: int = None):
-    from rl_matdesign.registry import resolve_predictor
-    return resolve_predictor(cfg.get("predictor", "dummy"), cfg, seed=seed)
+    from rl_matdesign.registry import build_reward
+    return build_reward(cfg, seed=seed)
 
 
 def build_constraint_filter(cfg: dict, env=None):

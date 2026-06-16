@@ -40,8 +40,8 @@ groups:
     oxide_only: [Mg, Al, Si, Sc, Ti, V, Cr, Fe, Co, Ga, Ge, Y, Zr, Nb, Hf, Ta, Ho, Er, Lu]
     # "both" (decide O or not) = every other metal: Mn Ni Cu Zn Mo In Sn Sb W Tm Yb
 
-# ---- Predictor: build once -> relax once -> conductivity + stability ----
-predictor: structure_score      # share_structure: true (default) = one relaxed cell, scored twice
+# ---- Reward: build once -> relax once -> conductivity + stability (two objectives) ----
+# share_structure: true (default) = one relaxed cell, scored by both property heads.
 builder: sse
 # S-site substitution region: dope the last 1000 S by default; only when a
 # composition's O+Cl+Br won't fit (e.g. two oxide dopants) expand to the first 2000.
@@ -110,7 +110,7 @@ sweep:
 
 properties:
   - name: conductivity
-    backend: property                 # DP property head read on the shared relaxed cell
+    predictor: dp_property            # DP property head read on the shared relaxed cell
     models: [SSE-models/models/model1.pt, SSE-models/models/model2.pt,
              SSE-models/models/model3.pt, SSE-models/models/model4.pt,
              SSE-models/models/model5.pt]
@@ -122,7 +122,7 @@ properties:
     scale: 1.0
     objective: mean_plus_kstd
   - name: stability
-    backend: property
+    predictor: dp_property
     models: [SSE-models/models_stab/model1.pt, SSE-models/models_stab/model2.pt,
              SSE-models/models_stab/model3.pt, SSE-models/models_stab/model4.pt,
              SSE-models/models_stab/model5.pt]
