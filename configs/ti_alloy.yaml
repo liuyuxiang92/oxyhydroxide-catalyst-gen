@@ -67,6 +67,20 @@ groups:
       Hf: [0.00, 0.10]
       Ta: [0.00, 0.05]
 
+    # Force Ti into the LAST episode step (matches the substitute builder's
+    # `site_symbol: Ti` host convention). `reserve_for_last` prunes Ti from
+    # steps 1..N-1 so it can only be picked last; `nonzero_ratio_at_last`
+    # keeps its fraction > 0 (redundant here since Ti's lower bound is 0.45,
+    # but harmless). Ti is already MANDATORY via its element_bounds lower
+    # bound > 0 — this filter only fixes *where in the episode* it is picked.
+    # A single-entry `filters:` list is auto-wrapped (no `constraint_filter:
+    # chain` needed); it merges into the collapsed flat CompositionEnv.
+    filters:
+      - constraint_filter: last_step_element
+        required_elements: ["Ti"]
+        nonzero_ratio_at_last: true
+        reserve_for_last: true
+
 # =====================================================================
 # REQUIRED USER EDITS — fill these in before running on the GPU machine
 # =====================================================================
@@ -108,10 +122,12 @@ builder: substitute            # fixed-lattice element swap onto placeholder sit
 # property is averaged over both parents. Each bare path inherits n_random_configs
 # below; use {path: ..., n_configs: N} to set a per-template count instead.
 base_poscar:
-  - /ABS/PATH/TO/your_ti_alloy.POSCAR
-  - /ABS/PATH/TO/your_ti_alloy_2.POSCAR
+  - {path: /ABS/PATH/TO/your_ti_alloy.POSCAR,   n_configs: 5}
+  - {path: /ABS/PATH/TO/your_ti_alloy_2.POSCAR, n_configs: 5}
 site_symbol: Ti
-n_random_configs: 10           # random alloy-site assignments per composition (per template)
+n_random_configs: 10           # fallback per-template count for bare paths; the
+                               # per-template `n_configs: 5` above overrides it,
+                               # so the ensemble is 5 + 5 = 10 cells total
 
 # Global uncertainty weight (the `k` in `mean ± k*std`). Same for all
 # objectives; per-objective effective weighting can be tuned via `scale`.
