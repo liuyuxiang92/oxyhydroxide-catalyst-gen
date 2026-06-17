@@ -157,21 +157,64 @@ def test_chain_child_missing_constraint_filter_key_raises():
         )
 
 
-def test_oxide_yaml_round_trip_resolves_to_chain():
-    """The shipped oxide configs (sinter + calcine) should both resolve
-    to a ChainConstraintFilter wrapping LastStepElementFilter + SMACTChargeFilter."""
+def test_oxide_yaml_round_trip_auto_chains():
+    """The shipped oxide configs carry a two-entry `filters:` list and should
+    auto-resolve to a ChainConstraintFilter (LastStepElementFilter +
+    SMACTChargeFilter) WITHOUT an explicit `constraint_filter: chain`."""
     pytest.importorskip("smact")  # SMACT-dependent test
 
     import yaml
     from pathlib import Path
-    from rl_matdesign.registry import resolve_constraint
+    from rl_matdesign.registry import build_constraints
 
     repo = Path(__file__).resolve().parent.parent
     for name in ("oxides_sinter.yaml", "oxides_calcine.yaml"):
         cfg = yaml.safe_load((repo / "configs" / name).read_text())
-        assert cfg["constraint_filter"] == "chain", name
-        chain = resolve_constraint(cfg["constraint_filter"], cfg, env=None)
+        assert "constraint_filter" not in cfg, name      # auto-detected from filters
+        assert isinstance(cfg["filters"], list) and len(cfg["filters"]) == 2, name
+        chain = build_constraints(cfg, env=None)
         child_types = [type(c).__name__ for c in chain.children]
         assert child_types == ["LastStepElementFilter", "SMACTChargeFilter"], (
             f"{name}: unexpected child types {child_types}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# build_constraints — shape-based auto-routing (mirrors build_reward)
+# --------------------------------------------------------------------------- #
+
+def test_build_constraints_auto_chains_filter_list():
+    from rl_matdesign.registry import build_constraints
+    cfg = {"filters": [
+        {"constraint_filter": "last_step_element", "required_elements": ["O"],
+         "reserve_for_last": True},
+        {"constraint_filter": "last_step_element", "required_elements": ["O"],
+         "reserve_for_last": False},
+    ]}
+    c = build_constraints(cfg, env=None)
+    assert type(c).__name__ == "ChainConstraintFilter"
+    assert len(c.children) == 2
+
+
+def test_build_constraints_single_entry_filters_still_chains():
+    from rl_matdesign.registry import build_constraints
+    cfg = {"filters": [
+        {"constraint_filter": "last_step_element", "required_elements": ["O"],
+         "reserve_for_last": True},
+    ]}
+    c = build_constraints(cfg, env=None)
+    assert type(c).__name__ == "ChainConstraintFilter"
+    assert len(c.children) == 1
+
+
+def test_build_constraints_flat_single_filter():
+    from rl_matdesign.registry import build_constraints
+    cfg = {"constraint_filter": "last_step_element", "required_elements": ["O"],
+           "reserve_for_last": True}
+    c = build_constraints(cfg, env=None)
+    assert type(c).__name__ == "LastStepElementFilter"
+
+
+def test_build_constraints_none_when_absent():
+    from rl_matdesign.registry import build_constraints
+    assert build_constraints({}, env=None) is None

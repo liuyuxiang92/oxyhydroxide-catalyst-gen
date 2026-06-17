@@ -108,7 +108,8 @@ n_components: 5
 #      to 1.0 (MO) if you want a different oxide class.
 #
 # Requires `pip install smact` for the SMACT filter.
-constraint_filter: chain
+# Two filters in a list -> auto-chained in list order; no need to write
+# `constraint_filter: chain` (single-vs-chain is detected from `filters:`).
 filters:
   - constraint_filter: last_step_element
     required_elements: ["O"]

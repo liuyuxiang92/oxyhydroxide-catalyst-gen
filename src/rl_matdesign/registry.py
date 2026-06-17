@@ -276,3 +276,22 @@ def resolve_constraint(kind: Optional[str], cfg: dict, *, env=None):
             f"For a custom filter, use the FQN form: 'pkg.module:ClassName'."
         )
     return factory(cfg, env=env)
+
+
+def build_constraints(cfg: dict, *, env=None):
+    """Build the constraint filter for a config, auto-detecting chaining.
+
+    Mirrors :func:`build_reward`: routing is by the *shape* of the config, so a
+    user with several constraints never has to name ``chain`` explicitly.
+
+    * ``filters:`` is a non-empty list -> wrap them in a
+      :class:`ChainConstraintFilter`, applied in list order. A single-entry list
+      is fine too (it just runs that one filter, with the chain's safety
+      fallback). You do **not** write ``constraint_filter: chain``.
+    * otherwise -> the flat ``constraint_filter:`` (short name or FQN), or
+      ``None`` when neither key is present.
+    """
+    filters = cfg.get("filters")
+    if isinstance(filters, list) and filters:
+        return _make_chain(cfg, env=env)
+    return resolve_constraint(cfg.get("constraint_filter"), cfg, env=env)

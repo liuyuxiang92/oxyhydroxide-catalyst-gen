@@ -173,8 +173,8 @@ def build_predictor(cfg: dict, seed: int = None):
 
 
 def build_constraint_filter(cfg: dict, env=None):
-    from rl_matdesign.registry import resolve_constraint
-    return resolve_constraint(cfg.get("constraint_filter"), cfg, env=env)
+    from rl_matdesign.registry import build_constraints
+    return build_constraints(cfg, env=env)
 
 
 # ---------------------------------------------------------------------------
