@@ -1,11 +1,14 @@
-# Oxide CALCINATION-temperature DQN benchmark.
-# DQN vs reference (RL_materials_generation) on the oxide task.
-# Same 80-element env / constraints as the a2c configs; method: dqn with
-# hyperparameters mirroring oxides_driver.py where they map to online-TD DQN.
+# Oxide combined SINTER+CALCINE RL benchmark (dual-method).
+# 80-element oxide env + auto-chained constraints. Carries BOTH the a2c (pg_*)
+# and DQN (dqn_*) hyperparameter blocks; choose the method at runtime via
+# --method. The DQN block mirrors RL_materials_generation/oxides_driver.py
+# (reference repo) where its settings map to online-TD DQN.
 #
 # Usage:
-#   python scripts/run_experiment.py --config configs/oxides_calcine_dqn.yaml \
-#       --method dqn --out runs/oxides_calcine_dqn_s0 --seed 0
+#   python scripts/run_experiment.py --config configs/oxides_sinter_calcine.yaml \
+#       --method dqn --out runs/oxides_sinter_calcine_dqn_s0 --train-seed 0
+#   python scripts/run_experiment.py --config configs/oxides_sinter_calcine.yaml \
+#       --method a2c --out runs/oxides_sinter_calcine_a2c_s0 --train-seed 0
 
 
 # ---- Environment ----
@@ -119,9 +122,15 @@ filters:
     smact_anions:
       - {symbol: O, charge: -2, stoich: 1.5}
 
-# ---- Reward (one property -> single-objective, auto-detected) ----
-k: 0.0   # no std penalty; reward = direction * mean = -T
+# ---- Reward (two properties -> multi-objective, auto-detected) ----
+# reward = (-T_sinter) + (-T_calcine) = -(T_sinter + T_calcine), matching the
+# reference combined task (env_constrained.reward: -= sinter_T then -= calcine_T).
+k: 0.0   # no std penalty
 properties:
+  - name: sinter
+    predictor: rf_magpie
+    model: models/sinter_calcine/optimal_sinter_RF.joblib
+    direction: min        # minimize sintering temperature
   - name: calcine
     predictor: rf_magpie
     model: models/sinter_calcine/optimal_calcine_RF.joblib
