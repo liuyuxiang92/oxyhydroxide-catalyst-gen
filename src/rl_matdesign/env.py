@@ -70,7 +70,7 @@ DEFAULT_FRACTION_SET: List[str] = [
 class CompositionEnv:
     """General N-step environment for constrained composition design.
 
-    At each step the agent picks one element from ``cation_set`` (no repeats)
+    At each step the agent picks one element from ``species_set`` (no repeats)
     and one fraction from ``fraction_set``.  All fractions must sum to exactly
     1.0 at the terminal step.  The ``_possible_sums_by_k`` table is precomputed
     so every action is guaranteed to leave a feasible path to a valid terminal
@@ -78,7 +78,7 @@ class CompositionEnv:
 
     Parameters
     ----------
-    cation_set:
+    species_set:
         Ordered list of candidate element symbols.
     fraction_set:
         Ordered list of fraction strings on a regular grid (e.g. "0.05" … "0.80").
@@ -105,22 +105,24 @@ class CompositionEnv:
         Optional ``{element: (min_fraction, max_fraction)}`` overriding the
         global ``fraction_set`` range on a per-element basis.  Bounds are in
         the same fractional units as ``fraction_set`` (e.g. ``(0.45, 0.90)``).
-        Elements absent from the dict inherit ``[0, 1]``.  Only meaningful with
-        ``episode_style="fixed_order_amount"`` for now; combining with the
-        default ``"element_then_amount"`` raises ``NotImplementedError``.
+        Elements absent from the dict inherit ``[0, 1]``.  Supported by BOTH
+        episode styles. Under ``"element_then_amount"`` a lower bound > 0 makes
+        that element **mandatory** (an absent element has fraction 0, which would
+        violate ``lo>0``), and the legal amounts at each step are pruned so the
+        remaining steps can always complete to a valid bounded composition.
     episode_style:
         ``"element_then_amount"`` (default, current behavior) — the agent picks
         both element and amount at each step.  ``"fixed_order_amount"`` — every
-        element in ``cation_set`` appears in that fixed order, and the agent
+        element in ``species_set`` appears in that fixed order, and the agent
         only chooses an amount per step.  ``n_components`` is then forced to
-        ``len(cation_set)`` and the last step's amount is determined by the
+        ``len(species_set)`` and the last step's amount is determined by the
         residual budget.
     """
 
     def __init__(
         self,
         *,
-        cation_set: Sequence[str],
+        species_set: Sequence[str],
         fraction_set: Sequence[str] = DEFAULT_FRACTION_SET,
         anion_formula: str = "",
         n_components: int = 5,
@@ -131,7 +133,7 @@ class CompositionEnv:
         element_bounds: Optional[Dict[str, Tuple[float, float]]] = None,
         episode_style: EpisodeStyle = "element_then_amount",
     ) -> None:
-        self.cation_set = list(cation_set)
+        self.species_set = list(species_set)
         self.fraction_set = list(fraction_set)
         self.anion_formula = anion_formula
         self.reward_fn = reward_fn or (lambda _formula: 0.0)
@@ -144,20 +146,12 @@ class CompositionEnv:
                 f"episode_style must be 'element_then_amount' or "
                 f"'fixed_order_amount', got {episode_style!r}."
             )
-        if element_bounds is not None and episode_style == "element_then_amount":
-            raise NotImplementedError(
-                "element_bounds is currently only supported with "
-                "episode_style='fixed_order_amount'. Combining per-element bounds "
-                "with free element choice would require a per-subset feasibility "
-                "search and is not implemented yet."
-            )
-
         if episode_style == "fixed_order_amount":
-            self.n_components = len(self.cation_set)
-            if n_components != len(self.cation_set):
+            self.n_components = len(self.species_set)
+            if n_components != len(self.species_set):
                 warnings.warn(
                     f"episode_style='fixed_order_amount' forces n_components="
-                    f"len(cation_set)={len(self.cation_set)}; ignoring requested "
+                    f"len(species_set)={len(self.species_set)}; ignoring requested "
                     f"n_components={n_components}.",
                     UserWarning, stacklevel=2,
                 )
@@ -172,17 +166,21 @@ class CompositionEnv:
             for k in range(self.n_components + 1)
         ]
 
-        # Per-element unit bounds (only used by fixed_order_amount).
+        # Per-element unit bounds. `_element_unit_bounds` is indexed by species_set
+        # position (used by fixed_order_amount); `_element_unit_bounds_by_sym`
+        # maps symbol -> (lo_u, hi_u) (used by element_then_amount, where the
+        # element at each step is the agent's free choice, not its position).
         self._element_unit_bounds: Optional[List[Tuple[int, int]]] = None
+        self._element_unit_bounds_by_sym: Optional[Dict[str, Tuple[int, int]]] = None
         if element_bounds is not None:
-            unknown = sorted(set(element_bounds) - set(self.cation_set))
+            unknown = sorted(set(element_bounds) - set(self.species_set))
             if unknown:
                 warnings.warn(
-                    f"element_bounds keys not in cation_set are ignored: {unknown}",
+                    f"element_bounds keys not in species_set are ignored: {unknown}",
                     UserWarning, stacklevel=2,
                 )
             bounds: List[Tuple[int, int]] = []
-            for el in self.cation_set:
+            for el in self.species_set:
                 lo, hi = element_bounds.get(el, (0.0, 1.0))
                 lo_u = int(round(float(lo) * self._total_units))
                 hi_u = int(round(float(hi) * self._total_units))
@@ -192,15 +190,38 @@ class CompositionEnv:
                     )
                 bounds.append((lo_u, hi_u))
             self._element_unit_bounds = bounds
+            self._element_unit_bounds_by_sym = dict(zip(self.species_set, bounds))
 
-            sum_min = sum(lo for lo, _ in bounds)
-            sum_max = sum(hi for _, hi in bounds)
-            if not (sum_min <= self._total_units <= sum_max):
-                raise ValueError(
-                    f"element_bounds is infeasible: sum(mins)={sum_min}, "
-                    f"sum(maxes)={sum_max}, total_units={self._total_units}. "
-                    "Need sum(mins) <= total_units <= sum(maxes)."
-                )
+            if self.episode_style == "fixed_order_amount":
+                # Every cation appears exactly once, so feasibility is the simple
+                # sum-of-bounds window over the full set.
+                sum_min = sum(lo for lo, _ in bounds)
+                sum_max = sum(hi for _, hi in bounds)
+                if not (sum_min <= self._total_units <= sum_max):
+                    raise ValueError(
+                        f"element_bounds is infeasible: sum(mins)={sum_min}, "
+                        f"sum(maxes)={sum_max}, total_units={self._total_units}. "
+                        "Need sum(mins) <= total_units <= sum(maxes)."
+                    )
+            else:
+                # element_then_amount: the agent picks n_components distinct
+                # cations. Any element with lo_u > 0 is MANDATORY (an absent
+                # element has fraction 0, which would violate its lower bound), so
+                # there must be room for all mandatory cations and a completion
+                # that hits total_units must exist.
+                n_mandatory = sum(1 for lo, _ in bounds if lo > 0)
+                if n_mandatory > self.n_components:
+                    raise ValueError(
+                        f"element_bounds requires {n_mandatory} mandatory cations "
+                        f"(lower bound > 0) but n_components={self.n_components}. "
+                        "Raise n_components or relax some lower bounds to 0."
+                    )
+                if not self._completable(self._total_units, self.n_components, bounds):
+                    raise ValueError(
+                        "element_bounds is infeasible for element_then_amount: no "
+                        f"choice of {self.n_components} cations can sum to "
+                        f"total_units={self._total_units} within bounds."
+                    )
 
         self.state: str = ""
         self.counter: int = 0
@@ -276,6 +297,61 @@ class CompositionEnv:
                 items.append((str(el), units))
         return tuple(sorted(items))
 
+    @staticmethod
+    def _completable(target: int, k_slots: int, pool: Sequence[Tuple[int, int]]) -> bool:
+        """Can exactly ``k_slots`` distinct elements from ``pool`` sum to ``target``?
+
+        ``pool`` is the list of selectable elements' ``(lo_u, hi_u)`` unit bounds.
+        On a step-1 unit grid the achievable sums of any chosen k-subset form the
+        full integer interval ``[Σlo, Σhi]`` (each element varies independently by
+        1), so the subset-sum-with-bounds feasibility reduces to a window check:
+
+        * Every element with ``lo_u > 0`` is **mandatory** (it cannot be left out
+          without violating its own lower bound), so all of them must be among the
+          ``k_slots`` chosen — hence ``#mandatory <= k_slots`` and they all count
+          toward ``Σlo``/``Σhi``.
+        * The remaining ``k_slots - #mandatory`` slots are filled from the optional
+          elements (``lo_u == 0``). They never raise the floor (their ``lo`` is 0);
+          to maximise the reachable ceiling we take the optionals with the largest
+          ``hi``. ``target`` is reachable iff ``Σlo <= target <= Σhi_max``.
+        """
+        mandatory = [(lo, hi) for lo, hi in pool if lo > 0]
+        optional_his = sorted((hi for lo, hi in pool if lo == 0), reverse=True)
+        if len(mandatory) > k_slots:
+            return False
+        if len(pool) < k_slots:                 # not enough distinct elements
+            return False
+        k_opt = k_slots - len(mandatory)
+        lo_total = sum(lo for lo, _ in mandatory)
+        hi_total = sum(hi for _, hi in mandatory) + sum(optional_his[:k_opt])
+        return lo_total <= target <= hi_total
+
+    def _allowed_units_for_symbol(self, elem: str) -> List[int]:
+        """Allowed fraction-units for picking *elem* now under element_then_amount.
+
+        Enforces ``elem``'s own ``[lo, hi]`` bound and only keeps amounts that
+        leave a budget the remaining steps can still complete within every
+        unselected element's bounds (via :meth:`_completable`).
+        """
+        steps_left = self.n_components - self.counter
+        remaining = self.remaining_units
+        bsym = self._element_unit_bounds_by_sym
+        lo_u, hi_u = (bsym.get(elem, (0, self._total_units)) if bsym is not None
+                      else (0, self._total_units))
+        # Pool the remaining steps draw from: unselected cations other than `elem`.
+        pool = [
+            (bsym.get(e, (0, self._total_units)) if bsym is not None else (0, self._total_units))
+            for e in self.species_set
+            if e not in self._selected and e != elem
+        ]
+        allowed: List[int] = []
+        for u in self._allowed_units:
+            if u < lo_u or u > hi_u or u > remaining:
+                continue
+            if self._completable(remaining - u, steps_left - 1, pool):
+                allowed.append(u)
+        return allowed
+
     def _allowed_fraction_units_now(self, *, for_element_idx: Optional[int] = None) -> List[int]:
         steps_left = self.n_components - self.counter
         remaining = self.remaining_units
@@ -330,16 +406,23 @@ class CompositionEnv:
         if self.counter >= self.n_components:
             return []
 
-        if self.episode_style == "fixed_order_amount":
-            elems = [self.cation_set[self.counter]]
-            units = self._allowed_fraction_units_now(for_element_idx=self.counter)
-        else:
-            elems = [e for e in self.cation_set if e not in self._selected]
-            units = self._allowed_fraction_units_now()
-
         actions: List[Tuple[Tuple[float, ...], Tuple[float, ...]]] = []
-        for elem in elems:
-            elem_oh = tuple(encode_choice(elem, self.cation_set).tolist())
+        if self.episode_style == "fixed_order_amount":
+            elem = self.species_set[self.counter]
+            elem_units = {elem: self._allowed_fraction_units_now(for_element_idx=self.counter)}
+        elif self._element_unit_bounds_by_sym is not None:
+            # element_then_amount with per-element bounds: allowed amounts depend
+            # on which element is being picked, so compute units per candidate.
+            elem_units = {
+                e: self._allowed_units_for_symbol(e)
+                for e in self.species_set if e not in self._selected
+            }
+        else:
+            shared = self._allowed_fraction_units_now()
+            elem_units = {e: shared for e in self.species_set if e not in self._selected}
+
+        for elem, units in elem_units.items():
+            elem_oh = tuple(encode_choice(elem, self.species_set).tolist())
             for u in units:
                 comp = _format_fraction(u, self._total_units)
                 comp_oh = tuple(encode_choice(comp, self.fraction_set).tolist())
@@ -352,7 +435,7 @@ class CompositionEnv:
                 steps_left=self.n_components - self.counter - 1,
                 allowed_units=self._allowed_units,
                 possible_sums_by_k=self._possible_sums_by_k,
-                cation_set=self.cation_set,
+                species_set=self.species_set,
                 fraction_set=self.fraction_set,
             )
             # Only forward prior_groups when it is actually set (i.e. from
@@ -373,11 +456,11 @@ class CompositionEnv:
 
     def step(self, action: Tuple[Tuple[float, ...], Tuple[float, ...]]) -> None:
         elem_oh, comp_oh = action
-        elem = decode_one_hot(elem_oh, self.cation_set)
+        elem = decode_one_hot(elem_oh, self.species_set)
         comp_str = decode_one_hot(comp_oh, self.fraction_set)
 
         if self.episode_style == "fixed_order_amount":
-            expected = self.cation_set[self.counter]
+            expected = self.species_set[self.counter]
             if elem != expected:
                 raise ValueError(
                     f"episode_style='fixed_order_amount' expects element "
@@ -391,7 +474,10 @@ class CompositionEnv:
             raise ValueError("Composition not in allowed fraction set.")
 
         if self._element_unit_bounds is not None:
-            lo_u, hi_u = self._element_unit_bounds[self.counter]
+            if self.episode_style == "fixed_order_amount":
+                lo_u, hi_u = self._element_unit_bounds[self.counter]
+            else:
+                lo_u, hi_u = self._element_unit_bounds_by_sym.get(elem, (0, self._total_units))
             if not (lo_u <= comp_units <= hi_u):
                 raise ValueError(
                     f"Amount {comp_units} for element {elem!r} violates bounds "

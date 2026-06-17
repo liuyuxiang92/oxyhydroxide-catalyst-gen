@@ -7,7 +7,7 @@ designated **host**, and an `amount` range for the dopant(s). This filter forces
 * the final step  -> the **host** (which absorbs the remaining fraction to 1.0).
 
 It generalizes the hand-written "metal at level + P at complement" pattern (the old
-``sse_doping`` p_site role), so a friendly group config needs only ``cation_set``
+``sse_doping`` p_site role), so a friendly group config needs only ``species_set``
 (dopants), ``host:``, and ``amount: {min,max,step}`` — the env's ``host`` knob wires
 this filter in automatically.
 """
@@ -28,7 +28,7 @@ class HostComplementFilter(ConstraintFilter):
         *,
         actions: List[Tuple[Tuple[float, ...], Tuple[float, ...]]],
         steps_left: int,
-        cation_set: List[str],
+        species_set: List[str],
         fraction_set: List[str],
         **_: Any,
     ) -> List[Tuple[Tuple[float, ...], Tuple[float, ...]]]:
@@ -37,7 +37,7 @@ class HostComplementFilter(ConstraintFilter):
         is_last = steps_left == 0
         out = []
         for elem_oh, comp_oh in actions:
-            el = decode_one_hot(elem_oh, cation_set)
+            el = decode_one_hot(elem_oh, species_set)
             if is_last:
                 if el != self.host:
                     continue

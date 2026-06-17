@@ -210,7 +210,29 @@ def main() -> None:
           f"train_seed={train_seed}, gen_seed={gen_seed}")
 
     predictor = build_predictor(cfg, seed=args.dp_seed)
-    env_type  = cfg.get("env_type", "fraction")
+
+    # Env routing. `env_type` is honored if set explicitly; otherwise a config
+    # with `groups:` is `multi_group` and a flat config is `fraction`.
+    #
+    # Single-group auto-switch: a lone sum-to-1 group (`kind: composition`) is
+    # transparently collapsed to the flat CompositionEnv — same chemistry, but a
+    # flat `{el: frac}` candidate instead of `{group: {el: frac}}` — so a
+    # single-sublattice scenario can be written in the groups syntax without
+    # breaking flat predictors/builders (substitute, rf_magpie). `independent` /
+    # `categorical` single groups keep group semantics and stay on MultiGroupEnv.
+    env_type = cfg.get("env_type") or ("multi_group" if cfg.get("groups") else "fraction")
+    flat_cfg = cfg
+    if env_type == "multi_group":
+        from rl_matdesign.env_multigroup import normalize_group_spec
+        groups = cfg["groups"]
+        if len(groups) == 1 and str(groups[0].get("kind", "composition")) == "composition":
+            gspec = normalize_group_spec(groups[0])
+            # Group params (species_set/fraction_set/bounds/...) override; top-level
+            # keys (anion_formula, episode_style, builder/reward, ...) are kept.
+            flat_cfg = {**cfg, **gspec}
+            env_type = "fraction"
+            print(f"[INFO] single composition group "
+                  f"{groups[0].get('name', '?')!r} -> collapsed to flat CompositionEnv")
 
     def reward_fn(formula: str) -> float:
         if env_type == "integer_ratio":
@@ -243,7 +265,7 @@ def main() -> None:
     # episode that burned RNG state before warmup (Bug 3).
     if env_type == "integer_ratio":
         env = IntegerRatioEnv(
-            cation_set=cfg["cation_set"],
+            species_set=cfg["species_set"],
             ratio_set=cfg.get("ratio_set", None) or _default_digits(),
             n_components=int(cfg.get("n_components", 5)),
             reward_fn=reward_fn,
@@ -263,28 +285,30 @@ def main() -> None:
         env = MultiGroupEnv(groups=built_groups, reward_fn=mg_reward_fn)
     else:
         env = CompositionEnv(
-            cation_set=cfg["cation_set"],
-            fraction_set=cfg.get("fraction_set", None) or _default_fractions(),
-            anion_formula=cfg.get("anion_formula", ""),
-            n_components=int(cfg.get("n_components", 5)),
+            species_set=flat_cfg["species_set"],
+            fraction_set=flat_cfg.get("fraction_set", None) or _default_fractions(),
+            anion_formula=flat_cfg.get("anion_formula", ""),
+            n_components=int(flat_cfg.get("n_components", 5)),
             reward_fn=reward_fn,
             phase_filter=None,
-            total_units=int(cfg.get("total_units", 20)),
-            element_bounds=cfg.get("element_bounds"),
-            episode_style=cfg.get("episode_style", "element_then_amount"),
+            total_units=int(flat_cfg.get("total_units", 20)),
+            element_bounds=flat_cfg.get("element_bounds"),
+            episode_style=flat_cfg.get("episode_style", "element_then_amount"),
         )
 
     # Single-group envs attach a top-level filter post-construction (some filters
     # need the env's feasibility tables). multi_group filters live per-group.
+    # For a collapsed single group, the filter is built from the merged flat_cfg
+    # (so the group's own constraint, e.g. host_complement, is preserved).
     if env_type != "multi_group":
-        env.phase_filter = build_constraint_filter(cfg, env=env)
+        env.phase_filter = build_constraint_filter(flat_cfg, env=env)
 
     step_dim     = env.n_components
     fraction_set = list(env.fraction_set)
 
     # Precompute Magpie element features (replaces one-hot element encoding).
     elem_feats_scaled, _elem_scaler = _precompute_elem_features(
-        env.cation_set, env.state_featurizer
+        env.species_set, env.state_featurizer
     )
     elem_dim = int(elem_feats_scaled.shape[1])
     frac_dim = 1

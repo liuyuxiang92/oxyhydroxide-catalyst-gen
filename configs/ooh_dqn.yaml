@@ -19,7 +19,7 @@
 
 
 # ---- Environment ----
-cation_set:
+species_set:
   - Mg
   - Ca
   - Sc

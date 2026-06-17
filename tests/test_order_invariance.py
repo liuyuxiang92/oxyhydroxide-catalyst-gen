@@ -94,10 +94,10 @@ def _oh(idx: int, n: int) -> Tuple[float, ...]:
 def _walk(env, action_seq: Sequence[Tuple[str, str]]) -> None:
     """Roll *env* through a sequence of (element, fraction-string) pairs."""
     env.initialize()
-    cation_set = env.cation_set
+    species_set = env.species_set
     fraction_set = env.fraction_set
     for elem, frac_str in action_seq:
-        elem_oh = _oh(cation_set.index(elem), len(cation_set))
+        elem_oh = _oh(species_set.index(elem), len(species_set))
         comp_oh = _oh(fraction_set.index(frac_str), len(fraction_set))
         env.step((elem_oh, comp_oh))
 
@@ -114,7 +114,7 @@ def composition_env_factory():
 
     def _build(reward_fn=None):
         return CompositionEnv(
-            cation_set=["Fe", "Co", "Ni", "Mn", "Cr"],
+            species_set=["Fe", "Co", "Ni", "Mn", "Cr"],
             fraction_set=["0.05", "0.10", "0.15", "0.20", "0.25",
                           "0.30", "0.35", "0.40"],
             anion_formula="",
@@ -211,10 +211,10 @@ def test_composition_env_features_first_step_always_equal(composition_env_factor
 
 def _walk_int(env, action_seq: Sequence[Tuple[str, str]]) -> None:
     env.initialize()
-    cation_set = env.cation_set
+    species_set = env.species_set
     ratio_set = env.ratio_set
     for elem, digit_str in action_seq:
-        elem_oh = _oh(cation_set.index(elem), len(cation_set))
+        elem_oh = _oh(species_set.index(elem), len(species_set))
         comp_oh = _oh(ratio_set.index(digit_str), len(ratio_set))
         env.step((elem_oh, comp_oh))
 
@@ -225,7 +225,7 @@ def integer_env_factory():
 
     def _build(reward_fn=None):
         return IntegerRatioEnv(
-            cation_set=["Fe", "Co", "Ni", "Mn", "Cr"],
+            species_set=["Fe", "Co", "Ni", "Mn", "Cr"],
             ratio_set=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
             n_components=5,
             reward_fn=reward_fn or (lambda _f: 1.0),

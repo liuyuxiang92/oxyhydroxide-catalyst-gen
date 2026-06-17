@@ -138,7 +138,7 @@ class SMACTChargeFilter(ConstraintFilter):
         steps_left: int,
         allowed_units: Sequence[int],
         possible_sums_by_k: List[Any],
-        cation_set: List[str],
+        species_set: List[str],
         fraction_set: List[str],
         **_: Any,
     ) -> List[Tuple[Tuple[float, ...], Tuple[float, ...]]]:
@@ -152,7 +152,7 @@ class SMACTChargeFilter(ConstraintFilter):
 
         filtered = []
         for elem_oh, comp_oh in actions:
-            elem = decode_one_hot(elem_oh, cation_set)
+            elem = decode_one_hot(elem_oh, species_set)
             if self._can_balance_charge(elem, units_map, target_charge):
                 filtered.append((elem_oh, comp_oh))
 

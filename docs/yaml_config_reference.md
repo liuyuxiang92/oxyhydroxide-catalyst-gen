@@ -39,12 +39,12 @@ keys. The RL and generation knobs are shared across scenarios.
 
 | Key | What it does | Choices / default |
 |---|---|---|
-| `cation_set` | Candidate element symbols | **required** (list) |
+| `species_set` | Candidate element symbols | **required** (list) |
 | `fraction_set` | Allowed fraction strings (grid) | default = built-in `0.05 … 0.80` |
 | `total_units` | Grid resolution; step = `1/total_units` | `20` (->0.05); use `100` for 0.01 |
 | `n_components` | Distinct elements per episode | `5` |
 | `anion_formula` | Fixed suffix appended to the formula | `""` (e.g. `O2H1`, `O3`) |
-| `episode_style` | How each step picks | `element_then_amount` (default: choose element + amount); `fixed_order_amount` (order pinned to `cation_set`, choose only amounts) |
+| `episode_style` | How each step picks | `element_then_amount` (default: choose element + amount); `fixed_order_amount` (order pinned to `species_set`, choose only amounts) |
 | `element_bounds` | Per-element `{el: [min,max]}` fraction caps | none; **only with `fixed_order_amount`** |
 | `constraint_filter` | Action-masking filter (see §3) | `null` |
 
@@ -52,7 +52,7 @@ keys. The RL and generation knobs are shared across scenarios.
 
 | Key | What it does | Choices / default |
 |---|---|---|
-| `cation_set` | Candidate elements | **required** |
+| `species_set` | Candidate elements | **required** |
 | `ratio_set` | Allowed integer-ratio digits | default `"0" … "9"` |
 | `n_components` | Elements per episode | `5` |
 | `constraint_filter` | Action-masking filter | `null` |
@@ -77,7 +77,7 @@ The predictor receives the structured `{group_name: {element: value}}`.
 | `constraint_filter` + its kwargs | Per-group filter (sees `prior_groups` for cross-group coupling) | (see §3) |
 
 **`kind: composition`** — pick N elements with amounts summing to 1. Reuses the
-`fraction`-env keys (`cation_set`, `fraction_set`, `total_units`, `n_components`,
+`fraction`-env keys (`species_set`, `fraction_set`, `total_units`, `n_components`,
 `episode_style`, `element_bounds`) plus friendly knobs:
 
 | Key | What it does | Choices / default |

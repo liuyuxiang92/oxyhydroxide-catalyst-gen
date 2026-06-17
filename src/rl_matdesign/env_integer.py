@@ -47,7 +47,7 @@ class IntegerRatioEnv:
 
     Parameters
     ----------
-    cation_set:
+    species_set:
         Ordered list of candidate element symbols.  Must include any element
         required by the constraint filter (e.g. ``"O"`` for oxides).
     ratio_set:
@@ -70,14 +70,14 @@ class IntegerRatioEnv:
     def __init__(
         self,
         *,
-        cation_set: Sequence[str],
+        species_set: Sequence[str],
         ratio_set: Sequence[str] = DEFAULT_RATIO_SET,
         n_components: int = 5,
         reward_fn: Callable[[str], float] | None = None,
         state_featurizer: Callable[[str], np.ndarray] = featurize_formula,
         phase_filter=None,
     ) -> None:
-        self.cation_set = list(cation_set)
+        self.species_set = list(species_set)
         # ``fraction_set`` alias so downstream code (scripts, filters) that
         # looks at ``env.fraction_set`` keeps working.
         self.fraction_set = list(ratio_set)
@@ -179,8 +179,8 @@ class IntegerRatioEnv:
             return []
 
         actions: List[Tuple[Tuple[float, ...], Tuple[float, ...]]] = []
-        for elem in self.cation_set:
-            elem_oh = tuple(encode_choice(elem, self.cation_set).tolist())
+        for elem in self.species_set:
+            elem_oh = tuple(encode_choice(elem, self.species_set).tolist())
             for d in self.ratio_set:
                 comp_oh = tuple(encode_choice(d, self.ratio_set).tolist())
                 actions.append((elem_oh, comp_oh))
@@ -192,7 +192,7 @@ class IntegerRatioEnv:
                 steps_left=self.n_components - self.counter - 1,
                 allowed_units=[int(d) for d in self.ratio_set],
                 possible_sums_by_k=[],
-                cation_set=self.cation_set,
+                species_set=self.species_set,
                 fraction_set=self.ratio_set,
             )
         return actions
@@ -209,7 +209,7 @@ class IntegerRatioEnv:
 
     def step(self, action: Tuple[Tuple[float, ...], Tuple[float, ...]]) -> None:
         elem_oh, comp_oh = action
-        elem = decode_one_hot(elem_oh, self.cation_set)
+        elem = decode_one_hot(elem_oh, self.species_set)
         digit_str = decode_one_hot(comp_oh, self.ratio_set)
 
         current_allowed = self.allowed_actions()

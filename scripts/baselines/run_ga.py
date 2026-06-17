@@ -10,7 +10,7 @@ Chromosome representation
 -------------------------
 Each individual is a pair ``(element_indices, unit_allocation)`` stored flat
 as a list of 2*N integers where N = n_components:
-  - ``element_indices[i]`` : index into cation_set (all distinct by construction)
+  - ``element_indices[i]`` : index into species_set (all distinct by construction)
   - ``unit_allocation[i]``  : integer units ≥ 1, sum = total_units (default 20)
 
 This representation allows constraint-preserving operators:
@@ -83,12 +83,12 @@ def decode_individual(
 
 
 def ind_to_composition(
-    ind: List[int], cation_set: List[str], n_components: int, total_units: int
+    ind: List[int], species_set: List[str], n_components: int, total_units: int
 ) -> Dict[str, float]:
     elem_ids, units = decode_individual(ind, n_components)
     comp = {}
     for eid, u in zip(elem_ids, units):
-        el = cation_set[eid]
+        el = species_set[eid]
         comp[el] = u / total_units
     return comp
 
@@ -109,10 +109,10 @@ def is_valid(ind: List[int], n_components: int, total_units: int) -> bool:
 # ---------------------------------------------------------------------------
 
 def random_valid_individual(
-    n_components: int, cation_set: List[str], total_units: int
+    n_components: int, species_set: List[str], total_units: int
 ) -> List[int]:
     """Generate a random valid individual."""
-    elem_ids = random.sample(range(len(cation_set)), n_components)
+    elem_ids = random.sample(range(len(species_set)), n_components)
     # Distribute total_units among n_components with each ≥ 1.
     units = _random_partition(total_units, n_components)
     return encode_individual(elem_ids, units)
@@ -235,7 +235,7 @@ def main() -> None:
     from run_experiment import build_predictor
     predictor = build_predictor(cfg)
 
-    cation_set = cfg["cation_set"]
+    species_set = cfg["species_set"]
     n_components = int(cfg.get("n_components", 5))
     total_units = 20
     pop_size = args.pop_size or 50
@@ -254,7 +254,7 @@ def main() -> None:
     toolbox = base.Toolbox()
     toolbox.register(
         "individual", tools.initIterate, creator.Individual,
-        lambda: random_valid_individual(n_components, cation_set, total_units)
+        lambda: random_valid_individual(n_components, species_set, total_units)
     )
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
@@ -263,7 +263,7 @@ def main() -> None:
     eval_cache: Dict[tuple, float] = {}
 
     def evaluate(ind):
-        comp = ind_to_composition(ind, cation_set, n_components, total_units)
+        comp = ind_to_composition(ind, species_set, n_components, total_units)
         key = tuple(sorted((k, int(round(v * total_units))) for k, v in comp.items()))
         if key not in eval_cache:
             mean, _ = predictor.predict(comp)
@@ -277,7 +277,7 @@ def main() -> None:
     )
     toolbox.register(
         "mutate_elem", mut_element_swap,
-        n_components=n_components, n_cation=len(cation_set)
+        n_components=n_components, n_cation=len(species_set)
     )
     toolbox.register(
         "mutate_unit", mut_unit_transfer, n_components=n_components
@@ -310,7 +310,7 @@ def main() -> None:
     # Write results.
     rows = []
     for ind in hof:
-        comp = ind_to_composition(ind, cation_set, n_components, total_units)
+        comp = ind_to_composition(ind, species_set, n_components, total_units)
         mean, std = predictor.predict(comp)
         # Build formula string.
         items = sorted(comp.items(), key=lambda x: -x[1])

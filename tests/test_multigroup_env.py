@@ -22,7 +22,7 @@ from rl_matdesign.encoding import decode_one_hot  # noqa: E402
 def _pick(env, element, value):
     """Step the allowed action whose (element/slot-name, value-code) match."""
     for a in env.allowed_actions():
-        el = decode_one_hot(a[0], env.cation_set)
+        el = decode_one_hot(a[0], env.species_set)
         code = decode_one_hot(a[1], env.fraction_set)
         if el == element and abs(float(code) - float(value)) < 1e-9:
             env.step(a)
@@ -35,7 +35,7 @@ def _allowed_values(env, slot_name):
     return {
         decode_one_hot(a[1], env.fraction_set)
         for a in env.allowed_actions()
-        if decode_one_hot(a[0], env.cation_set) == slot_name
+        if decode_one_hot(a[0], env.species_set) == slot_name
     }
 
 
@@ -56,13 +56,13 @@ def _build(group_specs):
 
 
 def test_n1_reproduces_composition_env():
-    kw = dict(cation_set=["Fe", "Ni", "Co", "Mn"], fraction_set=["0.25", "0.50", "0.75"],
+    kw = dict(species_set=["Fe", "Ni", "Co", "Mn"], fraction_set=["0.25", "0.50", "0.75"],
               n_components=4, total_units=4)
     ce = _drive_first_allowed(CompositionEnv(**kw))
     mg = _drive_first_allowed(MultiGroupEnv(groups=[dict(name="g", **kw)]))
 
     assert mg.n_components == ce.n_components
-    assert mg.cation_set == ce.cation_set
+    assert mg.species_set == ce.species_set
     assert mg.fraction_set == ce.fraction_set
     assert len(mg.path) == len(ce.path) == 4
     for a, b in zip(ce.path, mg.path):
@@ -75,9 +75,9 @@ def test_n1_reproduces_composition_env():
 
 
 def test_n2_groups_each_sum_to_one_and_structured_terminal():
-    g1 = dict(name="P_site", cation_set=["Mn", "Ni", "P"], fraction_set=["0.05", "0.95"],
+    g1 = dict(name="P_site", species_set=["Mn", "Ni", "P"], fraction_set=["0.05", "0.95"],
               n_components=2, total_units=20)
-    g2 = dict(name="S_site", cation_set=["S", "O", "Cl"], fraction_set=["0.10", "0.20", "0.70"],
+    g2 = dict(name="S_site", species_set=["S", "O", "Cl"], fraction_set=["0.10", "0.20", "0.70"],
               n_components=3, total_units=10)
     mg = _drive_first_allowed(MultiGroupEnv(groups=[g1, g2]))
 
@@ -87,7 +87,7 @@ def test_n2_groups_each_sum_to_one_and_structured_terminal():
     assert abs(sum(term["P_site"].values()) - 1.0) < 1e-9
     assert abs(sum(term["S_site"].values()) - 1.0) < 1e-9
     # Union alphabet spans both groups.
-    assert set(mg.cation_set) == {"Mn", "Ni", "P", "S", "O", "Cl"}
+    assert set(mg.species_set) == {"Mn", "Ni", "P", "S", "O", "Cl"}
     # Dedup key is structured + hashable.
     assert hash(mg.terminal_comp_key())
 
@@ -100,9 +100,9 @@ def test_prior_groups_delivers_earlier_group_to_later_filter():
             captured.append(prior_groups)
             return actions
 
-    g1 = dict(name="P_site", cation_set=["Mn", "Ni", "P"], fraction_set=["0.05", "0.95"],
+    g1 = dict(name="P_site", species_set=["Mn", "Ni", "P"], fraction_set=["0.05", "0.95"],
               n_components=2, total_units=20)
-    g2 = dict(name="S_site", cation_set=["S", "O", "Cl"], fraction_set=["0.10", "0.20", "0.70"],
+    g2 = dict(name="S_site", species_set=["S", "O", "Cl"], fraction_set=["0.10", "0.20", "0.70"],
               n_components=3, total_units=10, constraint_filter=RecordPrior())
     _drive_first_allowed(MultiGroupEnv(groups=[g1, g2]))
 
@@ -117,7 +117,7 @@ def test_prior_groups_delivers_earlier_group_to_later_filter():
 
 def test_amount_range_expands_fraction_set():
     g = normalize_group_spec(
-        {"cation_set": ["Ti", "Al"], "amount": {"min": 0.0, "max": 0.04, "step": 0.01},
+        {"species_set": ["Ti", "Al"], "amount": {"min": 0.0, "max": 0.04, "step": 0.01},
          "n_components": 2}
     )
     assert g["fraction_set"] == ["0.00", "0.01", "0.02", "0.03", "0.04"]
@@ -126,11 +126,11 @@ def test_amount_range_expands_fraction_set():
 
 
 def test_host_knob_dopant_at_level_host_takes_rest():
-    g = {"name": "P_site", "cation_set": ["Mn", "Ni", "Ru"], "host": "P",
+    g = {"name": "P_site", "species_set": ["Mn", "Ni", "Ru"], "host": "P",
          "amount": {"min": 0.02, "max": 0.08, "step": 0.01}, "sites": 1}
     # normalization wires the host_complement filter + complements automatically
     n = normalize_group_spec(g)
-    assert n["cation_set"][-1] == "P" and n["constraint_filter"] == "host_complement"
+    assert n["species_set"][-1] == "P" and n["constraint_filter"] == "host_complement"
     assert "0.95" in n["fraction_set"] and "0.05" in n["fraction_set"]
 
     env = _build([g])
@@ -147,9 +147,9 @@ def test_host_knob_dopant_at_level_host_takes_rest():
 
 
 def test_sites_assembles_real_counts_and_formula():
-    g1 = {"name": "P", "cation_set": ["Mn"], "host": "P",
+    g1 = {"name": "P", "species_set": ["Mn"], "host": "P",
           "amount": {"min": 0.05, "max": 0.05, "step": 0.01}, "sites": 1}
-    g2 = {"name": "X", "cation_set": ["A", "B"], "fraction_set": ["0.10", "0.20", "0.80", "0.90"],
+    g2 = {"name": "X", "species_set": ["A", "B"], "fraction_set": ["0.10", "0.20", "0.80", "0.90"],
           "total_units": 10, "n_components": 2, "sites": 6}
     env = _drive_first_allowed(_build([g1, g2]))
     asm = env.assembled_composition()
@@ -160,7 +160,7 @@ def test_sites_assembles_real_counts_and_formula():
 
 
 def test_categorical_group_returns_real_values():
-    p = {"name": "P_site", "cation_set": ["Mn", "Ni"], "host": "P",
+    p = {"name": "P_site", "species_set": ["Mn", "Ni"], "host": "P",
          "amount": {"min": 0.05, "max": 0.05, "step": 0.01}, "sites": 1}
     s = {"name": "S_site", "kind": "categorical", "sites": 6,
          "choices": [{"element": "O", "values": ["none", "oxide"]},
@@ -182,11 +182,11 @@ def test_categorical_group_returns_real_values():
 
 def test_independent_group_two_picks_merge_and_repeat():
     # kind: independent -> two (metal, amount) picks; repeats allowed; host dropped.
-    g = {"name": "P_site", "kind": "independent", "cation_set": ["Mn", "Ni", "P"],
+    g = {"name": "P_site", "kind": "independent", "species_set": ["Mn", "Ni", "P"],
          "host": "P", "n_dopants": 2, "amount": {"min": 0.02, "max": 0.08, "step": 0.01}}
     n = normalize_group_spec(g)
     assert n["n_components"] == 2
-    assert "P" not in n["cation_set"]                       # host dropped (builder fills it)
+    assert "P" not in n["species_set"]                       # host dropped (builder fills it)
     assert n["fraction_set"] == [f"{x/100:.2f}" for x in range(2, 9)]
 
     env = _build([g])
@@ -203,7 +203,7 @@ def test_independent_group_two_picks_merge_and_repeat():
 
 
 def test_independent_group_allows_same_element_merges():
-    g = {"name": "P_site", "kind": "independent", "cation_set": ["Mn", "Ni"],
+    g = {"name": "P_site", "kind": "independent", "species_set": ["Mn", "Ni"],
          "n_dopants": 2, "amount": {"min": 0.02, "max": 0.08, "step": 0.01}}
     env = _build([g])
     env.initialize()
@@ -215,7 +215,7 @@ def test_independent_group_allows_same_element_merges():
 
 def test_sse_doping_two_metals_per_metal_masking():
     # Two dopants Ru (metal_only) + Al (oxide_only); S-site has per-metal O slots.
-    p = {"name": "P_site", "kind": "independent", "cation_set": ["Ru", "Al", "Mn"],
+    p = {"name": "P_site", "kind": "independent", "species_set": ["Ru", "Al", "Mn"],
          "n_dopants": 2, "amount": {"min": 0.05, "max": 0.06, "step": 0.01}}
     s = {"name": "S_site", "kind": "categorical", "sites": 6,
          "choices": [{"name": "O_a", "element": "O", "values": [0, 1]},
@@ -245,7 +245,7 @@ def test_categorical_filter_sees_prior_groups():
             captured.append(prior_groups)
             return actions
 
-    p = {"name": "P_site", "cation_set": ["Mn"], "host": "P",
+    p = {"name": "P_site", "species_set": ["Mn"], "host": "P",
          "amount": {"min": 0.05, "max": 0.05, "step": 0.01}, "sites": 1}
     s = {"name": "S_site", "kind": "categorical", "sites": 6,
          "choices": [{"element": "Cl", "values": [0.6, 1.0]}],

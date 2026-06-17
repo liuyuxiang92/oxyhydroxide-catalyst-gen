@@ -212,12 +212,12 @@ multi-objective example. A minimal YAML:
 
 ```yaml
 # Environment
-cation_set: [Ti, Al, V, Cr, Fe, Zr, Nb, Mo, Sn, Hf, Ta]
+species_set: [Ti, Al, V, Cr, Fe, Zr, Nb, Mo, Sn, Hf, Ta]
 fraction_set: ["0.00", "0.01", ..., "0.90"]    # whatever step you want
 total_units: 100                                # step = 1/total_units
 n_components: 11
 episode_style: fixed_order_amount               # each step picks an amount;
-                                                # element is cation_set[step]
+                                                # element is species_set[step]
 element_bounds:                                 # per-element [min, max]
   Ti: [0.45, 0.90]
   Al: [0.00, 0.25]
@@ -343,7 +343,7 @@ and `ooh_phase` constraint do.
 `CompositionEnv` accepts:
 
 - `element_bounds: {El: [min_frac, max_frac]}` — per-element fractional range.
-- `episode_style: fixed_order_amount` — every element in `cation_set` appears
+- `episode_style: fixed_order_amount` — every element in `species_set` appears
   in fixed order; the agent picks the amount per step; the last step's amount
   is forced to satisfy the sum constraint.
 

@@ -5,7 +5,7 @@
 
 
 # ---- Environment ----
-cation_set:
+species_set:
   - Co
   - Cr
   - Fe

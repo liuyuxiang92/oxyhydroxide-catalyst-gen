@@ -17,7 +17,7 @@ env_type: multi_group
 groups:
   - name: P_site                      # independent: TWO dopant metals + host P
     kind: independent                 # K independent (metal, amount) picks; repeats allowed
-    cation_set:
+    species_set:
       [Mn, Ni, Cu, Zn, Mo, In, Sn, Sb, W, Ru, Tm, Yb,
        Mg, Al, Si, Sc, Ti, V, Cr, Fe, Co, Ga, Ge, Y, Zr, Nb, Hf, Ta, Ho, Er, Lu]
     host: P

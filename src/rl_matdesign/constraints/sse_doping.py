@@ -56,7 +56,7 @@ class SSEDopingFilter(ConstraintFilter):
         self,
         *,
         actions: List[Tuple[Tuple[float, ...], Tuple[float, ...]]],
-        cation_set: List[str],
+        species_set: List[str],
         fraction_set: List[str],
         prior_groups: Optional[List[Dict[str, float]]] = None,
         **_: Any,
@@ -66,7 +66,7 @@ class SSEDopingFilter(ConstraintFilter):
         if not actions:
             return actions
         # Each categorical slot is single-named; only mask O-form slots.
-        slot_name = decode_one_hot(actions[0][0], cation_set)
+        slot_name = decode_one_hot(actions[0][0], species_set)
         if slot_name not in self.o_form_slots:
             return actions
 

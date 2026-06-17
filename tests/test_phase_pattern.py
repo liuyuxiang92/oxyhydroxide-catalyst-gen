@@ -87,7 +87,7 @@ def test_terminal_action_filter_admits_matching_composition():
          "ratios": [{"num": "Ni", "den": ["Ni", "Fe"], "min": 0.55, "max": 0.8}]},
     ])
 
-    cation_set = ["Ni", "Fe", "Mn"]
+    species_set = ["Ni", "Fe", "Mn"]
     fraction_set = ["0.20", "0.30", "0.50"]
 
     def _oh(idx, n):
@@ -101,7 +101,7 @@ def test_terminal_action_filter_admits_matching_composition():
     out = f.filter_actions(
         actions=good, units_map={"Ni": 10, "Fe": 6}, steps_left=0,
         allowed_units=[4, 6, 10], possible_sums_by_k=[],
-        cation_set=cation_set, fraction_set=fraction_set,
+        species_set=species_set, fraction_set=fraction_set,
     )
     assert len(out) == 1
 
@@ -112,7 +112,7 @@ def test_terminal_action_filter_blocks_nonmatching_composition():
         {"name": "NiFe",  "required": {"Ni": [0.40, 0.80], "Fe": [0.20, 0.40]},
          "ratios": [{"num": "Ni", "den": ["Ni", "Fe"], "min": 0.55, "max": 0.8}]},
     ])
-    cation_set = ["Ni", "Fe", "Mn"]
+    species_set = ["Ni", "Fe", "Mn"]
     fraction_set = ["0.20", "0.30", "0.50"]
 
     def _oh(idx, n):
@@ -125,6 +125,6 @@ def test_terminal_action_filter_blocks_nonmatching_composition():
     out = f.filter_actions(
         actions=bad, units_map={"Ni": 10, "Fe": 6}, steps_left=0,
         allowed_units=[4, 6, 10], possible_sums_by_k=[],
-        cation_set=cation_set, fraction_set=fraction_set,
+        species_set=species_set, fraction_set=fraction_set,
     )
     assert out == []

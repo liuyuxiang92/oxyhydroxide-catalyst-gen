@@ -55,7 +55,7 @@ class LastStepElementFilter(ConstraintFilter):
         steps_left: int,
         allowed_units: Sequence[int],
         possible_sums_by_k: List[Any],
-        cation_set: List[str],
+        species_set: List[str],
         fraction_set: List[str],
         **_: Any,
     ) -> List[Tuple[Tuple[float, ...], Tuple[float, ...]]]:
@@ -65,7 +65,7 @@ class LastStepElementFilter(ConstraintFilter):
 
         filtered = []
         for elem_oh, comp_oh in actions:
-            elem = decode_one_hot(elem_oh, cation_set)
+            elem = decode_one_hot(elem_oh, species_set)
             digit_str = decode_one_hot(comp_oh, fraction_set)
 
             if is_last_step:

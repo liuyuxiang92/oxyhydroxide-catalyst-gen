@@ -180,6 +180,66 @@ def test_eligible_region_no_fallback_overflow_raises(tmp_path):
         b.build(cand, n_configs=1, rng=np.random.default_rng(0))
 
 
+# ---------------------------------------------------------------------------
+# Multi-template mode (auto-detected from a list-valued base_poscar)
+# ---------------------------------------------------------------------------
+
+def test_single_mode_str_unchanged(tmp_path):
+    base = _lips_supercell(tmp_path, fu=4)
+    b = _builder(base_poscar=base, formula_units=4)
+    assert b.multi is False and len(b.specs) == 1 and b.specs[0].path == base
+    assert b.base_poscar == base and b.fu == 4
+
+
+def test_multi_per_template_n_configs_concatenated(tmp_path):
+    # Two templates, per-template n_configs -> cells concatenated into one ensemble.
+    (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
+    a = _lips_supercell(tmp_path / "a", fu=4)
+    b_path = _lips_supercell(tmp_path / "b", fu=4)
+    cand = {"P_site": {"P": 0.75, "Mn": 0.25}, "S_site": {"O": 0, "Cl": 1.0}}
+
+    bld = _builder(base_poscar=[{"path": a, "n_configs": 3}, {"path": b_path, "n_configs": 2}],
+                   formula_units=4,
+                   eligible_region={"symbol": "S", "take": "last", "count": 8})
+    assert bld.multi is True
+    structs = bld.build(cand, n_configs=99, rng=np.random.default_rng(0))
+    assert len(structs) == 5                       # 3 + 2, caller n_configs ignored
+
+    c = bld.counts(cand, fu=4)
+    assert all(len(s) == 13 * 4 - c["Li_delete"] for s in structs)  # 6 Li +1 P +6 S per f.u.
+
+
+def test_multi_infers_fu_per_template(tmp_path):
+    # formula_units omitted -> each template infers its own fu from its POSCAR.
+    (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
+    a = _lips_supercell(tmp_path / "a", fu=4)
+    b_path = _lips_supercell(tmp_path / "b", fu=6)
+    bld = _builder(base_poscar=[a, b_path], formula_units=None,
+                   eligible_region={"symbol": "S", "take": "last", "count": 8})
+    assert bld._fu_for(bld.specs[0]) == 4 and bld._fu_for(bld.specs[1]) == 6
+    assert bld.fu == 4                             # primary-template back-compat accessor
+
+
+def test_multi_bare_strings_fall_back_to_caller_n_configs(tmp_path):
+    (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
+    a = _lips_supercell(tmp_path / "a", fu=4)
+    b_path = _lips_supercell(tmp_path / "b", fu=4)
+    cand = {"P_site": {"P": 0.75, "Mn": 0.25}, "S_site": {"O": 0, "Cl": 1.0}}
+    bld = _builder(base_poscar=[a, b_path], formula_units=4,
+                   eligible_region={"symbol": "S", "take": "last", "count": 8})
+    structs = bld.build(cand, n_configs=2, rng=np.random.default_rng(0))
+    assert len(structs) == 4                       # 2 templates * caller n_configs(2)
+
+
+def test_multi_bad_entry_and_empty_list_raise(tmp_path):
+    import pytest
+
+    with pytest.raises(ValueError, match="path"):
+        _builder(base_poscar=[{"n_configs": 2}], formula_units=4)
+    with pytest.raises(ValueError):
+        _builder(base_poscar=[], formula_units=4)
+
+
 def test_small_composition_stays_in_primary_region(tmp_path):
     # When O+Cl+Br fits the primary region, the fallback is NOT used: the
     # substituted sites must all be within the last-`count` S (the primary).

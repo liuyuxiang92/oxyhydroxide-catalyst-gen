@@ -10,7 +10,7 @@ Why this exists
 Multi-sublattice substitutional design (e.g. doped Li6PS6: a P-site group and an
 S-site group) cannot be expressed as one sum-to-1 composition — the agent fills
 several independent sublattices, each of which sums to 1 on its own. Each group
-is a full ``CompositionEnv`` sub-problem (its own ``cation_set``,
+is a full ``CompositionEnv`` sub-problem (its own ``species_set``,
 ``fraction_set``, ``total_units``, ``episode_style``, ``element_bounds`` and
 constraint filter); this env chains them.
 
@@ -19,8 +19,8 @@ Design
 * **Delegation.** One inner ``CompositionEnv`` per group owns that group's
   feasibility / bounds / episode-style logic. This env drives them in order.
 * **Union alphabet for network I/O.** Actions are exposed to the training code as
-  one-hots over the *union* of all groups' ``cation_set`` / ``fraction_set`` so
-  the action dimensions are fixed across groups. ``self.cation_set`` /
+  one-hots over the *union* of all groups' ``species_set`` / ``fraction_set`` so
+  the action dimensions are fixed across groups. ``self.species_set`` /
   ``self.fraction_set`` are those unions, which is exactly what ``training.py``
   reads to size the networks and decode ``a_elem_idx`` / ``a_comp_val``. Each
   step's allowed actions are re-encoded from the active group's alphabet into the
@@ -67,7 +67,7 @@ def normalize_group_spec(g: Dict[str, Any]) -> Dict[str, Any]:
     Friendly knobs handled here so the env config stays terse:
 
     * ``amount: {min, max, step}`` (or a list) -> generates ``fraction_set``.
-    * ``host: <el>`` -> lists only the dopants in ``cation_set``; the host is added
+    * ``host: <el>`` -> lists only the dopants in ``species_set``; the host is added
       and auto-takes the complement via a ``host_complement`` filter (so no
       hand-written complements and no per-scenario "host-takes-rest" constraint).
     * ``sites: N`` -> kept (the sublattice size; used for formula assembly and by
@@ -93,7 +93,7 @@ def normalize_group_spec(g: Dict[str, Any]) -> Dict[str, Any]:
         g["n_components"] = n_dopants
         host = g.get("host")
         if host:
-            g["cation_set"] = [e for e in g["cation_set"] if e != host]
+            g["species_set"] = [e for e in g["species_set"] if e != host]
         return g
 
     if kind != "composition":
@@ -109,8 +109,8 @@ def normalize_group_spec(g: Dict[str, Any]) -> Dict[str, Any]:
     host = g.get("host")
     if host:
         comp_strs = [f"{round(1.0 - a, 2):.2f}" for a in amounts]
-        dopants = [e for e in g["cation_set"] if e != host]
-        g["cation_set"] = dopants + [host]
+        dopants = [e for e in g["species_set"] if e != host]
+        g["species_set"] = dopants + [host]
         g["fraction_set"] = amt_strs + comp_strs
         g.setdefault("n_components", 2)
         if not g.get("constraint_filter"):
@@ -153,10 +153,10 @@ class CategoricalGroup:
         ]
         if not self.slots:
             raise ValueError("categorical group needs a non-empty 'choices' list.")
-        self.cation_set: List[str] = [name for name, _el, _v in self.slots]
-        if len(set(self.cation_set)) != len(self.cation_set):
+        self.species_set: List[str] = [name for name, _el, _v in self.slots]
+        if len(set(self.species_set)) != len(self.species_set):
             raise ValueError(
-                f"categorical slot names must be unique; got {self.cation_set}. "
+                f"categorical slot names must be unique; got {self.species_set}. "
                 "Give same-element slots distinct 'name' keys (e.g. O_a, O_b)."
             )
         self.slot_element: Dict[str, str] = {name: el for name, el, _v in self.slots}
@@ -197,7 +197,7 @@ class CategoricalGroup:
         name = self.slots[self.counter][0]
         actions = [
             (
-                tuple(encode_choice(name, self.cation_set).tolist()),
+                tuple(encode_choice(name, self.species_set).tolist()),
                 tuple(encode_choice(code, self.fraction_set).tolist()),
             )
             for _v, code in self._slot_codes[self.counter]
@@ -207,7 +207,7 @@ class CategoricalGroup:
                 actions=actions, units_map={},
                 steps_left=self.n_components - self.counter - 1,
                 allowed_units=[], possible_sums_by_k=[],
-                cation_set=self.cation_set, fraction_set=self.fraction_set,
+                species_set=self.species_set, fraction_set=self.fraction_set,
             )
             if prior_groups is not None:
                 kw["prior_groups"] = prior_groups
@@ -216,7 +216,7 @@ class CategoricalGroup:
 
     def step(self, action) -> None:
         elem_oh, comp_oh = action
-        name = decode_one_hot(elem_oh, self.cation_set)
+        name = decode_one_hot(elem_oh, self.species_set)
         expected = self.slots[self.counter][0]
         if name != expected:
             raise ValueError(
@@ -253,21 +253,21 @@ class IndependentDopantsGroup:
     def __init__(
         self,
         *,
-        cation_set: Sequence[str],
+        species_set: Sequence[str],
         fraction_set: Sequence[str],
         n_components: int,
         total_units: int = 100,
         state_featurizer: Callable[[str], np.ndarray] = featurize_formula,
         phase_filter=None,
     ) -> None:
-        self.cation_set: List[str] = list(cation_set)
+        self.species_set: List[str] = list(species_set)
         self.fraction_set: List[str] = list(fraction_set)
         self.n_components: int = int(n_components)
         self._total_units = int(total_units)
         self.state_featurizer = state_featurizer
         self.phase_filter = phase_filter
-        if not self.cation_set:
-            raise ValueError("independent group needs a non-empty 'cation_set'.")
+        if not self.species_set:
+            raise ValueError("independent group needs a non-empty 'species_set'.")
         if not self.fraction_set:
             raise ValueError("independent group needs a non-empty 'fraction_set'.")
         self.initialize()
@@ -282,10 +282,10 @@ class IndependentDopantsGroup:
             return []
         actions = [
             (
-                tuple(encode_choice(el, self.cation_set).tolist()),
+                tuple(encode_choice(el, self.species_set).tolist()),
                 tuple(encode_choice(comp, self.fraction_set).tolist()),
             )
-            for el in self.cation_set
+            for el in self.species_set
             for comp in self.fraction_set
         ]
         if self.phase_filter is not None:
@@ -293,7 +293,7 @@ class IndependentDopantsGroup:
                 actions=actions, units_map={},
                 steps_left=self.n_components - self.counter - 1,
                 allowed_units=[], possible_sums_by_k=[],
-                cation_set=self.cation_set, fraction_set=self.fraction_set,
+                species_set=self.species_set, fraction_set=self.fraction_set,
                 running_amount=sum(float(c) for _el, c in self._picks),
             )
             if prior_groups is not None:
@@ -303,7 +303,7 @@ class IndependentDopantsGroup:
 
     def step(self, action) -> None:
         elem_oh, comp_oh = action
-        el = decode_one_hot(elem_oh, self.cation_set)
+        el = decode_one_hot(elem_oh, self.species_set)
         comp = decode_one_hot(comp_oh, self.fraction_set)
         self._picks.append((el, comp))
         self.state = self._formula(self._picks)
@@ -365,7 +365,7 @@ class MultiGroupEnv:
                 )
             elif kind == "independent":
                 inner = IndependentDopantsGroup(
-                    cation_set=g["cation_set"],
+                    species_set=g["species_set"],
                     fraction_set=g["fraction_set"],
                     n_components=int(g.get("n_components", g.get("n_dopants", 1))),
                     total_units=int(g.get("total_units", 100)),
@@ -374,7 +374,7 @@ class MultiGroupEnv:
                 )
             else:
                 inner = CompositionEnv(
-                    cation_set=g["cation_set"],
+                    species_set=g["species_set"],
                     fraction_set=g.get("fraction_set") or None,
                     anion_formula="",  # the predictor/recipe assembles the real structure
                     n_components=int(g.get("n_components", 5)),
@@ -389,8 +389,8 @@ class MultiGroupEnv:
 
         # Union alphabets (first-seen order, deduplicated). Exact strings/symbols
         # are preserved so a union one-hot decodes back to a group-valid token.
-        self.cation_set: List[str] = _ordered_union(
-            sym for inner in self._inners for sym in inner.cation_set
+        self.species_set: List[str] = _ordered_union(
+            sym for inner in self._inners for sym in inner.species_set
         )
         self.fraction_set: List[str] = _ordered_union(
             f for inner in self._inners for f in inner.fraction_set
@@ -435,9 +435,9 @@ class MultiGroupEnv:
         self, group_action: Tuple[Tuple[float, ...], Tuple[float, ...]], inner: CompositionEnv
     ) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
         """Re-encode a group-alphabet (elem_oh, comp_oh) into the union alphabet."""
-        elem = decode_one_hot(group_action[0], inner.cation_set)
+        elem = decode_one_hot(group_action[0], inner.species_set)
         comp = decode_one_hot(group_action[1], inner.fraction_set)
-        elem_oh = tuple(encode_choice(elem, self.cation_set).tolist())
+        elem_oh = tuple(encode_choice(elem, self.species_set).tolist())
         comp_oh = tuple(encode_choice(comp, self.fraction_set).tolist())
         return elem_oh, comp_oh
 
@@ -461,10 +461,10 @@ class MultiGroupEnv:
         current_allowed = self.allowed_actions()
 
         # Decode the union action and re-encode into the active group's alphabet.
-        elem = decode_one_hot(action[0], self.cation_set)
+        elem = decode_one_hot(action[0], self.species_set)
         comp = decode_one_hot(action[1], self.fraction_set)
         group_action = (
-            tuple(encode_choice(elem, inner.cation_set).tolist()),
+            tuple(encode_choice(elem, inner.species_set).tolist()),
             tuple(encode_choice(comp, inner.fraction_set).tolist()),
         )
         inner.step(group_action)

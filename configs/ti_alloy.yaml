@@ -1,23 +1,19 @@
-# Ti-alloy run template.
+# Ti-alloy run template (single-group `groups:` form; auto-collapses to the flat
+# CompositionEnv — see the Environment section below).
 #
 # Episode definition:
-#   - 11 cations placed in a FIXED order (= the order of cation_set below),
-#     one per step (episode_style: fixed_order_amount). The agent only
-#     chooses fractions — element identity at each step is forced by config.
+#   - episode_style: element_then_amount — at each of the group's `n_components`
+#     steps the agent FIRST picks a (distinct) cation from the group's
+#     `species_set`, THEN picks its fraction. Each alloy is a free subset, not a
+#     fixed order.
 #   - Fractions are drawn from `fraction_set` and must sum to exactly 1.00.
-#   - Per-element bounds (see `element_bounds`) constrain the legal fraction
-#     at each step; the env's feasibility table enforces both the total-sum
-#     constraint and the bounds simultaneously.
 #
-# Composition rules (from user spec):
+# Composition rules (from the original user spec):
 #   45-90 Ti, 0-25 Al, 0-10 V, 0-5 Cr, 0-5 Fe, 5-45 Zr,
-#   0-20 Nb, 0-10 Mo, 0-5 Sn, 0-10 Hf, 0-5 Ta
-#   sum = 100, step = 1
-#
-# Note: `element_bounds` only works with `episode_style: fixed_order_amount`.
-# In `element_then_amount` mode the env raises NotImplementedError because
-# combining free element choice with per-element bounds requires a per-subset
-# feasibility search that isn't implemented yet.
+#   0-20 Nb, 0-10 Mo, 0-5 Sn, 0-10 Hf, 0-5 Ta  (sum = 100, step = 1)
+#   Encoded as `element_bounds`, enforced in element_then_amount mode: each picked
+#   element's fraction stays within its range, and elements with a lower bound > 0
+#   (Ti, Zr) are mandatory in every alloy.
 #
 # Run:
 #   python scripts/run_experiment.py \
@@ -28,37 +24,48 @@
 
 
 # ---- Environment ----
-cation_set: [Ti, Al, V, Cr, Fe, Zr, Nb, Mo, Sn, Hf, Ta]
-fraction_set:
-  # 0.00 to 0.90 in 0.01 steps (matches step=1% per element).
-  ["0.00","0.01","0.02","0.03","0.04","0.05","0.06","0.07","0.08","0.09",
-   "0.10","0.11","0.12","0.13","0.14","0.15","0.16","0.17","0.18","0.19",
-   "0.20","0.21","0.22","0.23","0.24","0.25","0.26","0.27","0.28","0.29",
-   "0.30","0.31","0.32","0.33","0.34","0.35","0.36","0.37","0.38","0.39",
-   "0.40","0.41","0.42","0.43","0.44","0.45","0.46","0.47","0.48","0.49",
-   "0.50","0.51","0.52","0.53","0.54","0.55","0.56","0.57","0.58","0.59",
-   "0.60","0.61","0.62","0.63","0.64","0.65","0.66","0.67","0.68","0.69",
-   "0.70","0.71","0.72","0.73","0.74","0.75","0.76","0.77","0.78","0.79",
-   "0.80","0.81","0.82","0.83","0.84","0.85","0.86","0.87","0.88","0.89","0.90"]
-total_units: 100               # step size = 1/100 = 0.01
-anion_formula: ""
-n_components: 11               # = len(cation_set), forced by fixed_order_amount
-episode_style: fixed_order_amount
-
-element_bounds:
-  Ti: [0.45, 0.90]
-  Al: [0.00, 0.25]
-  V:  [0.00, 0.10]
-  Cr: [0.00, 0.05]
-  Fe: [0.00, 0.05]
-  Zr: [0.05, 0.45]
-  Nb: [0.00, 0.20]
-  Mo: [0.00, 0.10]
-  Sn: [0.00, 0.05]
-  Hf: [0.00, 0.10]
-  Ta: [0.00, 0.05]
-
-constraint_filter: null        # per-element bounds handle the composition rules
+# Written in the single-group `groups:` form. With one `kind: composition` group
+# the framework auto-detects multi_group, then transparently COLLAPSES it to the
+# flat CompositionEnv (same chemistry, flat {el: frac} candidate to the
+# predictor/builder). No `env_type` needed. Add a second group to make it a real
+# multi-sublattice problem.
+anion_formula: ""              # top-level: metallic alloy, no anion suffix
+groups:
+  - name: alloy
+    kind: composition          # one sum-to-1 sublattice (the collapse-eligible kind)
+    species_set: [Ti, Al, V, Cr, Fe, Zr, Nb, Mo, Sn, Hf, Ta]
+    n_components: 6            # distinct cations picked per alloy (subset of species_set); tune freely
+    episode_style: element_then_amount   # pick element (from species_set) THEN its fraction
+    total_units: 100           # step size = 1/100 = 0.01
+    fraction_set:
+      # 0.00 to 0.90 in 0.01 steps (matches step=1% per element).
+      ["0.00","0.01","0.02","0.03","0.04","0.05","0.06","0.07","0.08","0.09",
+       "0.10","0.11","0.12","0.13","0.14","0.15","0.16","0.17","0.18","0.19",
+       "0.20","0.21","0.22","0.23","0.24","0.25","0.26","0.27","0.28","0.29",
+       "0.30","0.31","0.32","0.33","0.34","0.35","0.36","0.37","0.38","0.39",
+       "0.40","0.41","0.42","0.43","0.44","0.45","0.46","0.47","0.48","0.49",
+       "0.50","0.51","0.52","0.53","0.54","0.55","0.56","0.57","0.58","0.59",
+       "0.60","0.61","0.62","0.63","0.64","0.65","0.66","0.67","0.68","0.69",
+       "0.70","0.71","0.72","0.73","0.74","0.75","0.76","0.77","0.78","0.79",
+       "0.80","0.81","0.82","0.83","0.84","0.85","0.86","0.87","0.88","0.89","0.90"]
+    # element_bounds is enforced in element_then_amount mode: each picked element's
+    # fraction stays within its range, and a lower bound > 0 makes that element
+    # MANDATORY (absent => fraction 0, which violates the bound). The env prunes
+    # each step's legal amounts so the remaining picks can still complete to a
+    # bounded composition summing to 1.00.
+    # Mandatory cations here: Ti (>=0.45) and Zr (>=0.05) -> 2 of the 6 slots.
+    element_bounds:
+      Ti: [0.45, 0.90]
+      Al: [0.00, 0.25]
+      V:  [0.00, 0.10]
+      Cr: [0.00, 0.05]
+      Fe: [0.00, 0.05]
+      Zr: [0.05, 0.45]
+      Nb: [0.00, 0.20]
+      Mo: [0.00, 0.10]
+      Sn: [0.00, 0.05]
+      Hf: [0.00, 0.10]
+      Ta: [0.00, 0.05]
 
 # =====================================================================
 # REQUIRED USER EDITS — fill these in before running on the GPU machine
@@ -95,16 +102,23 @@ share_structure: false         # each objective builds its OWN structure indepen
 
 # Shared builder knobs inherited by each objective (per-objective overrides win).
 builder: substitute            # fixed-lattice element swap onto placeholder sites
-base_poscar: /ABS/PATH/TO/your_ti_alloy.POSCAR
+# Multiple base templates (e.g. two parent lattices/polymorphs): the substitute
+# builder auto-switches to multi mode for a list. Each template is filled
+# independently and ALL cells are concatenated into one ensemble, so the
+# property is averaged over both parents. Each bare path inherits n_random_configs
+# below; use {path: ..., n_configs: N} to set a per-template count instead.
+base_poscar:
+  - /ABS/PATH/TO/your_ti_alloy.POSCAR
+  - /ABS/PATH/TO/your_ti_alloy_2.POSCAR
 site_symbol: Ti
-n_random_configs: 10           # random alloy-site assignments per composition
+n_random_configs: 10           # random alloy-site assignments per composition (per template)
 
 # Global uncertainty weight (the `k` in `mean ± k*std`). Same for all
 # objectives; per-objective effective weighting can be tuned via `scale`.
 k: 1.0
 
 properties:
-  # ---- Objective 1: property head output 0 (maximize, exploit) ----
+  # ---- Objective 1: property head output 0 (maximize, explore) ----
   - name: prop0
     predictor: dp_property
     models:
@@ -116,8 +130,8 @@ properties:
     head: property
     output_index: 0
     direction: max
-    objective: mean_minus_kstd     # exploit — penalize ensemble disagreement
-    weight: 1.0
+    objective: mean_plus_kstd      # explore — reward ensemble disagreement (direction: max)
+    weight: 0.5
     scale: 1.0                   # typical magnitude in this property's units
 
   # ---- Objective 2: property head output 2 (minimize, exploit) ----

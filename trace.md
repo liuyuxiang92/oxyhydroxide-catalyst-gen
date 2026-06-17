@@ -550,3 +550,233 @@ sweep name -> surfaces as obj_<name>_mean in generated.csv with zero logging
 change. _score gained a keyword-only fparam override; non-sweep 2-arg call path
 unchanged so existing test stubs stay valid. Validation: null slot without a
 sweep block raises. Next: lips_sse.yaml config, tests, docs.
+
+### EARS — Progress (2026-06-12 11:31)
+<!-- concepts: sse-builder, structure_score-predictor, generated.csv-labeling -->
+Working on LiPS (configs/lips_sse.yaml) follow-ups:
+- **Formula label bug**: generated.csv `formula` came from `env.terminal_formula`
+  → `assembled_composition()`, which only sums agent *picks* (P_site metal+P,
+  S_site O+Cl). Host S, derived Br (halide_total−Cl), and charge-balanced Li are
+  computed by the SSE builder, never by the env — so they were missing from the
+  label (e.g. `Cl1.2O1P0.94Sn0.06`). The *structure* is correct (S/Li present in
+  `counts()`); only the printed formula was incomplete. Fix: render the full
+  per-f.u. composition from `SSESupercellBuilder.counts()` and prefer it for the
+  CSV `formula` column when the predictor exposes it.
+- **fparam constant**: user corrected C from 1/25273 (3.9568e-05) to 1/(25+273)=
+  0.00336 in both property heads; swept T slot stays `null`.
+- **dp_mean confusion**: composite `predict_raw` = Σ conductivity_mean +
+  stability_mean (mixed units) — not a single physical quantity. Building
+  scripts/evaluate_lips.py to print per-property + per-temperature breakdown.
+
+### EARS — Progress (2026-06-12 13:36)
+<!-- concepts: multi-dopant-env, sse-builder, order-invariance -->
+Implementing two-dopant P-site for LiPS (user-confirmed design, Option A):
+- Two independent (metal, amount) picks, repeats allowed, same element merges to
+  combined fraction sharing ONE O-form. Each pick's form masked by its metal's
+  category. Applies to evaluate_lips too.
+- Chose an ISOLATED new inner-group type `IndependentDopantsGroup` (kind:
+  independent) over bending CompositionEnv's distinct/sum-to-1 invariants — the
+  latter is shared by every scenario + the order-invariance tests, too risky.
+- Forms pair to SORTED distinct metals (the only order-invariant handle once
+  same-element picks merge into a dict). Both sse_doping filter and SSE builder
+  derive sorted metals identically → consistent, order-invariant.
+- CategoricalGroup now supports {name, element} so two O slots can share element
+  O without colliding in the one-hot alphabet (names O_a/O_b).
+- Builder discovers O-form slot names + Cl slot from the S-site `choices`;
+  legacy single-O configs still resolve to ["O"]/"Cl" (backward compatible).
+Done: env_multigroup (group type, name slots, normalize). Next: sse builder
+_decode/counts/build/composition_formula for K metals, then sse_doping filter,
+config, evaluate_lips, tests.
+
+### EARS — Progress (2026-06-12 14:20)
+<!-- concepts: structure_score-predictor, dp-property-heads, objective-units -->
+LiPS conductivity/stability heads emit LOG(value), so reported means (~2.5/~1.0)
+looked too low; real value = exp(output) (e^2.499 ≈ 12.2 > 10, as expected).
+Added a per-property `transform: exp` knob in StructureScorePredictor: applied to
+EACH ensemble member in `_score` BEFORE the mean/std fold, so the real
+distribution drives mean, std, the objective's std penalty, dp_mean, the CSV
+columns, and evaluate_lips — all consistently in real units. Validated set
+{none, exp}. Config: transform: exp on both properties.
+NOTE/caveat: exponentiating rescales the combined reward — conductivity (~12) now
+dominates stability (~3) in the weighted sum; weights/scale may need rebalancing.
+The temperature sweep stays RAW 460-490 (user confirmed; no inverse transform).
+
+### EARS — Progress (2026-06-12 14:39)
+<!-- concepts: structure_score-predictor, predictor-caching, relaxation-cost -->
+Implementing a persistent per-composition stats cache in StructureScorePredictor.
+Was single-entry (`self._stats_cache = {key: stats}`, overwritten each call) — so
+the same composition recurring across training episodes / duplicate generation
+rollouts re-relaxed every time (expensive: LiPS geo_opt = 6205 atoms, 1000 steps).
+Now an LRU OrderedDict keyed by `_key(candidate)`, capped by `predict_cache_size`
+(default 200k; entries are tiny). Same predictor instance is shared across
+training+generation in run_experiment, so a composition relaxes ONCE for the whole
+run; all repeats are cache hits (no relax). Complements the PG repeat penalty
+(which discourages repeats but doesn't save the relax) and generation dedup (which
+fires AFTER the rollout's relax). Side benefit: deterministic reward per comp.
+
+### EARS — Progress (2026-06-12 16:22)
+<!-- concepts: sse-builder, eligible-region, substitution-feasibility -->
+Two-dopant LiPS hit `SublatticeOp wants to place 1015 on only 1000 sites`:
+O+Cl+Br exceeded the default eligible S region (last 1000 of 3000). Two oxide
+metals raise O past what one did. User design choice: KEEP last-1000 as the
+primary (bounded) region, and fall back to a LARGER region (first 2000) ONLY for
+the compositions where the primary overflows — not blanket all-S. Implementing
+`eligible_region_fallback`: build() picks it when O+Cl+Br > len(primary region).
+
+### EARS — Session Start (2026-06-15 11:56)
+<!-- concepts: rl-benchmarking, generation-evaluation -->
+- Task: Help benchmark DQN vs A2C HPO-best runs for the OOH catalyst scenario from their generated.csv candidate files.
+- Why: User ran HPO for both methods and wants a fair, defensible comparison of which RL method generates better catalyst candidates.
+
+### EARS — Progress (2026-06-16 17:49)
+<!-- concepts: predictor-plugins, multi-objective-reward, framework-refactor -->
+Implementing approved framework upgrade (plan: calm-gliding-russell): unify reward
+around a `properties:` list where each entry names a `predictor:` + `direction:`;
+single vs multi-objective is auto-detected from list length. Removing the dead
+`mode:` knob and the `backend:`/`structure_score` vocabulary. Added new leaf
+`predictors/rf_magpie.py` (generic sklearn-on-Magpie-composition; returns RAW value,
+not -T — sign is the engine's `direction:` job; replaces sinter_calcine). Next:
+generalize structure_score.py engine to add a composition-predictor branch + make
+structure-building conditional, add build_reward() router on `properties:` presence,
+migrate all in-repo configs, add 3 DQN sinter/calcine/combined benchmark configs.
+Kept both `weight` (preference) and `scale` (normalization) per user request.
+
+### EARS — Progress (2026-06-16 18:02)
+<!-- concepts: multi-objective-reward, integer-ratio-env, framework-refactor -->
+Reward-engine upgrade complete + verified: build_reward() routes by `properties:`
+presence; combined sinter+calcine engine returns exactly -(T_s+T_c) with both
+per-objective stats (checked against direct RF eval). All 14 configs migrated
+(rf_magpie / dp_energy / dp_property); ooh + dummy kept FLAT on purpose (ooh.predict
+is pre-folded — engine composition branch would double-fold). Registry/order-invariance
+tests green. DISCOVERY: smoke run surfaced a PRE-EXISTING bug — IntegerRatioEnv lacks
+`current_state_features()` that training.py (PG + DQN rollouts, lines 579/759/815/1153)
+calls; env.py + env_multigroup have it. Oxides configs could never train without it.
+Added the one-line accessor mirroring env.py:244. Not in original plan but required to
+make the DQN sinter/calcine benchmark actually runnable.
+
+### EARS — Progress (2026-06-17 10:06)
+<!-- concepts: constraint-filters, config-auto-detection, framework-refactor -->
+Extended the build_reward auto-detection pattern to constraints: added
+registry.build_constraints(cfg, env) that routes by shape — a `filters:` list
+auto-wraps in ChainConstraintFilter (1 or N entries; no need to write
+`constraint_filter: chain`), else falls back to flat `constraint_filter:` or None.
+Wired into run_experiment.build_constraint_filter (covers top-level + per-group
+multigroup filters). Migrated the 5 oxides configs to drop the explicit
+`constraint_filter: chain` line. Updated test_chain round-trip + added 4
+build_constraints routing tests. Mirrors the predictor design: flat single OR
+list-auto-detects-multi.
+
+### EARS — Progress (2026-06-17 14:25)
+<!-- concepts: structure-builders, config-auto-detection -->
+Added multi-POSCAR auto-detection to SubstituteBuilder (substitute.py). Mirrors
+the properties/filters idiom (commit e633967): `base_poscar` as a scalar string
+keeps single mode bit-for-bit; a list (of paths, or `{path, n_configs?,
+site_symbol?}` dicts) switches to multi mode — each template is filled
+independently and the cells are concatenated into one ensemble, which
+structure_score folds into a single (mean,std). Per-template `n_configs` falls
+back to the caller's n_random_configs; per-template `site_symbol` falls back to
+top-level. No new registry name, no downstream changes (scoring already treats
+build() output as an ensemble). Decision: chose in-builder auto-detect over a
+separate `multi` wrapper builder for codebase consistency; wrapper can still be
+added later if mixing substitute+sse is ever needed.
+
+### EARS — Progress (2026-06-17 14:40)
+<!-- concepts: structure-builders, config-auto-detection -->
+Extended multi-POSCAR auto-detection to SSESupercellBuilder (sse.py), same idiom
+as substitute. Wrinkle vs substitute: `formula_units` (hence all charge-balanced
+integer counts) is inferred per-POSCAR, so each template needs its own fu.
+Refactor: added _TemplateSpec dataclass + _parse_templates; replaced the single
+`fu` cache with per-path `_fu_cache` and a `_fu_for(spec)` resolver (per-template
+override -> builder-level formula_units -> infer from that POSCAR); `counts()`
+now takes optional `fu` (defaults to primary template, preserving the public
+`counts(candidate)` signature tests rely on); `build()` loops specs via a new
+`_build_one(spec,...)` and concatenates. Per-entry overrides: n_configs,
+formula_units, eligible_region, eligible_region_fallback. base_poscar=first
+spec path keeps `self.base_poscar`/`fu`/composition_formula back-compat (single
+mode bit-for-bit). Added 4 multi-mode tests. Note: pre-existing failure
+test_lips_integration::test_lips_masking_and_charge_neutrality (env P-site frac
+0.01 < 0.02 bound) is unrelated — fails identically on original sse.py.
+
+### EARS — Progress (2026-06-17 14:42)
+<!-- concepts: config-authoring, structure-builders, episode-style -->
+Editing configs/ti_alloy.yaml per user: (1) added 2nd base_poscar via the new
+substitute multi-template list form; (2) max-direction objective -> mean_plus_kstd;
+(3) both property weights -> 0.5. Blocked on the requested episode_style switch:
+ti_alloy uses element_bounds to encode the composition rules (45-90 Ti, etc.), and
+env.py:147 raises NotImplementedError if element_bounds is combined with
+episode_style=element_then_amount. So switching to element_then_amount as-is would
+crash — surfacing the trade-off to the user instead of silently breaking it.
+
+### EARS — Progress (2026-06-17 14:45)
+<!-- concepts: config-authoring, episode-style -->
+ti_alloy.yaml switched to episode_style: element_then_amount per user. Required
+removing element_bounds (commented out, not deleted — env.py:147 forbids combining
+it with element_then_amount). Set n_components: 6 (subset size; was 11 forced by
+fixed_order). Updated header + constraint_filter comment to warn composition rules
+(45-90 Ti etc.) are NO LONGER enforced in this mode. Verified: CompositionEnv builds
+and a random rollout yields 6 distinct freely-chosen cations (e.g. Ti at 0.13, below
+the old 0.45 floor — confirms bounds are off). Reward edits earlier: prop0 max ->
+mean_plus_kstd, both weights 0.5; 2nd base_poscar added via substitute multi-mode.
+
+### EARS — Progress (2026-06-17 14:51)
+<!-- concepts: env-feasibility, element-bounds, episode-style -->
+Implemented element_bounds support for episode_style=element_then_amount in
+env.py (was previously a hard NotImplementedError). Key insight: on a step-1 unit
+grid, any chosen k-subset's reachable sums form the full integer interval
+[Σlo, Σhi], so the "per-subset feasibility search" the author deferred reduces to
+a window check. Added staticmethod _completable(target,k_slots,pool): elements
+with lo>0 are MANDATORY (absent => fraction 0 violates lo), must fit in k_slots
+and count toward Σlo/Σhi; optional (lo=0) slots filled with top-hi elements to
+maximize ceiling; feasible iff Σlo <= target <= Σhi_max. allowed_actions now
+computes per-candidate-element allowed units via _allowed_units_for_symbol (prunes
+amounts whose remainder isn't completable). step() validates the chosen element's
+bound by symbol (not by step index). Constructor builds _element_unit_bounds_by_sym
+and does mode-specific feasibility precondition (mandatory<=n_components +
+_completable at full budget). Verified 400+200 random rollouts: 0 bound violations,
+sum=1.0, mandatory always present. Replaced obsolete not-implemented test with 4
+new tests. Pre-existing unrelated failure: test_lips_integration (env P-site frac).
+
+### EARS — Progress (2026-06-17 15:25)
+<!-- concepts: env-routing, config-auto-detection, multigroup -->
+Implementing single-group auto-switch in run_experiment.py. env_type now auto-detects
+(groups present -> multi_group; flat -> fraction) when unset. A lone kind:composition
+group is collapsed to flat CompositionEnv: normalize_group_spec(g) then flat_cfg =
+{**cfg, **gspec}, env_type reset to "fraction" so ALL downstream flat logic (reward_fn,
+formula parsing, top-level filter attach, generation) applies and the predictor/builder
+gets a flat {el:frac} candidate. independent/categorical single groups keep MultiGroupEnv.
+Key reason: MultiGroupEnv terminal is {group:{el:frac}} (nested), which breaks flat
+builders (substitute/rf_magpie index keys as elements) — collapsing avoids that. Next:
+swap remaining cfg[...] refs in the CompositionEnv branch + filter line to flat_cfg, then test.
+
+### EARS — Progress (2026-06-17 15:32)
+<!-- concepts: env-routing, config-auto-detection, multigroup -->
+Single-group auto-switch DONE in run_experiment.py main(). Verified end-to-end:
+(1) single kind:composition group config (no env_type) prints "collapsed to flat
+CompositionEnv", and an FQN assert-predictor confirmed it receives a FLAT
+{el:frac} dict (not nested) + valid sum-to-1 generated.csv. (2) 2-group dummy
+config unaffected: no collapse, proper two-sublattice candidates, exit 0. Full
+suite green except the known pre-existing test_lips_integration failure.
+
+### EARS — Progress (2026-06-17 15:34)
+<!-- concepts: config-authoring, env-routing -->
+Migrated ti_alloy.yaml to single-group `groups:` form (one kind:composition group
+'alloy' holding cation_set/fraction_set/total_units/n_components/episode_style/
+element_bounds; anion_formula kept top-level). No env_type set -> auto-detect
+multi_group -> collapse to flat CompositionEnv. Verified: routing collapses, 300
+rollouts respect bounds + sum=1.0 + mandatory Ti/Zr present. Behavior identical to
+the prior flat config; just a different authoring surface.
+
+### EARS — Progress (2026-06-17 15:50)
+<!-- concepts: refactor, naming, env-api -->
+Full rename cation_set -> species_set (246 occurrences, ~39 files: src/rl_matdesign,
+src/abcde_ooh, scripts, all configs, tests, README/CLAUDE/docs). Done as an atomic
+global token replace (verified cation_set has no superstrings, so safe) so every
+caller/callee — incl. the filter_actions(**kw) contract and the rl_matdesign<->abcde_ooh
+boundary — stayed consistent. Excluded trace.md (historical log). Rationale: name was
+an OOH-era misnomer; nothing enforces cation chemistry (no oxidation/cation check in
+env/encoding), the field is just "this sublattice's pick menu" (anions live there too,
+e.g. categorical S-site). NOT renamed: method names cation_fractions/terminal_cation_fractions/
+cation_digits (different identifiers, separate concern). Verified: full suite green except
+pre-existing test_lips_integration; single-group + two-group dummy configs run end-to-end
+with the new key. NOTE: old run_config.json files (with "cation_set") won't be read by
+summarize_replay_buffer/check_invariance — no back-compat alias added (full clean rename).

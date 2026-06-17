@@ -12,7 +12,7 @@ Each buffer row is a dict with these keys (see ``add_episode_to_buffer``):
 
     s_mat_raw         np.ndarray  unscaled material features of the state
     s_step            np.ndarray  one-hot of the step counter
-    a_elem_idx        int         index into cation_set of the chosen cation
+    a_elem_idx        int         index into species_set of the chosen cation
     a_comp_val        float       chosen fraction value (e.g. 0.20)
     reward            float       immediate reward (nonzero only at terminal)
     s_mat_next_raw    np.ndarray  next-state material features (zeros if done)
@@ -94,16 +94,16 @@ def _split_episodes(buffer: List[dict]) -> List[List[dict]]:
     return episodes
 
 
-def _episode_composition(episode: List[dict], cation_set: List[str]) -> Dict[str, float]:
+def _episode_composition(episode: List[dict], species_set: List[str]) -> Dict[str, float]:
     """Reconstruct the {symbol: fraction} mapping from one episode's rows."""
     comp: Dict[str, float] = {}
     for row in episode:
         idx = int(row["a_elem_idx"])
-        if idx < 0 or idx >= len(cation_set):
+        if idx < 0 or idx >= len(species_set):
             raise ValueError(
-                f"a_elem_idx={idx} out of range for cation_set of size {len(cation_set)}"
+                f"a_elem_idx={idx} out of range for species_set of size {len(species_set)}"
             )
-        el = cation_set[idx]
+        el = species_set[idx]
         comp[el] = comp.get(el, 0.0) + float(row["a_comp_val"])
     return comp
 
@@ -142,13 +142,13 @@ class Episode:
 def _decode_episodes(
     buffer: List[dict],
     *,
-    cation_set: List[str],
+    species_set: List[str],
     anion_formula: str,
     total_units: int,
 ) -> List[Episode]:
     out: List[Episode] = []
     for ep_rows in _split_episodes(buffer):
-        comp = _episode_composition(ep_rows, cation_set)
+        comp = _episode_composition(ep_rows, species_set)
         formula = _canonical_formula(
             comp, anion_formula=anion_formula, total_units=total_units
         )
@@ -215,10 +215,10 @@ def main() -> None:
     args = parser.parse_args()
 
     run_cfg = _load_run_config(args.run_dir)
-    cation_set = run_cfg.get("cation_set")
-    if not cation_set:
+    species_set = run_cfg.get("species_set")
+    if not species_set:
         raise SystemExit(
-            "run_config.json missing 'cation_set' — cannot decode a_elem_idx. "
+            "run_config.json missing 'species_set' — cannot decode a_elem_idx. "
             f"Looked in {os.path.join(args.run_dir, 'run_config.json')}"
         )
     anion_formula = run_cfg.get("anion_formula", "")
@@ -234,7 +234,7 @@ def main() -> None:
     buffer = _load_buffer(ckpt_path)
     episodes = _decode_episodes(
         buffer,
-        cation_set=cation_set,
+        species_set=species_set,
         anion_formula=anion_formula,
         total_units=total_units,
     )

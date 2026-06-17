@@ -33,7 +33,7 @@ def test_chain_composes_real_children_at_last_step():
     final-step action list down to (O, digit in {1, 2})."""
     from rl_matdesign.registry import resolve_constraint
 
-    cation_set = ["Fe", "Co", "Ni", "O"]
+    species_set = ["Fe", "Co", "Ni", "O"]
     fraction_set = ["0", "1", "2"]
     cfg = {
         "filters": [
@@ -53,7 +53,7 @@ def test_chain_composes_real_children_at_last_step():
     out = chain.filter_actions(
         actions=actions, units_map={"Fe": 1, "Co": 1, "Ni": 1},
         steps_left=0, allowed_units=[0, 1, 2], possible_sums_by_k=[],
-        cation_set=cation_set, fraction_set=fraction_set,
+        species_set=species_set, fraction_set=fraction_set,
     )
     assert len(out) == 2
     for elem_oh, comp_oh in out:

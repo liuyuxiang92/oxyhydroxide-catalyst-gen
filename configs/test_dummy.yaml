@@ -1,5 +1,5 @@
 # Test config using dummy predictor (no ASE/DeepMD required)
-cation_set: [Co, Cr, Fe, Mn, Ni, Al, Ti, Cu, V, Mo]
+species_set: [Co, Cr, Fe, Mn, Ni, Al, Ti, Cu, V, Mo]
 anion_formula: ""
 n_components: 5
 predictor: dummy

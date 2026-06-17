@@ -147,7 +147,7 @@ class PhasePatternFilter:
         steps_left: int,
         allowed_units: Sequence[int],
         possible_sums_by_k,  # noqa: ARG002
-        cation_set: List[str],
+        species_set: List[str],
         fraction_set: List[str],
         **_: Any,
     ) -> List[Tuple[Tuple[float, ...], Tuple[float, ...]]]:
@@ -171,7 +171,7 @@ class PhasePatternFilter:
         # (since steps_left == 0, this action completes the episode).
         for elem_oh, comp_oh in actions:
             try:
-                elem = cation_set[list(elem_oh).index(1.0)]
+                elem = species_set[list(elem_oh).index(1.0)]
                 comp_str = fraction_set[list(comp_oh).index(1.0)]
             except ValueError:
                 continue

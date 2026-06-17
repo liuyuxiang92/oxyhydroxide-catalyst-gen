@@ -6,7 +6,7 @@
 
 # ---- Environment ----
 # B-site candidates (transition metals compatible with La3+ A-site and O2- anion)
-cation_set:
+species_set:
   - Cr
   - Mn
   - Fe

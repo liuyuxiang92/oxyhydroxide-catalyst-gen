@@ -100,7 +100,7 @@ def objective_from_mean_std(
 # ---------------------------------------------------------------------------
 
 def _precompute_elem_features(
-    cation_set: List[str],
+    species_set: List[str],
     featurizer: Callable,
 ) -> Tuple[np.ndarray, StandardScaler]:
     """Precompute and scale Magpie feature vectors for each cation.
@@ -113,9 +113,9 @@ def _precompute_elem_features(
     -------
     (elem_feats_scaled, elem_scaler):
         ``elem_feats_scaled`` has shape ``(n_elements, feature_dim)``.
-        Index ``i`` corresponds to ``cation_set[i]``.
+        Index ``i`` corresponds to ``species_set[i]``.
     """
-    raw = np.asarray([featurizer(el + "1.00") for el in cation_set], dtype=float)
+    raw = np.asarray([featurizer(el + "1.00") for el in species_set], dtype=float)
     elem_scaler = StandardScaler()
     elem_scaler.fit(raw)
     return elem_scaler.transform(raw), elem_scaler

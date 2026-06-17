@@ -123,7 +123,7 @@ class PhaseActionFilter:
         steps_left: int,
         allowed_units: List[int],
         possible_sums_by_k: List[set],
-        cation_set: List[str],
+        species_set: List[str],
         fraction_set: List[str],
     ) -> List[Tuple]:
         """Return subset of *actions* that can lead to a valid terminal phase."""
@@ -132,7 +132,7 @@ class PhaseActionFilter:
         filtered: List[Tuple] = []
         for action in actions:
             elem_oh, comp_oh = action
-            elem = decode_one_hot(elem_oh, cation_set)
+            elem = decode_one_hot(elem_oh, species_set)
             comp_str = decode_one_hot(comp_oh, fraction_set)
             cand_units = int(round(float(comp_str) * 20))
 

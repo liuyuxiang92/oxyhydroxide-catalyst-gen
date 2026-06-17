@@ -33,7 +33,7 @@ class ConstraintFilter:
         steps_left: int,
         allowed_units: Sequence[int],
         possible_sums_by_k: List[Any],
-        cation_set: List[str],
+        species_set: List[str],
         fraction_set: List[str],
         prior_groups: Optional[List[Dict[str, float]]] = None,
         **_: Any,

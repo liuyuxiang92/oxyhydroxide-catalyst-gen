@@ -81,14 +81,14 @@ def _sample_random_multiset(
     """Roll a random terminal episode in *env*, return the (elem, frac_str) sequence."""
     env.initialize()
     sequence: List[Tuple[str, str]] = []
-    cation_set = env.cation_set
+    species_set = env.species_set
     fraction_set = env.fraction_set
     while env.counter < env.n_components:
         actions = env.allowed_actions()
         if not actions:
             return []
         elem_oh, comp_oh = rng.choice(actions)
-        elem = cation_set[int(np.argmax(elem_oh))]
+        elem = species_set[int(np.argmax(elem_oh))]
         frac = fraction_set[int(np.argmax(comp_oh))]
         env.step((elem_oh, comp_oh))
         sequence.append((elem, frac))
@@ -196,7 +196,7 @@ def _probe_qnet(
 
     # Canonical action used for all queries (need not be "allowed" — we just
     # want a fixed query vector).
-    canonical_elem_idx = 0  # first element in cation_set
+    canonical_elem_idx = 0  # first element in species_set
     canonical_frac = float(fraction_set[0])
 
     for k in range(N):
@@ -214,11 +214,11 @@ def _probe_qnet(
             for i in idxs:
                 env = env_factory()
                 env.initialize()
-                cation_set = env.cation_set
+                species_set = env.species_set
                 for elem, frac in orderings[i][:k]:
                     elem_oh = tuple(
-                        1.0 if j == cation_set.index(elem) else 0.0
-                        for j in range(len(cation_set))
+                        1.0 if j == species_set.index(elem) else 0.0
+                        for j in range(len(species_set))
                     )
                     comp_oh = tuple(
                         1.0 if j == fraction_set.index(frac) else 0.0
@@ -298,14 +298,14 @@ def main() -> None:
     def _build_env():
         if env_type == "integer_ratio":
             env = IntegerRatioEnv(
-                cation_set=cfg["cation_set"],
+                species_set=cfg["species_set"],
                 ratio_set=cfg.get("ratio_set", None) or _default_digits(),
                 n_components=int(cfg.get("n_components", 5)),
                 phase_filter=None,
             )
         else:
             env = CompositionEnv(
-                cation_set=cfg["cation_set"],
+                species_set=cfg["species_set"],
                 fraction_set=cfg.get("fraction_set", None) or _default_fractions(),
                 anion_formula=cfg.get("anion_formula", ""),
                 n_components=int(cfg.get("n_components", 5)),
@@ -346,7 +346,7 @@ def main() -> None:
         else:
             scaler = joblib.load(scaler_path)
             elem_feats_scaled, _ = _precompute_elem_features(
-                probe_env.cation_set, probe_env.state_featurizer
+                probe_env.species_set, probe_env.state_featurizer
             )
             state_dim = int(getattr(scaler, "n_features_in_", scaler.mean_.shape[0]))
             qnet = QRegressor(

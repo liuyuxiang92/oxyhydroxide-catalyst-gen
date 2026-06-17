@@ -74,7 +74,7 @@ class SceneMeta:
     def __init__(self, cfg: dict) -> None:
         self.p_group = self.s_group = None
         self.host_p = str(cfg.get("host", {}).get("P", "P"))
-        self.cation_set: List[str] = []
+        self.species_set: List[str] = []
         self.o_element = "O"
         self.cl_element = "Cl"
         self.o_form_slots: List[str] = []
@@ -96,7 +96,7 @@ class SceneMeta:
             else:
                 self.p_group = g.get("name")
                 self.host_p = str(g.get("host", self.host_p))
-                self.cation_set = list(g.get("cation_set", []))
+                self.species_set = list(g.get("species_set", []))
         self.p_group = self.p_group or cfg.get("p_site_group", "P_site")
         self.s_group = self.s_group or cfg.get("s_site_group", "S_site")
         if not self.o_form_slots:
@@ -114,7 +114,7 @@ class SceneMeta:
 def parse_formula(spec: str, meta: SceneMeta) -> Tuple[List[Tuple[str, float, float]], float, bool]:
     """Parse a formula into ([(metal, level, o_form), ...], cl_count, ambiguous?).
 
-    Dopant metals are the parsed elements found in the P-site ``cation_set``;
+    Dopant metals are the parsed elements found in the P-site ``species_set``;
     host/derived elements (Li, S, Br, P, O) are ignored — the builder recomputes
     them. Per-metal O-form can't be recovered from the single merged O count, so
     it is inferred by category (returns ``ambiguous=True`` if any 'both' metal is
@@ -126,11 +126,11 @@ def parse_formula(spec: str, meta: SceneMeta) -> Tuple[List[Tuple[str, float, fl
     amounts: Dict[str, float] = {}
     for el, num in pairs:
         amounts[el] = amounts.get(el, 0.0) + float(num)
-    cset = set(meta.cation_set)
+    cset = set(meta.species_set)
     metals = [el for el in amounts if el in cset]
     if not metals:
         raise ValueError(
-            f"No P-site dopant metal from the cation_set found in {spec!r}. "
+            f"No P-site dopant metal from the species_set found in {spec!r}. "
             "Pass --dopant METAL:LEVEL:OFORM explicitly."
         )
     dopants, ambiguous = [], False

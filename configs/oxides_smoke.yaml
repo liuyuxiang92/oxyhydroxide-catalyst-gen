@@ -2,7 +2,7 @@
 
 env_type: integer_ratio
 
-cation_set:
+species_set:
   - O
   - Te
   - N

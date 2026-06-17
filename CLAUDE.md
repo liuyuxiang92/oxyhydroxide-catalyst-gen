@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Repo Does
 
-RL-based composition generator for discovering novel oxyhydroxide catalysts (ABCDE-OOH). A 5-step RL environment sequentially picks 5 distinct cations and their fractions (summing to 1.0) from 28 candidate elements. Three algorithms are supported: offline DQN (Q-network trained on Monte Carlo returns), REINFORCE, and A2C.
+RL-based composition generator for discovering novel oxyhydroxide catalysts (ABCDE-OOH). A 5-step RL environment sequentially picks 5 distinct cations and their fractions (summing to 1.0) from 28 candidate elements. Three algorithms are supported: classical online DQN (Q-network trained on one-step TD targets from a replay buffer), REINFORCE, and A2C.
 
 ## Commands
 
@@ -77,9 +77,13 @@ python scripts/evaluate_formulas_dp.py --formulas-file candidates.txt --dp-model
 ```
 
 ### Summarize a replay buffer
+The DQN replay buffer is persisted inside the periodic `checkpoint.pt` (key `"buffer"`), not as a standalone file. Point the summarizer at the run directory:
 ```bash
-python scripts/summarize_replay_buffer.py <path-to-random_dataset.npz>
+python scripts/summarize_replay_buffer.py --run-dir runs/dqn
+# Recompute predictor mean/std for each unique composition:
+python scripts/summarize_replay_buffer.py --run-dir runs/dqn --recompute
 ```
+It reconstructs episodes (splitting buffer rows on `done=True`), decodes each composition via `species_set` from `run_config.json`, and writes `replay_buffer_summary.csv` (`formula`, `terminal_reward`, `n_buffer_rows`, plus `pred_mean/std` when `--recompute`).
 
 ### Install dependencies
 ```bash
@@ -92,11 +96,10 @@ There is no test suite, linter configuration, or build step.
 
 ### Pipeline flow (all in `scripts/run_ABCDEOOH_experiment.py`)
 
-**DQN path (`--rl-method dqn`, default):**
-1. **Random buffer** — Roll out random episodes in `ABCDEOOHEnv`, compute MC returns as Q targets, save to `random_dataset.npz`
-2. **Q-network training** — `StandardScaler` on state features, then train `QRegressor` (3-layer MLP) with MSE loss
-3. **Iterative buffer** (optional) — Collect more episodes using learned policy (epsilon-greedy or stochastic top-k), append to buffer, retrain
-4. **Candidate generation** — Greedy (or epsilon-greedy) action selection via trained Q-network, deduplicate, optionally filter by primary phase, write `generated.csv`
+**DQN path (`--rl-method dqn`, default), `train_dqn_online`:**
+1. **Warmup** — Roll out `--dqn-warmup-eps` random episodes with real rewards to pre-fill an in-memory FIFO replay buffer (`collections.deque(maxlen=dqn_buffer_size)`) and fit the `StandardScaler` on raw state features. Each env step becomes one transition row: `{s_mat_raw, s_step, a_elem_idx, a_comp_val, reward, s_mat_next_raw, s_step_next, next_allowed_idx, done}` (see `add_episode_to_buffer`).
+2. **Online training** — For `--dqn-num-train-eps` episodes: ε-greedy rollout → new rows, then `--dqn-grad-steps-per-ep` minibatch SGD steps minimizing SmoothL1 on the one-step TD target `r + γ·max_{a'∈next_allowed} Q_target(s',a')`. A target network is hard-copied every `--dqn-target-update-freq` episodes; ε anneals linearly. The buffer is checkpointed to `checkpoint.pt` (key `"buffer"`) for exact-state resume — there is no `random_dataset.npz`.
+3. **Candidate generation** — Boltzmann-sampled (or greedy) action selection via trained Q-network, deduplicate, optionally filter by phase, write `generated.csv`
 
 **PG path (`--rl-method reinforce` or `a2c`):**
 1. **Warmup** — Roll out `--pg-warmup-eps` random episodes to fit `StandardScaler`
@@ -107,7 +110,7 @@ There is no test suite, linter configuration, or build step.
 
 | File | DQN | REINFORCE | A2C | Description |
 |---|---|---|---|---|
-| `random_dataset.npz` | ✓ | — | — | Replay buffer arrays: `s_mat`, `s_step`, `a_elem`, `a_comp`, `y` |
+| `checkpoint.pt` | ✓ | ✓ | ✓ | Periodic mid-run checkpoint. For DQN (`type=="dqn"`) it holds the replay `buffer` (list of transition-row dicts), `qnet_state`, `target_net_state`, `opt_state`, `eps`, `episodes_completed`, `dp_cache`. Enables `--resume-training`. (Replaces the old `random_dataset.npz`.) |
 | `std_scaler.bin` | ✓ | ✓ | ✓ | Serialized `StandardScaler` (joblib) |
 | `qnet.pt` | ✓ | — | — | Q-network state dict (PyTorch) |
 | `policy.pt` | — | ✓ | ✓ | PolicyNet state dict (PyTorch) |
@@ -169,7 +172,7 @@ Violations are silent — the agent's value function fragments across orderings,
 
 YAML key: `dqn_augment_permutations: K` (CLI: `--dqn-augment-permutations K`, default `0`).
 
-When set on a DQN run, each completed episode is re-inserted into the replay buffer K additional times under random permutations of the action sequence. The terminal reward is reused (no extra predictor call), and within-episode duplicates are skipped. This gives DQN more `(state, action)` coverage per expensive lab call — useful when the predictor is the bottleneck (DeepMD ensembles, OOH overpotential) or when `cation_set` is large.
+When set on a DQN run, each completed episode is re-inserted into the replay buffer K additional times under random permutations of the action sequence. The terminal reward is reused (no extra predictor call), and within-episode duplicates are skipped. This gives DQN more `(state, action)` coverage per expensive lab call — useful when the predictor is the bottleneck (DeepMD ensembles, OOH overpotential) or when `species_set` is large.
 
 **DQN only.** PG / A2C are on-policy: their gradient direction is tied to the action *actually sampled by the current policy*, so permuting trajectories breaks the policy-gradient theorem. The flag is silently ignored (with a one-line warning) for non-DQN methods.
 

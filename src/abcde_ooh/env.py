@@ -111,7 +111,7 @@ class ABCDEOOHEnv:
     def __init__(
         self,
         *,
-        cation_set: Sequence[str] = DEFAULT_CATION_SET,
+        species_set: Sequence[str] = DEFAULT_CATION_SET,
         fraction_set: Sequence[str] = DEFAULT_FRACTIONS,
         anion_formula: str = "O2H1",
         max_steps: int = 5,
@@ -122,7 +122,7 @@ class ABCDEOOHEnv:
         if max_steps != 5:
             raise ValueError("This environment is designed for exactly 5 steps (A..E).")
 
-        self.cation_set = list(cation_set)
+        self.species_set = list(species_set)
         self.fraction_set = list(fraction_set)
         self.anion_formula = anion_formula
         self.max_steps = max_steps
@@ -207,12 +207,12 @@ class ABCDEOOHEnv:
         if self.counter >= self.max_steps:
             return []
 
-        elems = [e for e in self.cation_set if e not in self._selected]
+        elems = [e for e in self.species_set if e not in self._selected]
         units = self._allowed_fraction_units_now()
 
         actions: List[Tuple[Tuple[float, ...], Tuple[float, ...]]] = []
         for elem in elems:
-            elem_oh = tuple(encode_choice(elem, self.cation_set).tolist())
+            elem_oh = tuple(encode_choice(elem, self.species_set).tolist())
             for u in units:
                 comp = _format_fraction(u)
                 comp_oh = tuple(encode_choice(comp, self.fraction_set).tolist())
@@ -225,7 +225,7 @@ class ABCDEOOHEnv:
                 steps_left=self.max_steps - self.counter - 1,
                 allowed_units=self._allowed_units,
                 possible_sums_by_k=self._possible_sums_by_k,
-                cation_set=self.cation_set,
+                species_set=self.species_set,
                 fraction_set=self.fraction_set,
             )
 
@@ -239,7 +239,7 @@ class ABCDEOOHEnv:
 
     def step(self, action: Tuple[Tuple[float, ...], Tuple[float, ...]]) -> None:
         elem_oh, comp_oh = action
-        elem = decode_one_hot(elem_oh, self.cation_set)
+        elem = decode_one_hot(elem_oh, self.species_set)
         comp_str = decode_one_hot(comp_oh, self.fraction_set)
 
         if elem in self._selected:
