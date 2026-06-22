@@ -144,7 +144,7 @@ pg_batch_eps: 15
 pg_lr_actor: 0.001
 pg_lr_critic: 0.001
 pg_entropy_coef: 0.01
-gen_temperature: 1.0
+gen_temperature: 3.0
 gen_top_frac: 0.0
 gen_epsilon: 0.0
 gamma: 0.9            # reference disc_factor
@@ -154,7 +154,6 @@ pg_repeat_penalty_shape: log
 
 # ---- Generation ----
 num_gen_eps: 1000          # 1000 final candidates per run (matches reference)
-exploration_gen_eps: 0
 
 # ---- DQN-specific (mirrors RL_materials_generation/oxides_driver.py where mappable) ----
 dqn_lr: 0.001              # our stable online-TD value; their lr 1e-2 suits MC full-batch, not bootstrapped TD
