@@ -48,11 +48,11 @@ n_components: 5
 # the "scaffold" — the whole formula before B-site substitution. The filter parses
 # {La:1, O:3} + the B-site count from the POSCAR, merges the agent's B-site picks,
 # and tests amount-weighted neutrality. No `stoich` guess needed.
-# Uncomment to enable (in-episode pruning + a `charge_ok` column in generated.csv):
+# Uncomment to enable (in-episode pruning + drops non-neutral candidates from
+# generated.csv):
 # constraint_filter: smact_charge
 # scaffold_poscar: data/perovskite/LaBO3.POSCAR
 # scaffold_site_symbol: "Fe"   # same placeholder as the builder's site_symbol
-# mode: flag                   # or `filter` to drop non-neutral candidates
 constraint_filter: null   # Default: no constraint; DPA reward handles stability
 
 # ---- Reward (one structure objective -> single-objective, auto-detected) ----

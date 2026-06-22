@@ -1207,7 +1207,7 @@ def generate_candidates(
     gen_temperature: float = 1.0,
     k: float = 1.0,
     max_attempts: Optional[int] = None,
-    charge_check_mode: Optional[str] = None,
+    charge_filter: bool = False,
 ) -> List[dict]:
     """Generate candidate compositions in dual-phase mode.
 
@@ -1345,17 +1345,18 @@ def generate_candidates(
 
             # Post-episode charge-neutrality on the WHOLE built formula (covers
             # builder-derived anions, e.g. SSE). Gated entirely by config: when
-            # charge_check_mode is None nothing here runs (no smact import).
-            if charge_check_mode is not None:
+            # charge_filter is False nothing here runs (no smact import). When on,
+            # non-neutral candidates are dropped so generated.csv holds only
+            # charge-neutral compositions.
+            if charge_filter:
                 from .constraints.charge import charge_neutral
 
                 try:
-                    charge_ok = charge_neutral(formula)
+                    neutral = charge_neutral(formula)
                 except Exception:
-                    charge_ok = True  # lenient: never crash generation on a bad parse
-                if charge_check_mode == "filter" and not charge_ok:
+                    neutral = True  # lenient: never crash generation on a bad parse
+                if not neutral:
                     continue  # drop non-neutral candidate from the output
-                row["charge_ok"] = bool(charge_ok)
 
             rows.append(row)
             accepted += 1

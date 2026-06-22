@@ -110,10 +110,9 @@ n_components: 5
 #      needed — the old `smact_anions: stoich` is obsolete for oxides. (For
 #      scenarios where the anion is NOT agent-picked, set `scaffold_formula` or
 #      `scaffold_poscar`+`scaffold_site_symbol` on this filter instead.)
-#      `mode: flag` tags generated.csv with a `charge_ok` column; `mode: filter`
-#      drops non-neutral candidates instead.
+#      When enabled, generation drops any candidate that isn't charge-neutral,
+#      so generated.csv contains only neutral compositions.
 #
-# Requires `pip install smact` for the SMACT filter.
 # Two filters in a list -> auto-chained in list order; no need to write
 # `constraint_filter: chain` (single-vs-chain is detected from `filters:`).
 filters:
@@ -122,7 +121,6 @@ filters:
     nonzero_ratio_at_last: true
     reserve_for_last: true
   - constraint_filter: smact_charge
-    mode: flag
 
 # ---- Reward (two properties -> multi-objective, auto-detected) ----
 # reward = (-T_sinter) + (-T_calcine) = -(T_sinter + T_calcine), matching the

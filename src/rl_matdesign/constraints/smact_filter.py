@@ -98,10 +98,10 @@ class SMACTChargeFilter(ConstraintFilter):
         env's ``species_set`` (i.e. a genuinely external anion) is folded into the
         scaffold at its ``stoich``; anions that the agent actually picks (e.g. O in
         the oxide species_set) are ignored here and taken from the real pick.
-    mode:
-        Generation-side behavior recorded for the post-episode validator
-        (``"flag"`` adds a ``charge_ok`` column, ``"filter"`` drops invalid rows).
-        Not used by the in-episode action pruning itself.
+
+    When ``smact_charge`` is configured, generation also drops any candidate whose
+    whole formula is not charge-neutral (post-episode), so ``generated.csv`` holds
+    only neutral compositions.
     """
 
     def __init__(
@@ -110,12 +110,10 @@ class SMACTChargeFilter(ConstraintFilter):
         *,
         scaffold_fixed: Optional[Dict[str, float]] = None,
         scaffold_n_sites: int = 1,
-        mode: str = "flag",
         allow_alloys: bool = True,
         tol: float = 0.5,
         threshold: int = 1,
     ) -> None:
-        self.mode = str(mode)
         self.allow_alloys = bool(allow_alloys)
         self.tol = float(tol)
         self.threshold = threshold

@@ -142,23 +142,19 @@ def test_filter_noop_before_final_step():
 def test_make_smact_charge_with_scaffold_formula():
     from rl_matdesign.registry import resolve_constraint
 
-    filt = resolve_constraint("smact_charge", {"scaffold_formula": "O2H1", "mode": "filter"})
+    filt = resolve_constraint("smact_charge", {"scaffold_formula": "O2H1"})
     assert filt.scaffold_per_fu == {"O": 2.0, "H": 1.0}
-    assert filt.mode == "filter"
 
 
-def test_smact_charge_mode_detection():
-    from rl_matdesign.registry import smact_charge_mode
+def test_smact_charge_enabled_detection():
+    from rl_matdesign.registry import smact_charge_enabled
 
-    assert smact_charge_mode({}) is None                       # not configured
-    assert smact_charge_mode({"constraint_filter": "last_step_element"}) is None
-    assert smact_charge_mode({"constraint_filter": "smact_charge"}) == "flag"
-    assert smact_charge_mode(
-        {"constraint_filter": "smact_charge", "mode": "filter"}
-    ) == "filter"
-    assert smact_charge_mode(
+    assert smact_charge_enabled({}) is False                       # not configured
+    assert smact_charge_enabled({"constraint_filter": "last_step_element"}) is False
+    assert smact_charge_enabled({"constraint_filter": "smact_charge"}) is True
+    assert smact_charge_enabled(
         {"filters": [
             {"constraint_filter": "last_step_element", "required_elements": ["O"]},
-            {"constraint_filter": "smact_charge", "mode": "filter"},
+            {"constraint_filter": "smact_charge"},
         ]}
-    ) == "filter"
+    ) is True

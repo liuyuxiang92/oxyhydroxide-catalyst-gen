@@ -503,7 +503,7 @@ def main() -> None:
             random.seed(gen_seed)
             _n_exploit = int(cfg.get("num_gen_eps", 200))
             _max_attempts = args.max_gen_attempts if args.max_gen_attempts is not None else 10 * _n_exploit
-            from rl_matdesign.registry import smact_charge_mode
+            from rl_matdesign.registry import smact_charge_enabled
             gen_rows = generate_candidates(
                 env=env, predictor=predictor, scaler=scaler, device=device,
                 qnet=qnet,
@@ -516,7 +516,7 @@ def main() -> None:
                 gen_epsilon=gen_epsilon_gen,
                 k=float(cfg.get("k", 1.0)),
                 max_attempts=_max_attempts,
-                charge_check_mode=smact_charge_mode(cfg),
+                charge_filter=smact_charge_enabled(cfg),
             )
             for r in gen_rows:
                 metrics.log(phase="generate", **r)
@@ -648,7 +648,7 @@ def main() -> None:
             random.seed(gen_seed)
             _n_exploit = int(cfg.get("num_gen_eps", 200))
             _max_attempts = args.max_gen_attempts if args.max_gen_attempts is not None else 10 * _n_exploit
-            from rl_matdesign.registry import smact_charge_mode
+            from rl_matdesign.registry import smact_charge_enabled
             gen_rows = generate_candidates(
                 env=env, predictor=predictor, scaler=scaler, device=device,
                 policy=policy,
@@ -661,7 +661,7 @@ def main() -> None:
                 gen_epsilon=gen_epsilon_gen,
                 k=float(cfg.get("k", 1.0)),
                 max_attempts=_max_attempts,
-                charge_check_mode=smact_charge_mode(cfg),
+                charge_filter=smact_charge_enabled(cfg),
             )
             for r in gen_rows:
                 metrics.log(phase="generate", **r)

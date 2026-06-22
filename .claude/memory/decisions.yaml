@@ -60,12 +60,14 @@
        param INSIDE the smact_charge block (the chain passes only the filter's own
        sub-config, so it can't read top-level anion_formula/poscar).
   consequences: |
-    Single opt-in switch = presence of `smact_charge` in YAML (registry
-    .smact_charge_mode drives both in-episode pruning and the CSV column; absent →
-    nothing runs, no smact import). `mode: flag` (default) adds charge_ok column;
-    `mode: filter` drops non-neutral rows. Deprecated `smact_anions` still honored
-    but anions in species_set (agent-picked, e.g. oxide O) excluded from scaffold
-    to avoid double-counting. Oxide configs dropped their smact_anions block.
+    Single opt-in switch = presence of `smact_charge` in YAML
+    (registry.smact_charge_enabled -> bool drives both in-episode pruning and the
+    post-episode drop; absent → nothing runs, no smact import). No `mode` knob and
+    no charge_ok column: when enabled, generation ALWAYS drops non-neutral
+    candidates so generated.csv holds only neutral compositions (user preference,
+    2026-06-22). Deprecated `smact_anions` still honored but anions in species_set
+    (agent-picked, e.g. oxide O) excluded from scaffold to avoid double-counting.
+    Oxide configs dropped their smact_anions block.
   reference: plan temporal-questing-dragonfly; tests/test_charge_neutrality.py
   status: confirmed
 

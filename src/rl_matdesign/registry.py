@@ -156,24 +156,23 @@ def _make_smact_charge(cfg: dict, **_):
         anions=anions,
         scaffold_fixed=scaffold_fixed,
         scaffold_n_sites=n_sites,
-        mode=str(cfg.get("mode", "flag")),
     )
 
 
-def smact_charge_mode(cfg: dict) -> Optional[str]:
-    """Return the smact_charge generation mode ('flag'|'filter') if configured, else None.
+def smact_charge_enabled(cfg: dict) -> bool:
+    """True when a ``smact_charge`` constraint is configured (flat or in a chain).
 
-    The single switch for charge checking: scanning the config for a ``smact_charge``
-    constraint (flat ``constraint_filter`` or inside a ``filters:`` chain). When absent,
-    the post-episode validation in ``generate_candidates`` does nothing (no smact import,
-    no ``charge_ok`` column).
+    The single switch for charge checking. When True, generation drops any
+    candidate whose whole formula is not charge-neutral; when False the
+    post-episode validation in ``generate_candidates`` does nothing (no smact
+    import, output unchanged).
     """
     if cfg.get("constraint_filter") == "smact_charge":
-        return str(cfg.get("mode", "flag"))
-    for f in cfg.get("filters") or []:
-        if isinstance(f, dict) and f.get("constraint_filter") == "smact_charge":
-            return str(f.get("mode", "flag"))
-    return None
+        return True
+    return any(
+        isinstance(f, dict) and f.get("constraint_filter") == "smact_charge"
+        for f in cfg.get("filters") or []
+    )
 
 
 def _make_last_step_element(cfg: dict, **_):

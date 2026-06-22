@@ -804,3 +804,11 @@ Key decisions:
   post-episode charge_ok column (registry.smact_charge_mode). No separate flag.
 Done: charge.py, SMACTChargeFilter rewrite, registry wiring. In progress: generate_candidates
 post-episode gate + run_experiment wiring, then configs + tests.
+
+### EARS — Progress (2026-06-22 18:37)
+<!-- concepts: charge-neutrality, smact-constraint, config-simplification -->
+Simplifying per user: drop the flag/filter `mode` knob entirely. When smact_charge
+is configured, generation ALWAYS drops non-charge-neutral candidates (no charge_ok
+column, no "flag" mode). smact_charge_mode() -> smact_charge_enabled() returning bool;
+generate_candidates param charge_check_mode -> charge_filter (bool). Removing mode from
+filter + registry + configs (oxides ×3, perovskite) + tests.
