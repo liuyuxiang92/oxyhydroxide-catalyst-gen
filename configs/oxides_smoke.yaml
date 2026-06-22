@@ -114,6 +114,7 @@ pg_repeat_penalty_coef: 0.1
 pg_repeat_penalty_shape: log
 
 num_gen_eps: 20
+max_gen_attempts: 2000   # cap generation attempts before stopping (CLI --max-gen-attempts overrides)
 
 dqn_lr: 0.001
 dqn_batch_size: 64

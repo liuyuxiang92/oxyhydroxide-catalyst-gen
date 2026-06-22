@@ -148,6 +148,7 @@ pg_repeat_penalty_shape: log
 
 # ---- Generation ----
 num_gen_eps: 1000          # 1000 final candidates per run (matches reference)
+max_gen_attempts: 100000   # cap generation attempts before stopping (CLI --max-gen-attempts overrides)
 
 # ---- DQN-specific (mirrors RL_materials_generation/oxides_driver.py where mappable) ----
 dqn_lr: 0.001              # our stable online-TD value; their lr 1e-2 suits MC full-batch, not bootstrapped TD

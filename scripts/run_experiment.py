@@ -502,7 +502,11 @@ def main() -> None:
             np.random.seed(gen_seed)
             random.seed(gen_seed)
             _n_exploit = int(cfg.get("num_gen_eps", 200))
-            _max_attempts = args.max_gen_attempts if args.max_gen_attempts is not None else 10 * _n_exploit
+            _max_attempts = (
+                args.max_gen_attempts
+                if args.max_gen_attempts is not None
+                else int(cfg.get("max_gen_attempts", 10 * _n_exploit))
+            )
             from rl_matdesign.registry import smact_charge_enabled
             gen_rows = generate_candidates(
                 env=env, predictor=predictor, scaler=scaler, device=device,
@@ -647,7 +651,11 @@ def main() -> None:
             np.random.seed(gen_seed)
             random.seed(gen_seed)
             _n_exploit = int(cfg.get("num_gen_eps", 200))
-            _max_attempts = args.max_gen_attempts if args.max_gen_attempts is not None else 10 * _n_exploit
+            _max_attempts = (
+                args.max_gen_attempts
+                if args.max_gen_attempts is not None
+                else int(cfg.get("max_gen_attempts", 10 * _n_exploit))
+            )
             from rl_matdesign.registry import smact_charge_enabled
             gen_rows = generate_candidates(
                 env=env, predictor=predictor, scaler=scaler, device=device,
