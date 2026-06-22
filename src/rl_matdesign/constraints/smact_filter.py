@@ -64,67 +64,87 @@ Requirements
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence, Tuple
+import warnings
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .base import ConstraintFilter
 
 
 class SMACTChargeFilter(ConstraintFilter):
-    """Prune final-step actions that would violate charge neutrality.
+    """Prune final-step actions that would make the *whole formula* non-neutral.
+
+    At the final step this builds the **complete** composition — every element
+    the agent picked (including any anion it picks itself, e.g. O in the oxide
+    configs) merged with a fixed *scaffold* (host + anions that are NOT part of
+    the optimised sites, e.g. perovskite's ``La`` + ``O`` from the template, or
+    an oxyhydroxide's ``O2H1``) — and tests amount-weighted charge neutrality via
+    :func:`rl_matdesign.constraints.charge.charge_neutral`. Unlike the original
+    unweighted cation-set screen, this respects the real picked amounts.
 
     Parameters
     ----------
+    scaffold_fixed:
+        ``{element: count}`` of fixed (non-working-site) elements taken from the
+        "whole formula before substitution" — e.g. ``{La: 1, O: 3}`` parsed from a
+        perovskite template, or ``{O: 2, H: 1}`` from an ``anion_formula``. Counts
+        are normalized to a per-working-formula-unit basis using ``scaffold_n_sites``.
+    scaffold_n_sites:
+        Number of working (placeholder) sites the fixed counts were measured
+        against — used to normalize ``scaffold_fixed`` to one working formula unit.
+        Default 1 (e.g. ``anion_formula`` is already per formula unit).
     anions:
-        List of anion specifications.  Each entry is a dict with keys:
-
-        - ``"symbol"``  — element symbol, e.g. ``"O"``, ``"N"``, ``"S"``, ``"Cl"``
-        - ``"charge"``  — oxidation state (integer), e.g. ``-2``, ``-3``, ``-1``
-        - ``"stoich"``  — stoichiometry relative to cation site sum (float)
-
-        Example for LaBO₃ perovskite (B-site optimised, La+B=1 cation)::
-
-            [{"symbol": "O", "charge": -2, "stoich": 3.0}]
-
-        Example for oxyhydroxide (MOOH, one cation site)::
-
-            [{"symbol": "O", "charge": -2, "stoich": 2.0},
-             {"symbol": "H", "charge": -1, "stoich": 1.0}]
-
-    threshold:
-        Minimum number of valid charge-neutral oxidation-state combinations
-        that must exist for an action to be retained.  Default 1 (any valid
-        combination counts).
+        **Deprecated** ``[{symbol, charge, stoich}, ...]`` list (old oxide configs).
+        Retained for backward compatibility: any anion symbol that is *not* in the
+        env's ``species_set`` (i.e. a genuinely external anion) is folded into the
+        scaffold at its ``stoich``; anions that the agent actually picks (e.g. O in
+        the oxide species_set) are ignored here and taken from the real pick.
+    mode:
+        Generation-side behavior recorded for the post-episode validator
+        (``"flag"`` adds a ``charge_ok`` column, ``"filter"`` drops invalid rows).
+        Not used by the in-episode action pruning itself.
     """
 
     def __init__(
         self,
-        anions: List[Dict[str, Any]],
+        anions: Optional[List[Dict[str, Any]]] = None,
+        *,
+        scaffold_fixed: Optional[Dict[str, float]] = None,
+        scaffold_n_sites: int = 1,
+        mode: str = "flag",
+        allow_alloys: bool = True,
+        tol: float = 0.5,
         threshold: int = 1,
     ) -> None:
-        if not anions:
-            raise ValueError("anions must be a non-empty list of dicts.")
-        for entry in anions:
-            if not all(k in entry for k in ("symbol", "charge", "stoich")):
-                raise ValueError(
-                    f"Each anion entry must have 'symbol', 'charge', 'stoich'. Got: {entry}"
-                )
-        self.anions = [
-            {"symbol": str(a["symbol"]), "charge": int(a["charge"]), "stoich": float(a["stoich"])}
-            for a in anions
-        ]
+        self.mode = str(mode)
+        self.allow_alloys = bool(allow_alloys)
+        self.tol = float(tol)
         self.threshold = threshold
-        self._smact = self._import_smact()
 
-    # ------------------------------------------------------------------
-    # Public helpers (useful for debugging)
-    # ------------------------------------------------------------------
+        # Explicit scaffold (from scaffold_formula / scaffold_poscar / anion_formula),
+        # normalized to one working formula unit.
+        n = max(int(scaffold_n_sites), 1)
+        self.scaffold_per_fu: Dict[str, float] = (
+            {str(e): float(c) / n for e, c in scaffold_fixed.items()} if scaffold_fixed else {}
+        )
 
-    def total_cation_charge_needed(self) -> float:
-        """Total positive charge the cation mix must provide per formula unit.
-
-        Computed as: sum(-charge_i * stoich_i) for all anion species i.
-        """
-        return sum(-a["charge"] * a["stoich"] for a in self.anions)
+        # Deprecated anion list -> resolved lazily against species_set in
+        # filter_actions (we only know which anions are agent-picked there).
+        self._deprecated_anions: List[Dict[str, Any]] = []
+        if anions:
+            warnings.warn(
+                "SMACTChargeFilter: 'smact_anions' is deprecated. The check now uses "
+                "the real picked amounts plus a 'scaffold_formula'/'scaffold_poscar'. "
+                "External anions in smact_anions are still honored for compatibility.",
+                DeprecationWarning,
+            )
+            for entry in anions:
+                if not all(k in entry for k in ("symbol", "charge", "stoich")):
+                    raise ValueError(
+                        f"Each anion entry must have 'symbol', 'charge', 'stoich'. Got: {entry}"
+                    )
+                self._deprecated_anions.append(
+                    {"symbol": str(entry["symbol"]), "stoich": float(entry["stoich"])}
+                )
 
     # ------------------------------------------------------------------
     # ConstraintFilter interface
@@ -142,68 +162,62 @@ class SMACTChargeFilter(ConstraintFilter):
         fraction_set: List[str],
         **_: Any,
     ) -> List[Tuple[Tuple[float, ...], Tuple[float, ...]]]:
-        # Only enforce at the final step (adding last cation).
+        # Only enforce at the final step (the composition is complete only then).
         if steps_left > 0:
             return actions
 
-        from ..encoding import decode_one_hot
+        import numpy as np
 
-        target_charge = self.total_cation_charge_needed()
+        from ..encoding import decode_one_hot
+        from .charge import charge_neutral
+
+        # External anions (not agent-picked) contribute to the scaffold; anions the
+        # agent picks itself (in species_set, e.g. O for oxides) come from the pick.
+        species = set(species_set)
+        scaffold = dict(self.scaffold_per_fu)
+        for a in self._deprecated_anions:
+            if a["symbol"] not in species:
+                scaffold[a["symbol"]] = scaffold.get(a["symbol"], 0.0) + a["stoich"]
 
         filtered = []
         for elem_oh, comp_oh in actions:
             elem = decode_one_hot(elem_oh, species_set)
-            if self._can_balance_charge(elem, units_map, target_charge):
+            cand_units = float(allowed_units[int(np.asarray(comp_oh).argmax())])
+            full = self._full_composition(elem, cand_units, units_map, scaffold)
+            if charge_neutral(full, tol=self.tol, allow_alloys=self.allow_alloys):
                 filtered.append((elem_oh, comp_oh))
 
-        # Safety: if every action is filtered out, return the original list to
-        # avoid a dead episode (can happen with unusual element sets or very
-        # strict stoichiometries).
+        # Safety: never strand the agent with zero legal actions.
         return filtered if filtered else actions
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _import_smact():
-        try:
-            import smact
-            import smact.screening  # noqa: F401
-            return smact
-        except ImportError as exc:
-            raise ImportError(
-                "SMACTChargeFilter requires the 'smact' package: pip install smact"
-            ) from exc
-
-    def _can_balance_charge(
+    def _full_composition(
         self,
-        new_elem: str,
-        existing_map: Dict[str, int],
-        target_charge: float,
-    ) -> bool:
-        """Return True if *new_elem* + *existing_map* can form a charge-neutral composition.
+        elem: str,
+        cand_units: float,
+        units_map: Dict[str, int],
+        scaffold: Dict[str, float],
+    ) -> Dict[str, float]:
+        """Assemble the complete composition for the candidate final pick.
 
-        Uses SMACT oxidation-state tables to check whether any combination of
-        allowed oxidation states sums to *target_charge*.  The check is
-        approximate (ignores stoichiometry weighting) but fast and reliable for
-        screening at the final step.
+        Working-site picks = ``units_map`` plus the candidate. With no scaffold
+        (oxides, where the agent also picks O) the working picks *are* the whole
+        formula. With a scaffold, the working picks are normalized to one formula
+        unit and the fixed scaffold is added on top.
         """
-        candidate_elems = list(existing_map.keys()) + [new_elem]
-        try:
-            species = [self._smact.Element(e) for e in candidate_elems]
-            oxidation_states = [e.oxidation_states for e in species]
-        except Exception:
-            # Unknown element — allow and let the reward model judge.
-            return True
+        working: Dict[str, float] = {k: float(v) for k, v in units_map.items()}
+        working[elem] = working.get(elem, 0.0) + cand_units
 
-        # Screen: does any combination of oxidation states sum to target_charge?
-        for combo in _product_of_lists(oxidation_states):
-            if abs(sum(combo) - target_charge) < 0.5:
-                return True
-        return False
+        if not scaffold:
+            return working
 
-
-def _product_of_lists(lists):
-    import itertools
-    return itertools.product(*lists)
+        total = sum(working.values())
+        if total <= 0:
+            return working
+        full = {e: v / total for e, v in working.items()}
+        for e, c in scaffold.items():
+            full[e] = full.get(e, 0.0) + c
+        return full

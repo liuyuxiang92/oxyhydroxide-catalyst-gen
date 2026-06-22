@@ -37,6 +37,38 @@
     write a dedicated `ConstraintFilter` subclass instead — that's Tier 3.
   status: confirmed
 
+- name: charge_neutrality_whole_formula
+  scope: src/rl_matdesign/constraints/charge.py, smact_filter.py, registry.py, training.py
+  decision: |
+    `smact_charge` now checks AMOUNT-WEIGHTED neutrality on the WHOLE formula
+    (cations + every anion at real amounts), not the old unweighted cation-set
+    screen against an assumed anion stoich. Single utility `charge_neutral()`
+    (constraints/charge.py) integerizes the composition and searches for one
+    oxidation state per element with Σ amount·ox == 0. Used by both the
+    in-episode SMACTChargeFilter (final step) and a post-episode `charge_ok`
+    column in generate_candidates.
+  rationale: |
+    1. Old filter ignored amounts, used a hardcoded anion stoich (1.5), and
+       double-counted O for oxides — it wasn't actually checking neutrality.
+    2. Must use pymatgen `common_oxidation_states` (Fe→{2,3}), NOT smact's broad
+       `.oxidation_states` (Fe→{1..6}) which makes almost anything "balance".
+       smact is therefore NOT required anymore.
+    3. NOT smact_validity: that asks "is SOME stoichiometry neutral"; we have a
+       FIXED stoichiometry (agent picked it) so must weight by real amounts.
+    4. "Whole formula before substitution" (host+anions for builder scenarios) is
+       surfaced via a `scaffold_formula` / `scaffold_poscar`+`scaffold_site_symbol`
+       param INSIDE the smact_charge block (the chain passes only the filter's own
+       sub-config, so it can't read top-level anion_formula/poscar).
+  consequences: |
+    Single opt-in switch = presence of `smact_charge` in YAML (registry
+    .smact_charge_mode drives both in-episode pruning and the CSV column; absent →
+    nothing runs, no smact import). `mode: flag` (default) adds charge_ok column;
+    `mode: filter` drops non-neutral rows. Deprecated `smact_anions` still honored
+    but anions in species_set (agent-picked, e.g. oxide O) excluded from scaffold
+    to avoid double-counting. Oxide configs dropped their smact_anions block.
+  reference: plan temporal-questing-dragonfly; tests/test_charge_neutrality.py
+  status: confirmed
+
 - name: branch_safety_pattern
   scope: refactor workflow
   decision: |

@@ -780,3 +780,27 @@ cation_digits (different identifiers, separate concern). Verified: full suite gr
 pre-existing test_lips_integration; single-group + two-group dummy configs run end-to-end
 with the new key. NOTE: old run_config.json files (with "cation_set") won't be read by
 summarize_replay_buffer/check_invariance — no back-compat alias added (full clean rename).
+
+### EARS — Session Start (2026-06-22 10:20)
+<!-- concepts: candidate-analysis, lips-electrolyte, generated-csv -->
+- Task: Summarize unique element combinations (ignoring ratios) from generated_lips_more_diversity.csv, reporting each combo's best conductivity_mean with std plus stability_mean/std.
+- Why: User is screening RL-generated LiPS solid-electrolyte candidates for high-conductivity, stable compositions.
+
+### EARS — Progress (2026-06-22 14:40)
+<!-- concepts: charge-neutrality, smact-constraint, constraint-framework -->
+Implementing generalized SMACT charge-neutrality (plan: temporal-questing-dragonfly).
+Key decisions:
+- The old `smact_charge` only screened cation *element identities* against a hardcoded
+  anion stoich (1.5), unweighted, ignoring real amounts, and double-counted O for oxides.
+- New: a single `charge_neutral()` utility (constraints/charge.py) does an AMOUNT-WEIGHTED
+  oxidation-state search (Σ amount·ox == 0) on the integerized full formula. Crucially NOT
+  smact_validity — that asks "is some stoichiometry neutral", we need "is THIS one neutral".
+- "Whole formula before substitution" surfaced via a scaffold param inside the smact_charge
+  block (scaffold_poscar+site_symbol, or scaffold_formula/anion_formula). Chain passes only
+  the filter's own sub-config, so scaffold MUST live in that block, not top-level.
+- Deprecated smact_anions still honored, but anions in species_set (agent-picked, e.g. O in
+  oxides) are excluded from scaffold to avoid double-counting.
+- Single opt-in switch: presence of smact_charge drives both in-episode pruning and the
+  post-episode charge_ok column (registry.smact_charge_mode). No separate flag.
+Done: charge.py, SMACTChargeFilter rewrite, registry wiring. In progress: generate_candidates
+post-episode gate + run_experiment wiring, then configs + tests.

@@ -1,0 +1,164 @@
+"""Charge-neutrality utility, scaffold helper, filter, and generation gating."""
+from __future__ import annotations
+
+import pytest
+
+pytest.importorskip("pymatgen")  # integerization + metal detection
+
+
+# --------------------------------------------------------------------------- #
+# charge_neutral — amount-weighted neutrality on the WHOLE formula
+# --------------------------------------------------------------------------- #
+
+def test_neutral_oxides_true():
+    from rl_matdesign.constraints.charge import charge_neutral
+
+    assert charge_neutral({"Fe": 2, "O": 3})          # Fe2O3: 2*3 - 3*2 = 0
+    assert charge_neutral("La1Fe1O3")                  # LaFeO3: +3 +3 -6 = 0
+    assert charge_neutral({"Li": 6, "P": 1, "S": 5, "Cl": 1})  # Li6PS5Cl
+
+
+def test_non_neutral_false():
+    from rl_matdesign.constraints.charge import charge_neutral
+
+    # NaO cannot balance: Na only +1, O only -2 -> sum -1, no assignment hits 0.
+    assert not charge_neutral({"Na": 1, "O": 1})
+    # Stoichiometry matters: Fe1O3 is not neutral even though Fe-O can be.
+    assert not charge_neutral({"Fe": 1, "O": 3})
+
+
+def test_stoichiometry_aware_not_just_element_set():
+    """The whole point: the SAME elements give different answers by amount."""
+    from rl_matdesign.constraints.charge import charge_neutral
+
+    assert charge_neutral({"Fe": 2, "O": 3})       # neutral
+    assert not charge_neutral({"Fe": 2, "O": 1})   # same elements, not neutral
+
+
+def test_all_metal_alloy_true():
+    from rl_matdesign.constraints.charge import charge_neutral
+
+    # HEA: all metals -> valid alloy regardless of oxidation states.
+    assert charge_neutral({"Fe": 1, "Co": 1, "Ni": 1, "Cr": 1, "Mn": 1})
+
+
+def test_unknown_element_is_lenient():
+    from rl_matdesign.constraints.charge import charge_neutral
+
+    # A non-real symbol has no oxidation states -> can't judge -> allow.
+    assert charge_neutral({"Xx": 1, "O": 2})
+
+
+# --------------------------------------------------------------------------- #
+# parse_formula + template_scaffold ("whole formula before substitution")
+# --------------------------------------------------------------------------- #
+
+def test_parse_formula():
+    from rl_matdesign.constraints.charge import parse_formula
+
+    assert parse_formula("") == {}
+    assert parse_formula(None) == {}
+    assert parse_formula("O2H1") == {"O": 2.0, "H": 1.0}
+
+
+_LABO3_POSCAR = """LaFeO3 perovskite template (B-site = Fe placeholder)
+1.0
+3.9 0.0 0.0
+0.0 3.9 0.0
+0.0 0.0 3.9
+La Fe O
+1 1 3
+Direct
+0.0 0.0 0.0
+0.5 0.5 0.5
+0.5 0.5 0.0
+0.5 0.0 0.5
+0.0 0.5 0.5
+"""
+
+
+def test_template_scaffold(tmp_path):
+    pytest.importorskip("ase")
+    from rl_matdesign.constraints.charge import template_scaffold
+
+    p = tmp_path / "LaBO3.POSCAR"
+    p.write_text(_LABO3_POSCAR)
+    fixed, n_sites = template_scaffold(str(p), "Fe")
+    assert fixed == {"La": 1.0, "O": 3.0}
+    assert n_sites == 1
+
+
+# --------------------------------------------------------------------------- #
+# SMACTChargeFilter — final-step pruning on the whole picked formula
+# --------------------------------------------------------------------------- #
+
+def _oh(idx: int, n: int) -> tuple:
+    v = [0.0] * n
+    v[idx] = 1.0
+    return tuple(v)
+
+
+def test_filter_prunes_non_neutral_final_pick():
+    from rl_matdesign.constraints.smact_filter import SMACTChargeFilter
+
+    # Oxide-style: agent has picked Fe2 (units), final step adds O. species_set
+    # includes O (agent-picked). Candidate O amounts: 0..3 units.
+    species = ["Fe", "O"]
+    ratio = ["0", "1", "2", "3"]
+    allowed_units = [0, 1, 2, 3]
+    filt = SMACTChargeFilter()  # no scaffold: working picks ARE the formula
+
+    actions = [(_oh(1, 2), _oh(u, 4)) for u in range(4)]  # elem=O, comp=u
+    kept = filt.filter_actions(
+        actions=actions,
+        units_map={"Fe": 2},
+        steps_left=0,
+        allowed_units=allowed_units,
+        possible_sums_by_k=[],
+        species_set=species,
+        fraction_set=ratio,
+    )
+    kept_units = {int(c.index(1.0)) for _, c in kept}
+    assert 3 in kept_units        # Fe2O3 neutral -> kept
+    assert 1 not in kept_units    # Fe2O1 non-neutral -> pruned
+
+
+def test_filter_noop_before_final_step():
+    from rl_matdesign.constraints.smact_filter import SMACTChargeFilter
+
+    filt = SMACTChargeFilter()
+    actions = [(_oh(0, 2), _oh(1, 4))]
+    out = filt.filter_actions(
+        actions=actions, units_map={}, steps_left=2, allowed_units=[0, 1, 2, 3],
+        possible_sums_by_k=[], species_set=["Fe", "O"], fraction_set=["0", "1", "2", "3"],
+    )
+    assert out == actions  # untouched away from the final step
+
+
+# --------------------------------------------------------------------------- #
+# Registry wiring + generation gating switch
+# --------------------------------------------------------------------------- #
+
+def test_make_smact_charge_with_scaffold_formula():
+    from rl_matdesign.registry import resolve_constraint
+
+    filt = resolve_constraint("smact_charge", {"scaffold_formula": "O2H1", "mode": "filter"})
+    assert filt.scaffold_per_fu == {"O": 2.0, "H": 1.0}
+    assert filt.mode == "filter"
+
+
+def test_smact_charge_mode_detection():
+    from rl_matdesign.registry import smact_charge_mode
+
+    assert smact_charge_mode({}) is None                       # not configured
+    assert smact_charge_mode({"constraint_filter": "last_step_element"}) is None
+    assert smact_charge_mode({"constraint_filter": "smact_charge"}) == "flag"
+    assert smact_charge_mode(
+        {"constraint_filter": "smact_charge", "mode": "filter"}
+    ) == "filter"
+    assert smact_charge_mode(
+        {"filters": [
+            {"constraint_filter": "last_step_element", "required_elements": ["O"]},
+            {"constraint_filter": "smact_charge", "mode": "filter"},
+        ]}
+    ) == "filter"

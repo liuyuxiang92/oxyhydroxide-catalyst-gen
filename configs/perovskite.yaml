@@ -43,14 +43,16 @@ fraction_set:
 anion_formula: ""
 n_components: 5
 
-# Optional: SMACT charge neutrality for B-site (La is fixed as 3+, O as 2-).
-# For LaBO3 the B-site cation(s) must collectively provide +3 charge.
-# Uncomment to enable hard constraint enforcement during generation.
+# Optional: SMACT charge neutrality on the WHOLE LaBO3 formula. La and O are NOT
+# agent-picked (they live in the template), so point the filter at the template as
+# the "scaffold" — the whole formula before B-site substitution. The filter parses
+# {La:1, O:3} + the B-site count from the POSCAR, merges the agent's B-site picks,
+# and tests amount-weighted neutrality. No `stoich` guess needed.
+# Uncomment to enable (in-episode pruning + a `charge_ok` column in generated.csv):
 # constraint_filter: smact_charge
-# smact_anions:
-#   - symbol: "O"
-#     charge: -2
-#     stoich: 3.0      # 3 O per formula unit → cations must provide +6 total
+# scaffold_poscar: data/perovskite/LaBO3.POSCAR
+# scaffold_site_symbol: "Fe"   # same placeholder as the builder's site_symbol
+# mode: flag                   # or `filter` to drop non-neutral candidates
 constraint_filter: null   # Default: no constraint; DPA reward handles stability
 
 # ---- Reward (one structure objective -> single-objective, auto-detected) ----

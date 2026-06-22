@@ -1207,6 +1207,7 @@ def generate_candidates(
     gen_temperature: float = 1.0,
     k: float = 1.0,
     max_attempts: Optional[int] = None,
+    charge_check_mode: Optional[str] = None,
 ) -> List[dict]:
     """Generate candidate compositions in dual-phase mode.
 
@@ -1341,6 +1342,20 @@ def generate_candidates(
                 phase_ok, phase_label = predictor.check_phase(comp)
                 row["primary_ok"] = bool(phase_ok)
                 row["primary_label"] = phase_label or ""
+
+            # Post-episode charge-neutrality on the WHOLE built formula (covers
+            # builder-derived anions, e.g. SSE). Gated entirely by config: when
+            # charge_check_mode is None nothing here runs (no smact import).
+            if charge_check_mode is not None:
+                from .constraints.charge import charge_neutral
+
+                try:
+                    charge_ok = charge_neutral(formula)
+                except Exception:
+                    charge_ok = True  # lenient: never crash generation on a bad parse
+                if charge_check_mode == "filter" and not charge_ok:
+                    continue  # drop non-neutral candidate from the output
+                row["charge_ok"] = bool(charge_ok)
 
             rows.append(row)
             accepted += 1

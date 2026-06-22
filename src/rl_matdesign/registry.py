@@ -122,15 +122,58 @@ def resolve_builder(kind: str, cfg: dict, *, seed: Optional[int] = None):
 
 def _make_smact_charge(cfg: dict, **_):
     from .constraints.smact_filter import SMACTChargeFilter
-    if "smact_anions" in cfg:
-        anions = cfg["smact_anions"]
-    else:
+
+    # Scaffold = "the whole formula before substitution" (host + fixed anions that
+    # are NOT optimised by the agent). Three ways to supply it, in priority order:
+    #   1. scaffold_poscar (+ scaffold_site_symbol) — parse a template (perovskite).
+    #   2. scaffold_formula / anion_formula — an explicit per-f.u. fixed formula.
+    #   3. none — the agent picks every element itself (oxides).
+    scaffold_fixed = None
+    n_sites = 1
+    if cfg.get("scaffold_poscar"):
+        from .constraints.charge import template_scaffold
+
+        site_symbol = cfg.get("scaffold_site_symbol", cfg.get("site_symbol", "X"))
+        scaffold_fixed, n_sites = template_scaffold(cfg["scaffold_poscar"], site_symbol)
+    elif cfg.get("scaffold_formula") or cfg.get("anion_formula"):
+        from .constraints.charge import parse_formula
+
+        scaffold_fixed = parse_formula(cfg.get("scaffold_formula") or cfg.get("anion_formula"))
+
+    # Deprecated explicit anion list (old oxide configs) — passed through for
+    # backward compatibility; the filter ignores anions the agent picks itself.
+    anions = cfg.get("smact_anions")
+    if anions is None and any(
+        k in cfg for k in ("smact_anion", "smact_anion_charge", "smact_anion_stoich")
+    ):
         anions = [{
             "symbol": cfg.get("smact_anion", "O"),
             "charge": int(cfg.get("smact_anion_charge", -2)),
             "stoich": float(cfg.get("smact_anion_stoich", 1.5)),
         }]
-    return SMACTChargeFilter(anions=anions)
+
+    return SMACTChargeFilter(
+        anions=anions,
+        scaffold_fixed=scaffold_fixed,
+        scaffold_n_sites=n_sites,
+        mode=str(cfg.get("mode", "flag")),
+    )
+
+
+def smact_charge_mode(cfg: dict) -> Optional[str]:
+    """Return the smact_charge generation mode ('flag'|'filter') if configured, else None.
+
+    The single switch for charge checking: scanning the config for a ``smact_charge``
+    constraint (flat ``constraint_filter`` or inside a ``filters:`` chain). When absent,
+    the post-episode validation in ``generate_candidates`` does nothing (no smact import,
+    no ``charge_ok`` column).
+    """
+    if cfg.get("constraint_filter") == "smact_charge":
+        return str(cfg.get("mode", "flag"))
+    for f in cfg.get("filters") or []:
+        if isinstance(f, dict) and f.get("constraint_filter") == "smact_charge":
+            return str(f.get("mode", "flag"))
+    return None
 
 
 def _make_last_step_element(cfg: dict, **_):
