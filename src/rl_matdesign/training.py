@@ -1263,6 +1263,8 @@ def generate_candidates(
         accepted = 0
         attempted = 0
         dup_rejected = 0
+        charge_rejected = 0
+        seen_nonneutral: set = set()  # unique non-neutral keys, for diagnosis
         max_att = max_attempts or (n_target * 20)
 
         pbar = tqdm(total=n_target, desc=f"Generate [{purpose}]")
@@ -1293,6 +1295,39 @@ def generate_candidates(
             if comp_key in seen_comp_keys:
                 dup_rejected += 1
                 continue
+
+            # Charge-neutrality gate on the WHOLE built formula (covers
+            # builder-derived anions, e.g. SSE). Gated entirely by config: when
+            # charge_filter is False this block is skipped (no smact import).
+            # Checked BEFORE adding to seen_comp_keys and BEFORE the (cached)
+            # predictor call so that (a) repeated non-neutral picks are counted
+            # as charge rejections — not duplicates — giving a clean diagnosis of
+            # why yield is low, and (b) we don't pay a predictor call on a
+            # candidate we're about to drop.
+            if charge_filter:
+                from .constraints.charge import charge_neutral
+
+                # Prefer the builder's full composition label (host/derived
+                # anions the env never sees); fall back to the env pick-only
+                # formula. Same resolution as the accepted-row path below.
+                _formula = env.terminal_formula
+                _cf = getattr(predictor, "composition_formula", None)
+                if callable(_cf):
+                    try:
+                        _full = _cf(comp)
+                        if _full:
+                            _formula = _full
+                    except Exception:
+                        pass
+                try:
+                    neutral = charge_neutral(_formula)
+                except Exception:
+                    neutral = True  # lenient: never crash generation on a bad parse
+                if not neutral:
+                    seen_nonneutral.add(comp_key)
+                    charge_rejected += 1
+                    continue
+
             seen_comp_keys.add(comp_key)
 
             # Reward from the episode (env.reward_fn already called in env.step).
@@ -1343,31 +1378,35 @@ def generate_candidates(
                 row["primary_ok"] = bool(phase_ok)
                 row["primary_label"] = phase_label or ""
 
-            # Post-episode charge-neutrality on the WHOLE built formula (covers
-            # builder-derived anions, e.g. SSE). Gated entirely by config: when
-            # charge_filter is False nothing here runs (no smact import). When on,
-            # non-neutral candidates are dropped so generated.csv holds only
-            # charge-neutral compositions.
-            if charge_filter:
-                from .constraints.charge import charge_neutral
-
-                try:
-                    neutral = charge_neutral(formula)
-                except Exception:
-                    neutral = True  # lenient: never crash generation on a bad parse
-                if not neutral:
-                    continue  # drop non-neutral candidate from the output
-
             rows.append(row)
             accepted += 1
             pbar.update(1)
-            pbar.set_postfix(attempts=attempted, dups=dup_rejected)
+            pbar.set_postfix(
+                attempts=attempted, dups=dup_rejected, charge=charge_rejected
+            )
 
         pbar.close()
         rate = accepted / max(attempted, 1)
         print(
             f"[INFO] Generated {accepted}/{n_target} {purpose} candidates "
-            f"({attempted} attempts, {dup_rejected} dups, rate={rate:.3f})"
+            f"({attempted} attempts, {dup_rejected} dups, "
+            f"{charge_rejected} non-neutral [{len(seen_nonneutral)} unique], "
+            f"rate={rate:.3f})"
         )
+        if charge_filter and accepted < n_target:
+            print(
+                f"[INFO] Shortfall diagnosis [{purpose}]: of {attempted} attempts, "
+                f"{dup_rejected} were duplicates and {charge_rejected} were "
+                f"non-charge-neutral. "
+                + (
+                    "Duplication dominates: the policy keeps proposing the same "
+                    "few compositions (raise gen_temperature / gen_epsilon, or the "
+                    "neutral subspace may simply be small)."
+                    if dup_rejected >= charge_rejected
+                    else "Charge-neutrality dominates: most proposed compositions "
+                    "aren't neutral on the 0.05 grid (the neutral subspace is the "
+                    "bottleneck, not exploration)."
+                )
+            )
 
     return rows

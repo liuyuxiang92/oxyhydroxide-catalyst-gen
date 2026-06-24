@@ -812,3 +812,19 @@ is configured, generation ALWAYS drops non-charge-neutral candidates (no charge_
 column, no "flag" mode). smact_charge_mode() -> smact_charge_enabled() returning bool;
 generate_candidates param charge_check_mode -> charge_filter (bool). Removing mode from
 filter + registry + configs (oxides ×3, perovskite) + tests.
+
+### EARS — Progress (2026-06-24 10:03)
+<!-- concepts: generation-diversity, charge-neutrality-filter, rl-candidate-generation -->
+Diagnosing low oxide-generation yield (calcine ~88, sinter_calcine ~23 vs 1000
+target). Found a miscounting bug in `generate_candidates` (training.py): a
+non-charge-neutral composition was added to `seen_comp_keys` BEFORE the
+post-episode charge check, so every later identical pick was logged as a
+"duplicate" rather than a charge rejection — making it impossible to tell
+whether low yield is driven by policy collapse (dups) or by a small neutral
+subspace (charge). Fix: moved the charge_neutral gate ahead of dedup + the
+(cached) predictor call, added a separate `charge_rejected` counter and a
+`seen_nonneutral` set, and the INFO line now prints dups vs non-neutral [unique]
+plus a one-line shortfall diagnosis when accepted < target. Side benefit: no
+predictor call wasted on candidates about to be dropped. Not yet decided whether
+the true cause is duplication or neutrality — the instrumentation will reveal it
+on the user's next run.
