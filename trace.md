@@ -841,3 +841,22 @@ reconstructs a network for checkpoint loading must read architecture
 hyperparameters from the SAME cfg source as the training path — never rely on
 class defaults. Worth auditing the PG/policy --only-generate branch for the same
 class of bug (PolicyNet/ValueNet hidden_dim).
+
+### EARS — Progress (2026-06-24 14:57)
+<!-- concepts: composition-canonicalization, charge-neutrality, integer-ratio-env -->
+User reported generated_calcine_1000.csv / generated_sinter_calcine_800.csv
+still contained "non-neutral / unbalanced" formulas after the smact_charge
+fix. Diagnosis: NOT a charge bug — every flagged formula returns True from
+`charge_neutral()`. Root cause is a formula-STRING artifact in
+`env_integer.terminal_formula`, which returned `self.state` raw (literal
+concatenation of each pick). The integer_ratio env allows (a) digit "0" picks
+and (b) repeating an already-picked element, so raw strings carried phantom
+`Ba0`/`Mn0` (822/1000 calcine, 652/799 sinter_calcine) and duplicate symbols
+like `Bi4…Bi3` (133/1000, 143/799). pymatgen merges/drops these on parse, so
+dedup + charge check saw the clean composition; only the CSV string was dirty.
+Verified cleaning is lossless (0 comp_key collisions). Also surfaced: only
+~10% of "5-component" rows are genuinely 5 distinct elements (most are 3-4 via
+zero digits). Fix so far: `terminal_formula` now emits canonical merged/zero-
+dropped string. Open design fork (asking user): whether to also FORBID zero
+digits / duplicate elements at the env level (changes semantics; "0" is
+intentional in the reference design) vs. just clean the display.

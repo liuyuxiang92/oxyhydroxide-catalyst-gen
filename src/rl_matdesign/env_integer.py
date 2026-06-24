@@ -114,10 +114,21 @@ class IntegerRatioEnv:
 
     @property
     def terminal_formula(self) -> str:
-        """Raw empirical formula string built so far (non-empty only at the terminal step)."""
+        """Canonical empirical formula at the terminal step (empty before it).
+
+        Built from the merged integer digits rather than the raw pick string, so
+        duplicate element picks are summed (``Bi4`` + ``Bi3`` -> ``Bi7``) and
+        zero-amount picks are dropped (``Ba0`` disappears). This matches the
+        composition that the predictor and the charge-neutrality check actually
+        see — both route the string through ``pymatgen.Composition``, which
+        merges/drops anyway — so ``generated.csv`` no longer shows phantom
+        ``X0`` elements or repeated symbols that look non-neutral/unbalanced to
+        external checkers.
+        """
         if self.counter != self.n_components:
             return ""
-        return self.state
+        digits = self.cation_digits()
+        return "".join(f"{el}{n}" for el, n in digits.items() if n > 0)
 
     def cation_digits(self) -> Dict[str, int]:
         """Return running sum of integer digits per element in the current state."""
