@@ -828,3 +828,16 @@ plus a one-line shortfall diagnosis when accepted < target. Side benefit: no
 predictor call wasted on candidates about to be dropped. Not yet decided whether
 the true cause is duplication or neutrality — the instrumentation will reveal it
 on the user's next run.
+
+### EARS — Progress (2026-06-24 10:47)
+<!-- concepts: only-generate-path, qnet-architecture-mismatch, checkpoint-loading -->
+Found a real bug in scripts/run_experiment.py --only-generate: it rebuilt
+QRegressor WITHOUT passing hidden_dim, so it used the class default (128),
+while the training path resolves _hidden = cfg.get("dqn_hidden_dim", 256)
+(default 256). A model trained at 256 then failed to load at generation with a
+state_dict size mismatch (256 vs 128). Fix: resolve _hidden the same way in the
+--only-generate branch and pass it to QRegressor. Lesson: any path that
+reconstructs a network for checkpoint loading must read architecture
+hyperparameters from the SAME cfg source as the training path — never rely on
+class defaults. Worth auditing the PG/policy --only-generate branch for the same
+class of bug (PolicyNet/ValueNet hidden_dim).

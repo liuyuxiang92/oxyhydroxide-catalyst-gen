@@ -352,9 +352,14 @@ def main() -> None:
             scaler = joblib.load(scaler_path)
             state_dim = int(getattr(scaler, "n_features_in_", scaler.mean_.shape[0]))
             from rl_matdesign.model import QRegressor
+            # Must match the architecture used at train time. Resolve hidden_dim
+            # from the SAME cfg default (256) as the training path below;
+            # otherwise the QRegressor class default (128) is used and the saved
+            # state_dict fails to load with a size mismatch.
+            _hidden = int(cfg.get("dqn_hidden_dim", 256))
             qnet = QRegressor(
                 state_dim=state_dim, step_dim=step_dim,
-                elem_dim=elem_dim, frac_dim=1,
+                elem_dim=elem_dim, frac_dim=1, hidden_dim=_hidden,
             ).to(device)
             _raw = torch.load(qnet_path, map_location=device)
             qnet.load_state_dict(_raw["qnet_state"] if isinstance(_raw, dict) and "qnet_state" in _raw else _raw)
