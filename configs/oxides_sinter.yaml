@@ -121,6 +121,15 @@ filters:
     nonzero_ratio_at_last: true
     reserve_for_last: true
   - constraint_filter: smact_charge
+  # 3. pauling_en — charge neutrality AND Pauling electronegativity (smact).
+  #    Separate on/off flag: delete this line to drop the EN check (neutrality
+  #    via smact_charge stays). pauling_en is strictly stronger than smact_charge.
+  - constraint_filter: pauling_en
+
+# Apply in-episode constraint filters during TRAINING (default true = current
+# behavior). Set false (or use --no-constrain-training) to skip them while
+# training; generation stays fully constrained. For A/B comparison.
+constrain_training: true
 
 # ---- Reward (one property -> single-objective, auto-detected) ----
 k: 0.0   # no std penalty; reward = direction * mean = -T

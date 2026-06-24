@@ -5,12 +5,19 @@ This is the single source of truth shared by the in-episode
 post-episode validation in :func:`rl_matdesign.training.generate_candidates`.
 
 The check answers: *given these exact element amounts, does some assignment of
-one common oxidation state per element make the **amount-weighted** charge sum
-zero?* This is fundamentally different from ``smact.screening.smact_validity``,
-which asks whether *some* integer stoichiometry could be neutral — we already
-have a fixed stoichiometry (the agent picked it), so we must weight by the real
-amounts. Oxidation states come from pymatgen's conservative
-``common_oxidation_states`` (see :func:`_oxidation_states`); smact is not required.
+one oxidation state per element make the **amount-weighted** charge sum zero?*
+(and, with ``use_pauling``, is that same assignment electronegativity-sensible?).
+This is fundamentally different from ``smact.screening.smact_validity``, which
+asks whether *some* integer stoichiometry could be neutral — we already have a
+fixed stoichiometry (the agent picked it), so we must weight by the real amounts.
+
+Oxidation states and Pauling electronegativities come from **smact**
+(``smact.Element(sym).oxidation_states`` / ``.pauling_eneg``), matching the
+reference benchmark ``RL_materials_generation/constraints/checkers.py``. We use
+smact's *tables* with our own amount-weighted search rather than
+``smact.neutral_ratios`` (whose return type drifts across smact versions). smact
+is therefore required whenever a ``smact_charge`` / ``pauling_en`` constraint is
+configured (the imports stay lazy so other scenarios don't need it).
 
 Why weighted (and why this fixes the old filter)
 ------------------------------------------------
@@ -28,6 +35,7 @@ from __future__ import annotations
 
 import itertools
 import warnings
+from functools import lru_cache
 from typing import Dict, List, Optional, Tuple, Union
 
 # Guard against pathological state-space blow-ups (distinct elements each with
@@ -60,24 +68,36 @@ def _integerize(amounts: Dict[str, float]) -> Dict[str, int]:
     return {str(el): int(round(n)) for el, n in int_comp.get_el_amt_dict().items() if n > 0}
 
 
-def _oxidation_states(symbol: str) -> List[int]:
-    """Common oxidation states for *symbol* (pymatgen).
+@lru_cache(maxsize=None)
+def _oxidation_states(symbol: str) -> Tuple[int, ...]:
+    """Oxidation states for *symbol* from **smact** (the broad table).
 
-    We deliberately use pymatgen's ``common_oxidation_states`` (the conservative,
-    experimentally-typical set, e.g. Fe -> {2, 3}) rather than the broad SMACT
-    table (Fe -> {1..6}). The broad set makes almost any stoichiometry "balance"
-    via an exotic state, which defeats the purpose of the neutrality screen. Falls
-    back to the full ``oxidation_states`` only when no common states exist (e.g.
-    noble gases). Returns ``[]`` for unknown symbols (caller -> be lenient).
+    Uses ``smact.Element(symbol).oxidation_states`` — the same table the reference
+    benchmark (``RL_materials_generation/constraints/checkers.py``) validates
+    against, so our in-episode/post-episode neutrality matches it. Cached because
+    constructing a smact ``Element`` reads data files and the in-episode filter
+    queries this per candidate action. Returns ``()`` for unknown symbols / no
+    data (caller -> be lenient).
     """
     try:
-        from pymatgen.core import Element
+        import smact
 
-        el = Element(symbol)
-        states = list(el.common_oxidation_states) or list(el.oxidation_states)
-        return [int(s) for s in states]
+        states = smact.Element(symbol).oxidation_states
+        return tuple(int(s) for s in states) if states else ()
     except Exception:
-        return []
+        return ()
+
+
+@lru_cache(maxsize=None)
+def _pauling_eneg(symbol: str) -> Optional[float]:
+    """Pauling electronegativity for *symbol* from smact, or ``None`` if missing."""
+    try:
+        import smact
+
+        eneg = smact.Element(symbol).pauling_eneg
+        return float(eneg) if eneg is not None else None
+    except Exception:
+        return None
 
 
 def charge_neutral(
@@ -85,6 +105,7 @@ def charge_neutral(
     *,
     tol: float = 0.5,
     allow_alloys: bool = True,
+    use_pauling: bool = False,
 ) -> bool:
     """Return True if *comp* admits a charge-neutral oxidation-state assignment.
 
@@ -100,6 +121,11 @@ def charge_neutral(
     allow_alloys:
         When True, an all-metal composition is considered valid (an alloy), as in
         ``smact.screening.smact_validity(include_alloys=True)``.
+    use_pauling:
+        When True, a charge-neutral assignment must **also** pass smact's Pauling
+        electronegativity test (``smact.screening.pauling_test``) to count as
+        valid — mirrors the reference ``check_electronegativity`` (neutral AND
+        electronegativity-sensible). Missing electronegativity data -> lenient.
     """
     amounts = _to_amounts(comp)
     if not amounts:
@@ -130,6 +156,10 @@ def charge_neutral(
     if any(not s for s in state_lists):
         return True
 
+    # Pauling test needs electronegativities; missing data -> skip the EN check.
+    enegs = [_pauling_eneg(e) for e in elems] if use_pauling else None
+    do_pauling = use_pauling and enegs is not None and None not in enegs
+
     n_combos = 1
     for s in state_lists:
         n_combos *= len(s)
@@ -143,7 +173,16 @@ def charge_neutral(
 
     for combo in itertools.product(*state_lists):
         if abs(sum(c * o for c, o in zip(counts, combo))) <= tol:
-            return True
+            if not do_pauling:
+                return True
+            try:
+                from smact.screening import pauling_test
+
+                if pauling_test(combo, enegs, elems):
+                    return True
+            except Exception:
+                # Can't evaluate EN -> fall back to neutrality-only acceptance.
+                return True
     return False
 
 

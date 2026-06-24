@@ -1,3 +1,9 @@
+# A/B VARIANT (auto-derived from oxides_calcine.yaml): constrain_training=false.
+# Identical to the base config EXCEPT in-episode constraint filters are
+# SKIPPED during training (generation stays fully constrained + post-episode
+# drop). Use this vs the base to test whether in-episode training shaping
+# helps. Regenerate this file if the base changes.
+#
 # Oxide CALCINATION-temperature RL benchmark (dual-method).
 # 80-element oxide env + auto-chained constraints. Carries BOTH the a2c (pg_*)
 # and DQN (dqn_*) hyperparameter blocks; choose the method at runtime via
@@ -129,7 +135,7 @@ filters:
 # Apply in-episode constraint filters during TRAINING (default true = current
 # behavior). Set false (or use --no-constrain-training) to skip them while
 # training; generation stays fully constrained. For A/B comparison.
-constrain_training: true
+constrain_training: false
 
 # ---- Reward (one property -> single-objective, auto-detected) ----
 k: 0.0   # no std penalty; reward = direction * mean = -T

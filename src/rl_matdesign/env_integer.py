@@ -88,6 +88,10 @@ class IntegerRatioEnv:
         self.reward_fn = reward_fn or (lambda _formula: 0.0)
         self.state_featurizer = state_featurizer
         self.phase_filter = phase_filter
+        # When False, ``allowed_actions`` skips ``phase_filter`` — lets callers
+        # disable in-episode constraint pruning during training only (the
+        # ``constrain_training`` flag) while keeping it on for generation.
+        self.constraints_enabled = True
 
         # Sentinel: ``_total_units = None`` tells ``_comp_key`` to fall back to
         # a formula-string key (patched in ``training.py``).
@@ -196,7 +200,7 @@ class IntegerRatioEnv:
                 comp_oh = tuple(encode_choice(d, self.ratio_set).tolist())
                 actions.append((elem_oh, comp_oh))
 
-        if self.phase_filter is not None:
+        if self.phase_filter is not None and self.constraints_enabled:
             actions = self.phase_filter.filter_actions(
                 actions=actions,
                 units_map=self._digits_map,

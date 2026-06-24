@@ -106,6 +106,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-gen-attempts", type=int, default=None,
                    dest="max_gen_attempts",
                    help="Max generation attempts before stopping. Default: 10 × num_gen_eps.")
+    p.add_argument("--constrain-training", dest="constrain_training",
+                   action="store_true", default=None,
+                   help="Apply in-episode constraint filters during training "
+                        "(overrides config; default behavior).")
+    p.add_argument("--no-constrain-training", dest="constrain_training",
+                   action="store_false",
+                   help="Skip in-episode constraint filters during training "
+                        "(generation stays constrained). For A/B comparison.")
     return p.parse_args()
 
 
@@ -303,6 +311,18 @@ def main() -> None:
     if env_type != "multi_group":
         env.phase_filter = build_constraint_filter(flat_cfg, env=env)
 
+    # Whether to apply in-episode constraint filters DURING TRAINING. Generation
+    # always stays constrained (+ post-episode drop). CLI overrides the config;
+    # default True = current behavior. Used for the constrain_training A/B test.
+    constrain_training = (
+        args.constrain_training
+        if args.constrain_training is not None
+        else bool(cfg.get("constrain_training", True))
+    )
+    if not constrain_training:
+        print("[INFO] constrain_training=False: in-episode constraint filtering is "
+              "DISABLED during training (generation still constrained).", flush=True)
+
     step_dim     = env.n_components
     fraction_set = list(env.fraction_set)
 
@@ -477,6 +497,7 @@ def main() -> None:
             _aug_K = args.dqn_augment_permutations
             if _aug_K is None:
                 _aug_K = int(cfg.get("dqn_augment_permutations", 0))
+            env.constraints_enabled = constrain_training  # toggle in-episode filter for training
             qnet, scaler, train_rows = train_dqn_online(
                 env=env,
                 elem_feats_scaled=elem_feats_scaled,
@@ -506,13 +527,14 @@ def main() -> None:
         if not args.skip_generation:
             np.random.seed(gen_seed)
             random.seed(gen_seed)
+            env.constraints_enabled = True  # generation is always constrained
             _n_exploit = int(cfg.get("num_gen_eps", 200))
             _max_attempts = (
                 args.max_gen_attempts
                 if args.max_gen_attempts is not None
                 else int(cfg.get("max_gen_attempts", 10 * _n_exploit))
             )
-            from rl_matdesign.registry import smact_charge_enabled
+            from rl_matdesign.registry import charge_check_enabled, charge_use_pauling
             gen_rows = generate_candidates(
                 env=env, predictor=predictor, scaler=scaler, device=device,
                 qnet=qnet,
@@ -525,7 +547,8 @@ def main() -> None:
                 gen_epsilon=gen_epsilon_gen,
                 k=float(cfg.get("k", 1.0)),
                 max_attempts=_max_attempts,
-                charge_filter=smact_charge_enabled(cfg),
+                charge_filter=charge_check_enabled(cfg),
+                charge_use_pauling=charge_use_pauling(cfg),
             )
             for r in gen_rows:
                 metrics.log(phase="generate", **r)
@@ -627,6 +650,7 @@ def main() -> None:
             value_net = ValueNet(state_dim=state_dim, step_dim=step_dim).to(device) if method == "a2c" else None
 
         if not args.only_generate:
+            env.constraints_enabled = constrain_training  # toggle in-episode filter for training
             train_rows = train_pg(
                 policy=policy,
                 value_net=value_net,
@@ -655,13 +679,14 @@ def main() -> None:
         if not args.skip_generation:
             np.random.seed(gen_seed)
             random.seed(gen_seed)
+            env.constraints_enabled = True  # generation is always constrained
             _n_exploit = int(cfg.get("num_gen_eps", 200))
             _max_attempts = (
                 args.max_gen_attempts
                 if args.max_gen_attempts is not None
                 else int(cfg.get("max_gen_attempts", 10 * _n_exploit))
             )
-            from rl_matdesign.registry import smact_charge_enabled
+            from rl_matdesign.registry import charge_check_enabled, charge_use_pauling
             gen_rows = generate_candidates(
                 env=env, predictor=predictor, scaler=scaler, device=device,
                 policy=policy,
@@ -674,7 +699,8 @@ def main() -> None:
                 gen_epsilon=gen_epsilon_gen,
                 k=float(cfg.get("k", 1.0)),
                 max_attempts=_max_attempts,
-                charge_filter=smact_charge_enabled(cfg),
+                charge_filter=charge_check_enabled(cfg),
+                charge_use_pauling=charge_use_pauling(cfg),
             )
             for r in gen_rows:
                 metrics.log(phase="generate", **r)

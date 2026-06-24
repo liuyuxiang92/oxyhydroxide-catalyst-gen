@@ -139,6 +139,8 @@ class CompositionEnv:
         self.reward_fn = reward_fn or (lambda _formula: 0.0)
         self.state_featurizer = state_featurizer
         self.phase_filter = phase_filter
+        # See IntegerRatioEnv: skip phase_filter when disabled (constrain_training).
+        self.constraints_enabled = True
         self.episode_style = episode_style
 
         if episode_style not in ("element_then_amount", "fixed_order_amount"):
@@ -428,7 +430,7 @@ class CompositionEnv:
                 comp_oh = tuple(encode_choice(comp, self.fraction_set).tolist())
                 actions.append((elem_oh, comp_oh))
 
-        if self.phase_filter is not None:
+        if self.phase_filter is not None and self.constraints_enabled:
             kw = dict(
                 actions=actions,
                 units_map=self._units_map,

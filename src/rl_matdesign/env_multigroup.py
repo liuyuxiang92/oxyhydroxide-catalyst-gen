@@ -162,6 +162,7 @@ class CategoricalGroup:
         self.slot_element: Dict[str, str] = {name: el for name, el, _v in self.slots}
         self.n_components: int = len(self.slots)
         self.phase_filter = phase_filter
+        self.constraints_enabled = True  # see IntegerRatioEnv (constrain_training)
 
         # Per-slot value <-> numeric-code maps; codes go into fraction_set.
         self._slot_codes: List[List[Tuple[Any, str]]] = []
@@ -202,7 +203,7 @@ class CategoricalGroup:
             )
             for _v, code in self._slot_codes[self.counter]
         ]
-        if self.phase_filter is not None:
+        if self.phase_filter is not None and self.constraints_enabled:
             kw = dict(
                 actions=actions, units_map={},
                 steps_left=self.n_components - self.counter - 1,
@@ -266,6 +267,7 @@ class IndependentDopantsGroup:
         self._total_units = int(total_units)
         self.state_featurizer = state_featurizer
         self.phase_filter = phase_filter
+        self.constraints_enabled = True  # see IntegerRatioEnv (constrain_training)
         if not self.species_set:
             raise ValueError("independent group needs a non-empty 'species_set'.")
         if not self.fraction_set:
@@ -288,7 +290,7 @@ class IndependentDopantsGroup:
             for el in self.species_set
             for comp in self.fraction_set
         ]
-        if self.phase_filter is not None:
+        if self.phase_filter is not None and self.constraints_enabled:
             kw = dict(
                 actions=actions, units_map={},
                 steps_left=self.n_components - self.counter - 1,
@@ -346,6 +348,7 @@ class MultiGroupEnv:
         self.reward_fn = reward_fn or (lambda _groups: 0.0)
         self.state_featurizer = state_featurizer
         self.episode_style = "multi_group"
+        self._constraints_enabled = True
 
         # Build one inner CompositionEnv per group. Inner reward is a no-op — this
         # env computes the single terminal reward over all groups.
@@ -409,6 +412,18 @@ class MultiGroupEnv:
     # ------------------------------------------------------------------
     # Episode lifecycle
     # ------------------------------------------------------------------
+
+    @property
+    def constraints_enabled(self) -> bool:
+        return self._constraints_enabled
+
+    @constraints_enabled.setter
+    def constraints_enabled(self, value: bool) -> None:
+        # Propagate to every inner group env so the constrain_training toggle on
+        # the wrapper disables/enables all sub-filters at once.
+        self._constraints_enabled = bool(value)
+        for inner in self._inners:
+            inner.constraints_enabled = bool(value)
 
     def initialize(self) -> None:
         for inner in self._inners:

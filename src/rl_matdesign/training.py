@@ -1208,6 +1208,7 @@ def generate_candidates(
     k: float = 1.0,
     max_attempts: Optional[int] = None,
     charge_filter: bool = False,
+    charge_use_pauling: bool = False,
 ) -> List[dict]:
     """Generate candidate compositions in dual-phase mode.
 
@@ -1320,7 +1321,7 @@ def generate_candidates(
                     except Exception:
                         pass
                 try:
-                    neutral = charge_neutral(_formula)
+                    neutral = charge_neutral(_formula, use_pauling=charge_use_pauling)
                 except Exception:
                     neutral = True  # lenient: never crash generation on a bad parse
                 if not neutral:

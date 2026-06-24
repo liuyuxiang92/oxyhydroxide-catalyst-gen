@@ -40,34 +40,48 @@
 - name: charge_neutrality_whole_formula
   scope: src/rl_matdesign/constraints/charge.py, smact_filter.py, registry.py, training.py
   decision: |
-    `smact_charge` now checks AMOUNT-WEIGHTED neutrality on the WHOLE formula
-    (cations + every anion at real amounts), not the old unweighted cation-set
-    screen against an assumed anion stoich. Single utility `charge_neutral()`
+    `smact_charge` checks AMOUNT-WEIGHTED neutrality on the WHOLE formula
+    (cations + every anion at real amounts). Single utility `charge_neutral()`
     (constraints/charge.py) integerizes the composition and searches for one
     oxidation state per element with Σ amount·ox == 0. Used by both the
-    in-episode SMACTChargeFilter (final step) and a post-episode `charge_ok`
-    column in generate_candidates.
+    in-episode SMACTChargeFilter (final step) and the post-episode drop in
+    generate_candidates.
+    UPDATE (2026-06-24): oxidation states now come from **smact**
+    (`smact.Element(sym).oxidation_states`), NOT pymatgen `common_oxidation_states`
+    — see reversal below. Added a sibling `pauling_en` constraint
+    (ElectronegativityFilter) that requires neutral AND smact `pauling_test`.
   rationale: |
     1. Old filter ignored amounts, used a hardcoded anion stoich (1.5), and
        double-counted O for oxides — it wasn't actually checking neutrality.
-    2. Must use pymatgen `common_oxidation_states` (Fe→{2,3}), NOT smact's broad
-       `.oxidation_states` (Fe→{1..6}) which makes almost anything "balance".
-       smact is therefore NOT required anymore.
-    3. NOT smact_validity: that asks "is SOME stoichiometry neutral"; we have a
+    2. NOT smact_validity: that asks "is SOME stoichiometry neutral"; we have a
        FIXED stoichiometry (agent picked it) so must weight by real amounts.
-    4. "Whole formula before substitution" (host+anions for builder scenarios) is
+    3. "Whole formula before substitution" (host+anions for builder scenarios) is
        surfaced via a `scaffold_formula` / `scaffold_poscar`+`scaffold_site_symbol`
-       param INSIDE the smact_charge block (the chain passes only the filter's own
-       sub-config, so it can't read top-level anion_formula/poscar).
+       param INSIDE the filter block.
+  reversal_2026_06_24: |
+    Backend switched from pymatgen `common_oxidation_states` (narrow, Fe→{2,3}) to
+    smact's broad `.oxidation_states` (Fe→{1..6}). WHY: the reference benchmark
+    `RL_materials_generation/compare_methods.py` scores neutrality/EN with smact,
+    and our pymatgen-narrow check disagreed with it. User chose benchmark parity
+    over the stricter screen (questions answered 2026-06-24: "Global smact, drop
+    pymatgen" + "Also add Pauling EN"). Implementation note: we use smact's TABLES
+    with our own amount-weighted search, NOT `smact.neutral_ratios` — its return
+    type drifted (smact 4.0.0 list vs older 2-tuple), which is exactly the bug that
+    broke compare_methods.py. The earlier "smact 88%" gap turned out to be a
+    gcd-reduction artifact in the benchmark (smact only yields gcd-reduced ratios),
+    fixed separately by gcd-reducing in compare_methods.py + emitting canonical
+    (zero-dropped, dup-merged) terminal_formula. Tradeoff: smact's broad table is
+    looser (balances more via exotic states), so the in-episode neutrality screen
+    shapes the policy less; the opt-in `pauling_en` EN check restores some
+    plausibility. smact is now a real (lazy-imported) dependency.
   consequences: |
-    Single opt-in switch = presence of `smact_charge` in YAML
-    (registry.smact_charge_enabled -> bool drives both in-episode pruning and the
-    post-episode drop; absent → nothing runs, no smact import). No `mode` knob and
-    no charge_ok column: when enabled, generation ALWAYS drops non-neutral
-    candidates so generated.csv holds only neutral compositions (user preference,
-    2026-06-22). Deprecated `smact_anions` still honored but anions in species_set
-    (agent-picked, e.g. oxide O) excluded from scaffold to avoid double-counting.
-    Oxide configs dropped their smact_anions block.
+    Post-episode drop switch = `charge_check_enabled(cfg)` = smact_charge OR
+    pauling_en present (registry). `charge_use_pauling(cfg)` = pauling_en present.
+    When enabled, generation drops any non-neutral (and, with pauling_en, non-EN)
+    candidate. EN is a SEPARATE filter (`constraint_filter: pauling_en`,
+    ElectronegativityFilter subclass) so it toggles independently. Deprecated
+    `smact_anions` still honored. Also added `constrain_training` flag + env
+    `constraints_enabled` toggle to A/B test in-episode filtering during training.
   reference: plan temporal-questing-dragonfly; tests/test_charge_neutrality.py
   status: confirmed
 

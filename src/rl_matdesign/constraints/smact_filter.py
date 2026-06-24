@@ -113,10 +113,12 @@ class SMACTChargeFilter(ConstraintFilter):
         allow_alloys: bool = True,
         tol: float = 0.5,
         threshold: int = 1,
+        use_pauling: bool = False,
     ) -> None:
         self.allow_alloys = bool(allow_alloys)
         self.tol = float(tol)
         self.threshold = threshold
+        self.use_pauling = bool(use_pauling)
 
         # Explicit scaffold (from scaffold_formula / scaffold_poscar / anion_formula),
         # normalized to one working formula unit.
@@ -182,7 +184,12 @@ class SMACTChargeFilter(ConstraintFilter):
             elem = decode_one_hot(elem_oh, species_set)
             cand_units = float(allowed_units[int(np.asarray(comp_oh).argmax())])
             full = self._full_composition(elem, cand_units, units_map, scaffold)
-            if charge_neutral(full, tol=self.tol, allow_alloys=self.allow_alloys):
+            if charge_neutral(
+                full,
+                tol=self.tol,
+                allow_alloys=self.allow_alloys,
+                use_pauling=self.use_pauling,
+            ):
                 filtered.append((elem_oh, comp_oh))
 
         # Safety: never strand the agent with zero legal actions.
@@ -219,3 +226,19 @@ class SMACTChargeFilter(ConstraintFilter):
         for e, c in scaffold.items():
             full[e] = full.get(e, 0.0) + c
         return full
+
+
+class ElectronegativityFilter(SMACTChargeFilter):
+    """Charge-neutrality **plus** Pauling electronegativity (smact ``pauling_test``).
+
+    Identical whole-formula machinery as :class:`SMACTChargeFilter`, but defaults
+    ``use_pauling=True`` so a final pick survives only if the complete composition
+    admits an assignment that is *both* charge-neutral *and* electronegativity-
+    sensible. This is the ``pauling_en`` constraint — a separate on/off flag that
+    can be chained after (or used instead of) ``smact_charge``. Because it is
+    strictly stronger than neutrality, using it alone already guarantees neutral
+    output.
+    """
+
+    def __init__(self, *args: Any, use_pauling: bool = True, **kwargs: Any) -> None:
+        super().__init__(*args, use_pauling=use_pauling, **kwargs)

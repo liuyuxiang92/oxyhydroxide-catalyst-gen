@@ -158,9 +158,10 @@ def test_chain_child_missing_constraint_filter_key_raises():
 
 
 def test_oxide_yaml_round_trip_auto_chains():
-    """The shipped oxide configs carry a two-entry `filters:` list and should
+    """The shipped oxide configs carry a three-entry `filters:` list and should
     auto-resolve to a ChainConstraintFilter (LastStepElementFilter +
-    SMACTChargeFilter) WITHOUT an explicit `constraint_filter: chain`."""
+    SMACTChargeFilter + ElectronegativityFilter) WITHOUT an explicit
+    `constraint_filter: chain`."""
     pytest.importorskip("smact")  # SMACT-dependent test
 
     import yaml
@@ -171,12 +172,12 @@ def test_oxide_yaml_round_trip_auto_chains():
     for name in ("oxides_sinter.yaml", "oxides_calcine.yaml"):
         cfg = yaml.safe_load((repo / "configs" / name).read_text())
         assert "constraint_filter" not in cfg, name      # auto-detected from filters
-        assert isinstance(cfg["filters"], list) and len(cfg["filters"]) == 2, name
+        assert isinstance(cfg["filters"], list) and len(cfg["filters"]) == 3, name
         chain = build_constraints(cfg, env=None)
         child_types = [type(c).__name__ for c in chain.children]
-        assert child_types == ["LastStepElementFilter", "SMACTChargeFilter"], (
-            f"{name}: unexpected child types {child_types}"
-        )
+        assert child_types == [
+            "LastStepElementFilter", "SMACTChargeFilter", "ElectronegativityFilter"
+        ], f"{name}: unexpected child types {child_types}"
 
 
 # --------------------------------------------------------------------------- #

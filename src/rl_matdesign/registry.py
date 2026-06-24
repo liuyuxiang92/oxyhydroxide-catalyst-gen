@@ -120,14 +120,16 @@ def resolve_builder(kind: str, cfg: dict, *, seed: Optional[int] = None):
 # Built-in constraint factories
 # ---------------------------------------------------------------------------
 
-def _make_smact_charge(cfg: dict, **_):
-    from .constraints.smact_filter import SMACTChargeFilter
+def _resolve_scaffold(cfg: dict):
+    """Resolve ``(scaffold_fixed, n_sites, anions)`` shared by the smact_charge and
+    pauling_en factories (so the two never diverge).
 
-    # Scaffold = "the whole formula before substitution" (host + fixed anions that
-    # are NOT optimised by the agent). Three ways to supply it, in priority order:
-    #   1. scaffold_poscar (+ scaffold_site_symbol) — parse a template (perovskite).
-    #   2. scaffold_formula / anion_formula — an explicit per-f.u. fixed formula.
-    #   3. none — the agent picks every element itself (oxides).
+    Scaffold = "the whole formula before substitution" (host + fixed anions that
+    are NOT optimised by the agent). Three ways to supply it, in priority order:
+      1. scaffold_poscar (+ scaffold_site_symbol) — parse a template (perovskite).
+      2. scaffold_formula / anion_formula — an explicit per-f.u. fixed formula.
+      3. none — the agent picks every element itself (oxides).
+    """
     scaffold_fixed = None
     n_sites = 1
     if cfg.get("scaffold_poscar"):
@@ -151,7 +153,13 @@ def _make_smact_charge(cfg: dict, **_):
             "charge": int(cfg.get("smact_anion_charge", -2)),
             "stoich": float(cfg.get("smact_anion_stoich", 1.5)),
         }]
+    return scaffold_fixed, n_sites, anions
 
+
+def _make_smact_charge(cfg: dict, **_):
+    from .constraints.smact_filter import SMACTChargeFilter
+
+    scaffold_fixed, n_sites, anions = _resolve_scaffold(cfg)
     return SMACTChargeFilter(
         anions=anions,
         scaffold_fixed=scaffold_fixed,
@@ -159,20 +167,48 @@ def _make_smact_charge(cfg: dict, **_):
     )
 
 
-def smact_charge_enabled(cfg: dict) -> bool:
-    """True when a ``smact_charge`` constraint is configured (flat or in a chain).
+def _make_pauling_en(cfg: dict, **_):
+    """``pauling_en`` — charge neutrality AND Pauling electronegativity (smact)."""
+    from .constraints.smact_filter import ElectronegativityFilter
 
-    The single switch for charge checking. When True, generation drops any
-    candidate whose whole formula is not charge-neutral; when False the
-    post-episode validation in ``generate_candidates`` does nothing (no smact
-    import, output unchanged).
-    """
-    if cfg.get("constraint_filter") == "smact_charge":
+    scaffold_fixed, n_sites, anions = _resolve_scaffold(cfg)
+    return ElectronegativityFilter(
+        anions=anions,
+        scaffold_fixed=scaffold_fixed,
+        scaffold_n_sites=n_sites,
+    )
+
+
+def _has_constraint(cfg: dict, name: str) -> bool:
+    if cfg.get("constraint_filter") == name:
         return True
     return any(
-        isinstance(f, dict) and f.get("constraint_filter") == "smact_charge"
+        isinstance(f, dict) and f.get("constraint_filter") == name
         for f in cfg.get("filters") or []
     )
+
+
+def smact_charge_enabled(cfg: dict) -> bool:
+    """True when a ``smact_charge`` constraint is configured (flat or in a chain)."""
+    return _has_constraint(cfg, "smact_charge")
+
+
+def pauling_en_enabled(cfg: dict) -> bool:
+    """True when a ``pauling_en`` constraint is configured (flat or in a chain)."""
+    return _has_constraint(cfg, "pauling_en")
+
+
+def charge_check_enabled(cfg: dict) -> bool:
+    """Single switch for the post-episode generation drop: True if either a
+    ``smact_charge`` or ``pauling_en`` constraint is configured. When False the
+    post-episode validation in ``generate_candidates`` does nothing (no smact
+    import, output unchanged)."""
+    return smact_charge_enabled(cfg) or pauling_en_enabled(cfg)
+
+
+def charge_use_pauling(cfg: dict) -> bool:
+    """True when the post-episode drop should also enforce Pauling EN (``pauling_en``)."""
+    return pauling_en_enabled(cfg)
 
 
 def _make_last_step_element(cfg: dict, **_):
@@ -226,6 +262,7 @@ def _make_sum_bound(cfg: dict, *, env=None, **_):
 
 CONSTRAINTS: Dict[str, Factory] = {
     "smact_charge":      _make_smact_charge,
+    "pauling_en":        _make_pauling_en,
     "last_step_element": _make_last_step_element,
     "ooh_phase":         _make_ooh_phase,
     "phase_pattern":     _make_phase_pattern,

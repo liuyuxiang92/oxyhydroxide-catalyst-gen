@@ -7,6 +7,10 @@ pymatgen
 matminer
 pandas
 
+# Charge-neutrality / electronegativity backend (smact_charge / pauling_en filters).
+# Imported lazily — only needed when a config enables those constraints.
+smact
+
 # Optional for hyperparameter optimization (scripts/hpo.py):
 optuna>=3.0
 

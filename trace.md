@@ -860,3 +860,45 @@ zero digits). Fix so far: `terminal_formula` now emits canonical merged/zero-
 dropped string. Open design fork (asking user): whether to also FORBID zero
 digits / duplicate elements at the env level (changes semantics; "0" is
 intentional in the reference design) vs. just clean the display.
+
+### EARS — Progress (2026-06-24 16:16)
+<!-- concepts: charge-neutrality, smact-backend, constraint-filters -->
+Implementing approved plan (temporal-questing-dragonfly): switch charge-neutrality
+backend from pymatgen common_oxidation_states to real smact tables, add Pauling EN
+as a separate `pauling_en` constraint filter, and add a `constrain_training` flag to
+A/B test whether in-episode (final-step) constraint filtering during training helps.
+Key discoveries this session: (1) the earlier "smact 60-89%" benchmark gap was a
+gcd artifact (smact.neutral_ratios only yields gcd-reduced ratios; benchmark demanded
+exact non-reduced amount match) — fixed compare_methods.py by gcd-reducing first.
+(2) Avoiding smact.neutral_ratios entirely (return type drifted 2-tuple->list in
+smact 4.0.0); using stable .oxidation_states/.pauling_eneg + pauling_test with our
+own amount-weighted search. (3) Neutrality surface is a single function chain:
+_oxidation_states -> charge_neutral -> {smact_filter in-episode, training.py
+post-episode}. Started with charge.py docstring + about to rewrite _oxidation_states.
+
+### EARS — Progress (2026-06-24 16:27)
+<!-- concepts: smact-backend, constraint-filters, config-wiring -->
+Implementation progressing well. Done: charge.py (smact oxidation tables + pauling,
+lru_cached, use_pauling param), smact_filter.py (use_pauling + ElectronegativityFilter
+subclass), registry.py (pauling_en filter, _resolve_scaffold shared helper,
+charge_check_enabled/charge_use_pauling/pauling_en_enabled), env toggle
+(constraints_enabled on all 3 env files incl. propagating property on MultiGroupEnv),
+training.py generate_candidates (charge_use_pauling forwarded), run_experiment.py
+(both gen call sites use charge_check_enabled+charge_use_pauling; constrain_training
+CLI flag + env.constraints_enabled toggled around train calls, reset True before gen).
+Now editing oxide configs (add pauling_en filter + constrain_training: true) and will
+create *_no_train_filter.yaml A/B variants, add smact to requirements, update
+decisions.yaml, then re-baseline tests + dead-code grep + run pytest/check_invariance.
+
+### EARS — Progress (2026-06-24 16:40)
+<!-- concepts: smact-backend, testing, constraint-chains -->
+Implementation complete + verified. All charge/EN/registry/env-toggle tests pass
+(54 in the focused set; full suite green except ONE pre-existing failure:
+test_lips_integration::test_lips_masking_and_charge_neutrality, which fails
+identically on the pre-change commit dd2ec95 — confirmed via git stash, so it's
+unrelated to this work). Fixed test_chain round-trip to expect the new 3-entry
+oxide chain (last_step_element + smact_charge + pauling_en). check_invariance on
+oxides_calcine PASSES (featurizer/predictor order-invariant with smact backend).
+Verified constrain_training toggle directly: final-step allowed actions ON=7 vs
+OFF=780. Dead-code grep clean (common_oxidation_states gone from src). Ready to
+commit.
