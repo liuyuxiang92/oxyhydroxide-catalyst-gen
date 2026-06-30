@@ -11,8 +11,12 @@ pandas
 # Imported lazily — only needed when a config enables those constraints.
 smact
 
-# Optional for hyperparameter optimization (scripts/hpo.py):
+# Optional for hyperparameter optimization (scripts/hpo.py) and the BO baseline
+# (scripts/baselines/run_bo.py):
 optuna>=3.0
+
+# Optional for the GA baseline (scripts/baselines/run_ga.py):
+deap
 
 # Optional for DeepMD mode:
 # ase

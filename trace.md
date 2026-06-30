@@ -968,3 +968,69 @@ fine but worth confirming on a smoke run.
 - Consolidated to ONE script (scripts/compare_dopant_combos.py): self-contained,
   no cross-script imports. Outputs form-annotated combo membership + RL max
   reward. Deleted decode_dopant_form.py and combo_membership_forms.py.
+
+### EARS — Progress (2026-06-30 14:50)
+<!-- concepts: ood-benchmarking, data-hygiene, materials-featurization -->
+Starting a property-model OOD benchmark (separate from the RL work): compare the
+fine-tuned DPA3 overpotential model against classical (RF/XGB/LGBM/GPR/KRR/SVR/Ridge)
+and neural-composition (CrabNet/Roost/ElemNet) baselines on in-distribution vs
+out-of-distribution splits, reproducing the DP active-learning loop indexing
+(round k trains on iter<=k-1, OOD = iter==k candidates).
+
+Data hygiene findings in data/:
+- measurements.csv is CRLF, headerless, 3 cols (formula, overpotential_mV, iter-N), 398 rows.
+- Mixed anion suffix: only 79/398 formulas end in O2H1; rest are cation-only.
+- iter-0/iter-1 train+valid already have O2H1; iter-2..5 train+valid are entirely cation-only.
+- 3 rows have spaces inside the formula (e.g. "Ni0.70 Fe0.15 ..."); the Ho (Holmium)
+  H triggered a false "contains O/H" match — not a real suffix.
+Wrote scripts/baselines/fix_o2h1_suffix.py to strip whitespace + idempotently append O2H1.
+
+### EARS — Progress (2026-06-30 15:10)
+<!-- concepts: ood-benchmarking, experiment-design, active-learning-indexing -->
+First classical-baseline run done (RF/XGB/LGBM/GPR/KRR/SVR/Ridge/ElasticNet) vs DP reference.
+Key finding (honest): on OOD MAE, classical baselines MATCH or BEAT the fine-tuned DPA3
+(SVR/GPR/ElasticNet best; tree ensembles collapse at round 1 = the classic story, but DP
+does NOT show an MAE advantage). KRR blew up on default gamma/alpha (needs tuning).
+Big gap: only have DP's 5 MAE points from the figure, not per-candidate predictions, so
+can't compute DP RMSE/Spearman/calibration yet (Spearman is likely where DP wins).
+
+Indexing correction from user: iterations renumbered to 1..6 (no iter-0). New spec:
+iter-k model trained on iter-k_train, in-dist MAE on iter-k_valid; OOD = iter-k model
+scored on iter-(k+1) candidates (measurements tagged iter-(k+1)), k=1..5. Updating data.py
+to drop the k-1 offset. Also: report each model on its own row (don't group XGB/RF/LGBM).
+
+### EARS — Progress (2026-06-30 15:22)
+<!-- concepts: ood-benchmarking, plotting, model-config -->
+Confirmed training is real & fast: 0.82s Magpie featurization (cached) + 11.4s for 48
+fits across 6 rounds (~0.24s/fit) — tiny data (~216-268 rows, ~150 feats), no GPU/structure.
+Bumped ElasticNet max_iter to 50000 (was hitting ConvergenceWarning at default 1000).
+Now building clean publication figures; KRR excluded from line plots (untuned, 232mV blowup
+crushes the y-axis).
+
+### EARS — Progress (2026-06-30 15:38)
+<!-- concepts: search-space-visualization, pca, phase-constraints -->
+Building PCA map of OOH search region vs measured iterations. Search region sampled
+faithfully: 5 distinct cations from ooh.yaml species_set, 0.05-0.80 grid summing to 1.0,
+kept iff check_primary_phase passes (the ooh_phase/any constraint). Core-biased rejection
+sampling for efficiency. Discovery: measurements.csv uses elements (Cr/Zn/Al/...) NOT in
+ooh.yaml species_set -> early iteration data partly lies OUTSIDE the configured RL search
+region (initial dataset is broader HEA-like; ooh.yaml = later Ni/Fe/Co+dopant search).
+PCA fit on grey region, iteration data projected in.
+
+### EARS — Progress (2026-06-30 15:57)
+<!-- concepts: search-space-enumeration, pca, combinatorics -->
+PCA grey cloud upgraded from 5k biased sample to exact enumeration. Full feasible OOH
+search region (ooh.yaml: 5 distinct cations, 0.05-0.80 grid sum=1, passing check_primary_phase)
+= exactly 739,900 compositions (counted in ~15s via core_total>=15 pruning). Enumerate-then-
+uniform-subsample (default 60k) for rendering since 740k featurization ~25min and scatter
+overplots. rasterized grey scatter, legend reports "N of 739,900".
+
+### EARS — Progress (2026-06-30 16:46)
+<!-- concepts: baselines, constraint-aware-search, code-reuse -->
+Adding BO (Optuna TPE) + comparison tooling and making the existing GA constraint-aware,
+to benchmark RL vs classical optimizers on sinter/calcine/combined/ooh (RL runs already done).
+Key decision: extract the env+reward+constraint construction block from run_experiment.main()
+into a reusable build_env(cfg, predictor) so baselines validate candidates via the SAME env
+(allowed_actions replay) rather than re-deriving constraint rules. The old GA only enforced
+distinct-elements + sum-to-20, so it produced oxide candidates with no O-last/charge-neutrality/
+Pauling-EN — an unfair comparison. Reward column is apples-to-apples across methods.

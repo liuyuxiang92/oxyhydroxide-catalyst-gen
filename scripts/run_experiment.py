@@ -185,40 +185,18 @@ def build_constraint_filter(cfg: dict, env=None):
     return build_constraints(cfg, env=env)
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+def build_env(cfg: dict, predictor):
+    """Build the env + reward_fn + constraint filter used by an experiment run.
 
-def main() -> None:
-    args = parse_args()
+    Single source of truth for the search space and constraints, shared by
+    ``main()`` and the baseline optimizers (``scripts/baselines/*``) so that
+    "valid candidate" means exactly the same thing for RL, BO, and GA.
 
-    if args.only_generate and args.resume_training:
-        raise SystemExit("--only-generate and --resume-training are mutually exclusive.")
-
-    cfg = load_config(args.config)
-
-    method = args.method or cfg.get("method", "a2c")
-    train_seed = args.train_seed if args.train_seed is not None else args.dp_seed
-    gen_seed   = args.gen_seed   if args.gen_seed   is not None else args.dp_seed
-
-    set_global_seed(train_seed, deterministic=(args.train_seed is not None))
-    os.makedirs(args.out, exist_ok=True)
-
-    run_config = {
-        "config_file": args.config, "method": method,
-        "dp_seed": args.dp_seed, "train_seed": train_seed, "gen_seed": gen_seed,
-        **cfg,
-    }
-    with open(os.path.join(args.out, "run_config.json"), "w") as f:
-        json.dump(run_config, f, indent=2)
-
-    device_str = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    device = torch.device(device_str)
-    print(f"[INFO] device={device}, method={method}, dp_seed={args.dp_seed}, "
-          f"train_seed={train_seed}, gen_seed={gen_seed}")
-
-    predictor = build_predictor(cfg, seed=args.dp_seed)
-
+    Returns ``(env, env_type, flat_cfg)`` where ``flat_cfg`` is ``cfg`` except
+    when a lone sum-to-1 group is collapsed to the flat ``CompositionEnv`` (then
+    the group's params are merged in). The returned env already has its
+    ``phase_filter`` attached (per-group for ``multi_group``).
+    """
     # Env routing. `env_type` is honored if set explicitly; otherwise a config
     # with `groups:` is `multi_group` and a flat config is `fraction`.
     #
@@ -310,6 +288,46 @@ def main() -> None:
     # (so the group's own constraint, e.g. host_complement, is preserved).
     if env_type != "multi_group":
         env.phase_filter = build_constraint_filter(flat_cfg, env=env)
+
+    return env, env_type, flat_cfg
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    args = parse_args()
+
+    if args.only_generate and args.resume_training:
+        raise SystemExit("--only-generate and --resume-training are mutually exclusive.")
+
+    cfg = load_config(args.config)
+
+    method = args.method or cfg.get("method", "a2c")
+    train_seed = args.train_seed if args.train_seed is not None else args.dp_seed
+    gen_seed   = args.gen_seed   if args.gen_seed   is not None else args.dp_seed
+
+    set_global_seed(train_seed, deterministic=(args.train_seed is not None))
+    os.makedirs(args.out, exist_ok=True)
+
+    run_config = {
+        "config_file": args.config, "method": method,
+        "dp_seed": args.dp_seed, "train_seed": train_seed, "gen_seed": gen_seed,
+        **cfg,
+    }
+    with open(os.path.join(args.out, "run_config.json"), "w") as f:
+        json.dump(run_config, f, indent=2)
+
+    device_str = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(device_str)
+    print(f"[INFO] device={device}, method={method}, dp_seed={args.dp_seed}, "
+          f"train_seed={train_seed}, gen_seed={gen_seed}")
+
+    predictor = build_predictor(cfg, seed=args.dp_seed)
+
+    # Build the env + reward_fn + constraint filter (shared with baselines).
+    env, env_type, flat_cfg = build_env(cfg, predictor)
 
     # Whether to apply in-episode constraint filters DURING TRAINING. Generation
     # always stays constrained (+ post-episode drop). CLI overrides the config;
