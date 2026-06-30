@@ -1,5 +1,15 @@
 # Trace: oxyhydroxide-catalyst-gen
 
+### EARS — Progress (2026-06-30 10:09)
+<!-- concepts: a2c, config-management -->
+Nothing new beyond the entry below — flipping `method: a2c` in the three copied configs (mechanical edits).
+
+## 2026-06-30 — A2C oxides configs for PGN comparison
+
+### EARS — Progress (2026-06-30 09:58)
+<!-- concepts: reinforcement-learning, a2c, config-management -->
+Creating `oxides_{sinter,calcine,sinter_calcine}_a2c.yaml` so A2C results can be compared against the reproduced PGN (stack-RNN) sinter/calcine/combined runs in deep-rl-inorganic/PGN. Discovery: the existing dqn-default oxides configs are ALREADY dual-method — their `pg_*` block was tuned to match the PGN reference (`pg_num_iters: 500` == `n_iterations`, `pg_batch_eps: 15` == `n_policy`, `pg_lr_actor: 0.001` == `lr`). So A2C was already runnable via `--method a2c`; the new files just flip the default to a2c and document the PGN mapping for convenience. Note PGN's reward is normalized `weight*norm(T)+(1-weight)*charge_EN` while our config uses raw `-T` with charge/EN as hard constraint filters — both minimize T, so generated sinter/calcine temperatures are the comparison metric.
+
 ## 2026-05-28 — QRegressor hidden_dim mismatch (reproducibility root cause)
 
 ### EARS — Progress (2026-05-28 12:06)
@@ -902,3 +912,59 @@ oxides_calcine PASSES (featurizer/predictor order-invariant with smact backend).
 Verified constrain_training toggle directly: final-step allowed actions ON=7 vs
 OFF=780. Dead-code grep clean (common_oxidation_states gone from src). Ready to
 commit.
+
+### EARS — Progress (2026-06-26 09:59)
+<!-- concepts: lips_sse-generation, candidate-ranking, multi-objective-csv -->
+Wrote scripts/rank_lips_candidates.py to post-process lips_sse generated.csv.
+Key facts learned: for the multi-objective lips_sse run the composite predictor
+path (use_per_obj_stats) emits per-objective columns
+obj_conductivity_mean/std + obj_stability_mean/std (no dp_std), set in
+training.generate_candidates. Script groups by FULL element set, keeps best row
+per combo, emits two rankings: by reward, and by literal metric
+(stab+stab_std)/(cond/cond_std). No generated.csv exists in the repo yet, so the
+script is untested against real output.
+
+## 2026-06-26 — lips_sse P_site per-dopant grid with 0.0 + no-0.01
+
+### EARS — Progress (2026-06-26 13:37)
+<!-- concepts: multi-group-env, constraint-filters, config-design -->
+User wanted P_site (independent, 2 dopants, combined 0.02–0.08) where each
+dopant is either ABSENT (0.0) or >=0.02, with the 0.01 rung removed. Achieved
+config-only: `amount` accepts an explicit list (not just {min,max,step}) via
+`_amounts_to_strs` (env_multigroup.py:54), so set
+`amount: [0.0, 0.02, ..., 0.08]`. The `sum_bound` filter already enforces the
+combined window from grid g_min/g_max, so g_min=0.0 lets one slot be 0.0 while
+forcing the pair into [0.02,0.08] (can't be both-zero). A 0.0 pick collapses to
+a single real dopant since terminal_comp_key drops zero-unit entries.
+Open question to flag: S_site O_a/O_b form choice for an absent (0.0) dopant is
+harmless (0 amount × form = 0) but semantically dangling — builder should be
+fine but worth confirming on a smoke run.
+
+### EARS — Session Start (2026-06-29 11:28)
+<!-- concepts: dopant-analysis, candidate-comparison, data-parsing -->
+- Task: Write code to compare unique doping-element combinations between our RL-generated candidates (regenerate_2000_ranked_by_metric.csv) and a baseline exploration method (sys.txt).
+- Why: User wants to know how the two generation methods differ in the chemical (dopant) space they cover.
+
+### EARS — Progress (2026-06-29 11:29)
+<!-- concepts: dopant-analysis, data-parsing -->
+- Wrote scripts/compare_dopant_combos.py. Reduces each candidate to a dopant
+  combination = frozenset of dopant element symbols.
+- RL CSV: parse `combo` column, subtract host/anion set {Li,P,S,O,Cl,Br,H}.
+- sys.txt: parse M1/M2 metal cells; strip "(S)/(O)" form tag and oxide formula,
+  take leading element symbol (SnO2(O)->Sn, Cr2O3(O)->Cr, "-"->absent).
+- Reports per-method counts + element freq + combo overlap/Jaccard head-to-head.
+
+### EARS — Progress (2026-06-29 11:42)
+<!-- concepts: dopant-form-decoding, config-masks -->
+- decode_dopant_form.py: form (metal/sulfide vs oxide) is recoverable from RL
+  formula via O = (oxide_valence/2)*amount; 0 O-mismatches over 542 rows.
+- Made decoder mask-aware: OXIDE_ONLY->oxide, METAL_ONLY(Ru)->metal forced;
+  only "both" elements solved against remaining O. Fixes mixed-row attribution
+  (the stray Ru-as-oxide artifact).
+- Next: per-element metal-vs-oxide comparison table, RL vs SYS, side by side.
+
+### EARS — Progress (2026-06-29 11:54)
+<!-- concepts: dopant-form-decoding, code-consolidation -->
+- Consolidated to ONE script (scripts/compare_dopant_combos.py): self-contained,
+  no cross-script imports. Outputs form-annotated combo membership + RL max
+  reward. Deleted decode_dopant_form.py and combo_membership_forms.py.

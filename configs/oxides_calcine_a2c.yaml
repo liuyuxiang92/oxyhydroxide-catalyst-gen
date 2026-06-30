@@ -1,0 +1,175 @@
+# Oxide CALCINATION-temperature RL benchmark (A2C default).
+# 80-element oxide env + auto-chained constraints. A2C counterpart of
+# oxides_calcine.yaml: identical env/reward/constraints, but defaults to the
+# policy-gradient method. The pg_* block mirrors the PGN reference
+# (deep-rl-inorganic/PGN/train_RL_models_hyperparameter.py): pg_num_iters=500
+# == n_iterations, pg_batch_eps=15 == n_policy, pg_lr_actor=0.001 == lr.
+# Use this to compare our A2C generation against the PGN (stack-RNN) calcine run.
+# The dqn_* block is still carried so --method dqn remains usable.
+#
+# Usage:
+#   python scripts/run_experiment.py --config configs/oxides_calcine_a2c.yaml \
+#       --out runs/oxides_calcine_a2c_s0 --train-seed 0
+#   # override back to DQN if desired:
+#   python scripts/run_experiment.py --config configs/oxides_calcine_a2c.yaml \
+#       --method dqn --out runs/oxides_calcine_dqn_s0 --train-seed 0
+
+
+# ---- Environment ----
+env_type: integer_ratio
+
+# 80-element set from RL_materials_generation/one_hot.py:18
+# (intersection of OQMD-formation-energy and RF-sintering-T training sets).
+species_set:
+  - O
+  - Te
+  - N
+  - B
+  - Tm
+  - Ga
+  - Hf
+  - Ca
+  - Al
+  - P
+  - Li
+  - S
+  - Cr
+  - Zr
+  - Ta
+  - Sn
+  - Au
+  - Hg
+  - Cd
+  - Mn
+  - Cs
+  - Pd
+  - Th
+  - K
+  - Ti
+  - Ag
+  - Zn
+  - W
+  - Ce
+  - Nd
+  - Sr
+  - Tl
+  - Cl
+  - Mg
+  - Pr
+  - Rb
+  - Pb
+  - Ru
+  - Ho
+  - Nb
+  - Mo
+  - C
+  - V
+  - Er
+  - Pt
+  - Fe
+  - Ir
+  - Sb
+  - Y
+  - Na
+  - Co
+  - Be
+  - In
+  - La
+  - U
+  - Pu
+  - As
+  - Sm
+  - Br
+  - Ni
+  - Eu
+  - Ba
+  - F
+  - Rh
+  - Yb
+  - Gd
+  - Os
+  - Lu
+  - Ge
+  - Cu
+  - H
+  - Sc
+  - Si
+  - Re
+  - Dy
+  - Bi
+  - Tb
+  - Se
+
+ratio_set: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+anion_formula: ""
+n_components: 5
+
+# Two stacked constraints (applied in list order at every step):
+#   1. last_step_element — force step 5 = O with a nonzero digit; reserve O
+#      for the last slot so steps 1-4 can't pick it (reference oxide rule).
+#   2. smact_charge      — at the final step, check that the WHOLE picked formula
+#      (4 cations + the agent-picked O, at their real amounts) admits a
+#      charge-neutral oxidation-state assignment (amount-weighted SMACT check).
+#      Because O is agent-picked here, no anion-stoichiometry assumption is
+#      needed — the old `smact_anions: stoich` is obsolete for oxides. (For
+#      scenarios where the anion is NOT agent-picked, set `scaffold_formula` or
+#      `scaffold_poscar`+`scaffold_site_symbol` on this filter instead.)
+#      When enabled, generation drops any candidate that isn't charge-neutral,
+#      so generated.csv contains only neutral compositions.
+#
+# Two filters in a list -> auto-chained in list order; no need to write
+# `constraint_filter: chain` (single-vs-chain is detected from `filters:`).
+filters:
+  - constraint_filter: last_step_element
+    required_elements: ["O"]
+    nonzero_ratio_at_last: true
+    reserve_for_last: true
+  - constraint_filter: smact_charge
+  # 3. pauling_en — charge neutrality AND Pauling electronegativity (smact).
+  #    Separate on/off flag: delete this line to drop the EN check (neutrality
+  #    via smact_charge stays). pauling_en is strictly stronger than smact_charge.
+  - constraint_filter: pauling_en
+
+# Apply in-episode constraint filters during TRAINING (default true = current
+# behavior). Set false (or use --no-constrain-training) to skip them while
+# training; generation stays fully constrained. For A/B comparison.
+constrain_training: true
+
+# ---- Reward (one property -> single-objective, auto-detected) ----
+k: 0.0   # no std penalty; reward = direction * mean = -T
+properties:
+  - name: calcine
+    predictor: rf_magpie
+    model: models/sinter_calcine/optimal_calcine_RF.joblib
+    direction: min        # minimize calcination temperature
+
+# ---- RL hyperparameters ----
+method: a2c
+pg_warmup_eps: 200
+pg_num_iters: 500
+pg_batch_eps: 15
+pg_lr_actor: 0.001
+pg_lr_critic: 0.001
+pg_entropy_coef: 0.01
+gen_temperature: 3.0
+gen_top_frac: 0.0
+gen_epsilon: 0.0
+gamma: 0.97           # PGN policy_gradient default (reinforcement.py:53)
+
+pg_repeat_penalty_coef: 0.1
+pg_repeat_penalty_shape: log
+
+# ---- Generation ----
+num_gen_eps: 1000          # 1000 final candidates per run (matches reference)
+max_gen_attempts: 100000   # cap generation attempts before stopping (CLI --max-gen-attempts overrides)
+
+# ---- DQN-specific (mirrors RL_materials_generation/oxides_driver.py where mappable) ----
+dqn_lr: 0.001              # our stable online-TD value; their lr 1e-2 suits MC full-batch, not bootstrapped TD
+dqn_batch_size: 256
+dqn_warmup_eps: 1000       # their 1000 random-init episodes
+dqn_num_train_eps: 50000   # their 500 iters x 100 eps/iter interaction budget
+dqn_buffer_size: 50000     # their deque(maxlen=50000)
+dqn_grad_steps_per_ep: 5
+dqn_target_update_freq: 100
+dqn_eps_anneal_eps: 30000  # their eps=0.99*0.99^iter reaches ~0.05 near iter ~295 (~29.5k eps)
+dqn_eps_min: 0.05
