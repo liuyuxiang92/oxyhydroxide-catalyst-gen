@@ -1034,3 +1034,28 @@ into a reusable build_env(cfg, predictor) so baselines validate candidates via t
 (allowed_actions replay) rather than re-deriving constraint rules. The old GA only enforced
 distinct-elements + sum-to-20, so it produced oxide candidates with no O-last/charge-neutrality/
 Pauling-EN — an unfair comparison. Reward column is apples-to-apples across methods.
+
+### EARS — Progress (2026-06-30 17:41)
+<!-- concepts: ood-candidate-selection, farthest-point-sampling, active-learning -->
+New ask: pick 20 OOD demonstration candidates to test DPA3 extrapolation. Wrote
+pick_ood_points.py: farthest-point sampling seeded by the measured set, in a 10-D PCA
+space fit on the search region. Greedily picks the region composition whose nearest
+known point (measured + already-picked) is maximally far. Candidate pool = 200k uniform
+subsample of the enumerated 739,900 region (balance of edge coverage vs ~7min featurize).
+Outputs ood_picks.csv (formula/PC1/PC2/dist/phase), pca_ood_picks.png, and caches
+pca_full_coords.npz for instant re-query (also serves the earlier 5-circle request).
+
+### EARS — Progress (2026-07-01 10:57)
+<!-- concepts: dqn-td-target, monte-carlo-return, ablation-design -->
+Implementing a removable `dqn_target_mode: bootstrap|mc` toggle to test whether our DQN's edge
+over the reference npj DQN comes from bootstrapping. Ours uses one-step TD (`r + γ·max Q_target`);
+the reference regresses to the fixed discounted MC return G (disc 0.9, no bootstrap). Since reward
+is terminal-only, `G_t = γ^(T-1-t)·R`. Kept all new logic behind comment fences + one helper
+(`_attach_mc_returns`) so it deletes cleanly after the comparison; bootstrap path left untouched.
+
+### EARS — Progress (2026-07-01 11:08)
+<!-- concepts: dqn-td-target, config-override, ablation-design -->
+Extending the mc-target comparison to the oxides sinter/calcine/sinter_calcine scenarios. Chose a
+CLI override `--dqn-target-mode {bootstrap,mc}` (mirrors the existing `--dqn-augment-permutations`
+cfg-override pattern) instead of duplicating the large 80-element configs — one flag covers every
+scenario, keeps it removable, and lets the same config drive both A/B arms.

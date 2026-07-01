@@ -103,6 +103,14 @@ def parse_args() -> argparse.Namespace:
                         "with a warning for REINFORCE/A2C (on-policy methods can't use "
                         "permuted trajectories). Default 0 (off). Overrides config "
                         "'dqn_augment_permutations'.")
+    # --- BEGIN mc-target experiment (removable) ---
+    p.add_argument("--dqn-target-mode", choices=["bootstrap", "mc"], default=None,
+                   dest="dqn_target_mode",
+                   help="DQN-only: regression target. 'bootstrap' (default) uses the one-step "
+                        "TD target r + gamma*max_a' Q_target(s',a'); 'mc' regresses to the fixed "
+                        "discounted Monte-Carlo return G (no bootstrap, matches the reference npj "
+                        "DQN). Overrides config 'dqn_target_mode'.")
+    # --- END mc-target experiment ---
     p.add_argument("--max-gen-attempts", type=int, default=None,
                    dest="max_gen_attempts",
                    help="Max generation attempts before stopping. Default: 10 × num_gen_eps.")
@@ -536,6 +544,13 @@ def main() -> None:
                 checkpoint_cfg=checkpoint_cfg,
                 resume_state=resume_state,
                 augment_permutations=_aug_K,
+                # --- BEGIN mc-target experiment (removable) ---
+                dqn_target_mode=(
+                    args.dqn_target_mode
+                    if args.dqn_target_mode is not None
+                    else str(cfg.get("dqn_target_mode", "bootstrap"))
+                ),
+                # --- END mc-target experiment ---
             )
             for r in train_rows:
                 metrics.log(**r)

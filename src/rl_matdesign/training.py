@@ -125,11 +125,29 @@ def _precompute_elem_features(
 # Replay buffer helpers (classical DQN)
 # ---------------------------------------------------------------------------
 
+# --- BEGIN mc-target experiment (removable) ---
+def _attach_mc_returns(rows: list, path: list, gamma: float) -> None:
+    """Attach the discounted Monte-Carlo return G to each buffer row in place.
+
+    Non-bootstrap regression target, used only when ``dqn_target_mode == 'mc'``
+    (mirrors the reference npj DQN). ``rows`` are in episode order, aligned 1:1
+    with ``path``. With a terminal-only reward this reduces to
+    ``G_t = gamma**(T-1-t) * R_terminal``; the backward recursion below stays
+    correct even if a config ever emits intermediate rewards.
+    """
+    G = 0.0
+    for k in reversed(range(len(path))):
+        G = float(path[k].reward) + gamma * G   # terminal step: G = reward
+        rows[k]["mc_return"] = G
+# --- END mc-target experiment ---
+
+
 def add_episode_to_buffer(
     path: list,
     buffer: collections.deque,
     elem_feats_scaled: np.ndarray,
     fraction_set: List[str],
+    gamma: float = 0.9,
 ) -> None:
     """Convert a completed episode path into buffer rows and append.
 
@@ -139,6 +157,7 @@ def add_episode_to_buffer(
     - ``next_allowed_idx``: list of (elem_idx, comp_idx) pairs for the next
       step, used to compute the max-Q bootstrap target.
     """
+    rows: List[dict] = []
     for k, step in enumerate(path):
         done = k == len(path) - 1
         next_step = path[k + 1] if not done else None
@@ -148,7 +167,7 @@ def add_episode_to_buffer(
                 next_allowed_idx.append(
                     (int(np.argmax(elem_oh)), int(np.argmax(comp_oh)))
                 )
-        buffer.append({
+        rows.append({
             "s_mat_raw":       np.asarray(step.state_material_features, dtype=float),
             "s_step":          np.asarray(step.state_step_onehot, dtype=float),
             "a_elem_idx":      int(np.argmax(step.action_elem_onehot)),
@@ -161,6 +180,10 @@ def add_episode_to_buffer(
             "next_allowed_idx": next_allowed_idx,
             "done":            done,
         })
+    # --- BEGIN mc-target experiment (removable) ---
+    _attach_mc_returns(rows, path, gamma)
+    # --- END mc-target experiment ---
+    buffer.extend(rows)
 
 
 def _row_fingerprint(row: dict) -> tuple:
@@ -405,13 +428,24 @@ def _dqn_gradient_step(
     loss_fn: torch.nn.Module,
     device: torch.device,
     gamma: float,
+    target_mode: str = "bootstrap",
 ) -> float:
-    """One DQN gradient step: SmoothL1(Q(s,a), TD-target)."""
-    y = [
-        _compute_td_target(r, target_net, s_mat_scaler, elem_feats_scaled,
-                           fraction_set, device, gamma)
-        for r in batch
-    ]
+    """One DQN gradient step: SmoothL1(Q(s,a), target).
+
+    ``target_mode='bootstrap'`` (default) uses the one-step TD target
+    ``r + gamma*max_a' Q_target(s',a')``. ``target_mode='mc'`` regresses to the
+    fixed discounted Monte-Carlo return stored on each row (no bootstrap).
+    """
+    # --- BEGIN mc-target experiment (removable) ---
+    if target_mode == "mc":
+        y = [float(r["mc_return"]) for r in batch]
+    else:
+    # --- END mc-target experiment ---
+        y = [
+            _compute_td_target(r, target_net, s_mat_scaler, elem_feats_scaled,
+                               fraction_set, device, gamma)
+            for r in batch
+        ]
     s_mat_b  = torch.tensor(
         s_mat_scaler.transform(np.asarray([r["s_mat_raw"] for r in batch], dtype=float)),
         dtype=torch.float32, device=device,
@@ -462,6 +496,7 @@ def train_dqn_online(
     checkpoint_cfg: Optional[dict] = None,
     resume_state: Optional[dict] = None,
     augment_permutations: int = 0,
+    dqn_target_mode: str = "bootstrap",
 ) -> Tuple[torch.nn.Module, StandardScaler, List[dict]]:
     """Classical online DQN with FIFO replay buffer and TD targets.
 
@@ -490,6 +525,23 @@ def train_dqn_online(
         dicts (phase="dqn_train").
     """
     from .model import QRegressor
+
+    # --- BEGIN mc-target experiment (removable) ---
+    if dqn_target_mode == "mc":
+        print(
+            "[INFO] DQN target_mode='mc': regressing to fixed discounted "
+            "Monte-Carlo returns (no bootstrap); target network and "
+            "dqn_target_update_freq are inert.",
+            flush=True,
+        )
+        if augment_permutations > 0:
+            raise ValueError(
+                "dqn_target_mode='mc' does not support permutation augmentation "
+                "(augment_permutations>0); the mc-return field is only attached on "
+                "the non-augmented path. Set dqn_augment_permutations=0 for the "
+                "mc comparison run."
+            )
+    # --- END mc-target experiment ---
 
     if resume_state is not None:
         scaler     = resume_state["scaler"]
@@ -527,7 +579,7 @@ def train_dqn_online(
                     K=augment_permutations,
                 )
             else:
-                add_episode_to_buffer(env.path, buffer, elem_feats_scaled, fraction_set)
+                add_episode_to_buffer(env.path, buffer, elem_feats_scaled, fraction_set, gamma=gamma)
             pbar.update(1)
         pbar.close()
 
@@ -598,7 +650,7 @@ def train_dqn_online(
                 K=augment_permutations,
             )
         else:
-            add_episode_to_buffer(env.path, buffer, elem_feats_scaled, fraction_set)
+            add_episode_to_buffer(env.path, buffer, elem_feats_scaled, fraction_set, gamma=gamma)
 
         # 2. Gradient steps.
         mean_loss = float("nan")
@@ -610,6 +662,7 @@ def train_dqn_online(
                 losses.append(_dqn_gradient_step(
                     qnet, _batch, target_net, scaler,
                     elem_feats_scaled, fraction_set, optimizer, loss_fn, device, gamma,
+                    target_mode=dqn_target_mode,
                 ))
             mean_loss = float(np.mean(losses))
 
