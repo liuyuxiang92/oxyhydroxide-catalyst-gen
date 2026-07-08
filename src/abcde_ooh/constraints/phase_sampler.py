@@ -18,6 +18,7 @@ composition can be completed into *any* of the listed phases.
 
 from __future__ import annotations
 
+import math
 from typing import Dict, Iterable, List, Sequence, Set, Tuple, Union
 
 
@@ -51,20 +52,26 @@ class PhaseActionFilter:
         self._possible_sums_by_k = possible_sums_by_k
         self._total_units = total_units
 
-        # Dopant budget: total non-primary units must be < 0.25*total = 5 units
-        # i.e. ≤ 4 units. With 5 elements each ≥1 unit on a 0.05 grid the
-        # primary group must use ≥ 16 units and the dopant group ≤ 4 units.
-        self._max_dopant_units: int = 4  # strictly < 5 units
+        # Phase thresholds are defined as *fractions* and derived from
+        # total_units so the chemistry is identical at any grid resolution.
+        #   - dopant budget: total non-primary units strictly < 0.25*total_units
+        #     → max allowed = ceil(0.25*total_units) - 1
+        #     (total=20 → 4, total=100 → 24; both mean "< 0.25")
+        #   - primary group must be ≥ 0.75*total_units
+        #     (total=20 → 15, total=100 → 75)
+        self._max_dopant_units: int = math.ceil(0.25 * total_units) - 1
+        self._primary_min_units: int = round(0.75 * total_units)
 
         # Pre-compute valid terminal (primary, dopant) unit allocations
+        pmin = self._primary_min_units
         self._valid_nife_pairs: List[Tuple[int, int]] = self._compute_binary_pairs(
-            lambda ni, fe: (ni + fe >= 15) and ((2 / 3) <= ni / (ni + fe) <= (3 / 4)) and (fe <= ni)
+            lambda ni, fe: (ni + fe >= pmin) and ((2 / 3) <= ni / (ni + fe) <= (3 / 4)) and (fe <= ni)
         )
         self._valid_cofe_pairs: List[Tuple[int, int]] = self._compute_binary_pairs(
-            lambda co, fe: (co + fe >= 15) and (fe <= co)
+            lambda co, fe: (co + fe >= pmin) and (fe <= co)
         )
         self._valid_nifeco_triples: List[Tuple[int, int, int]] = self._compute_ternary_triples(
-            lambda ni, fe, co: (ni + fe + co >= 15)
+            lambda ni, fe, co: (ni + fe + co >= pmin)
             and (fe <= max(ni, co))
         )
 
@@ -134,7 +141,7 @@ class PhaseActionFilter:
             elem_oh, comp_oh = action
             elem = decode_one_hot(elem_oh, species_set)
             comp_str = decode_one_hot(comp_oh, fraction_set)
-            cand_units = int(round(float(comp_str) * 20))
+            cand_units = int(round(float(comp_str) * self._total_units))
 
             # Build hypothetical units_map after this action
             new_map = dict(units_map)
@@ -190,9 +197,8 @@ class PhaseActionFilter:
     ) -> bool:
         """Can the partial composition be completed into a valid single-primary phase?
 
-        Rule: primary ≥ 15 units (≥0.75), all 4 others are dopants (≤4 total).
-        With 5 elements total, primary=16 and each of 4 dopants=1 is the only solution.
-        More precisely: primary ≥ 15, sum(others) ≤ 4.
+        Rule: primary ≥ _primary_min_units (≥0.75), all others are dopants
+        (≤ _max_dopant_units, i.e. < 0.25 total). Thresholds scale with total_units.
         """
         primary_units = units_map.get(primary, 0)
         other_units = sum(v for k, v in units_map.items() if k != primary)
@@ -216,7 +222,7 @@ class PhaseActionFilter:
         other_budget_remaining = self._max_dopant_units - other_units
 
         if primary_chosen:
-            if primary_units < 15:
+            if primary_units < self._primary_min_units:
                 return False
             # All remaining steps go to dopants
             n_dopants_to_add = n_to_add
@@ -232,7 +238,7 @@ class PhaseActionFilter:
             if n_dopants_to_add < 0:
                 return False
             for primary_add in self._allowed_units:
-                if primary_add < 15:
+                if primary_add < self._primary_min_units:
                     continue
                 dopant_budget = budget_left - primary_add
                 if dopant_budget < 0 or dopant_budget > other_budget_remaining:

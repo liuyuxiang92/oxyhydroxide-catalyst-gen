@@ -1059,3 +1059,82 @@ Extending the mc-target comparison to the oxides sinter/calcine/sinter_calcine s
 CLI override `--dqn-target-mode {bootstrap,mc}` (mirrors the existing `--dqn-augment-permutations`
 cfg-override pattern) instead of duplicating the large 80-element configs — one flag covers every
 scenario, keeps it removable, and lets the same config drive both A/B arms.
+
+### EARS — Progress (2026-07-02 13:18)
+<!-- concepts: method-comparison, reward-to-temperature, oxides-sinter-calcine -->
+Wrote scripts/baselines/compare_temperatures.py — temperature-axis analogue of the reference
+compare_all_methods.py, for RL vs GA vs BO on sinter/calcine/sinter_calcine. Key insight: all three
+methods score with the same reward engine (direction:min, k:0, weight:1, scale:1), so
+temperature = -reward uniformly (combined task reward = -(T_sinter+T_calcine) => bar = sum). No need
+for per-task obj_* columns; the baselines' generated.csv only has formula/reward/dp_mean/dp_std.
+CLI uses repeatable --run METHOD:TASK:PATH triples (robust to arbitrary run dir names).
+
+### EARS — Session Start (2026-07-06 11:11)
+<!-- concepts: baseline-comparison, plotting, rl-matdesign -->
+- Task: Plot a combined sinter/calcine/sinter_calcine × DQN/A2C/BO/GA reward comparison in one figure.
+- Why: User wants a single cross-scenario, cross-method comparison figure; current compare_methods.py only handles one scenario per call.
+
+### EARS — Progress (2026-07-06 11:17)
+<!-- concepts: baseline-comparison, plotting -->
+- Added scripts/baselines/compare_scenarios.py: cross-scenario grouped-bar
+  comparison (M scenarios x N methods in one figure). --run takes SCENARIO:METHOD:PATH.
+- Default bar metric = best reward, matching compare_methods.py's ax2 bar panel;
+  --metric {best,topk,mean} switches. Writes scenario_comparison_summary.csv (one
+  row per scenario x method) + scenario_comparison.png.
+- Note: sinter/calcine runs don't exist yet under runs/; script is data-agnostic,
+  user supplies paths once runs finish.
+
+### EARS — Progress (2026-07-06 17:34)
+<!-- concepts: design-space-visualization, env-sampling, pca, constraint-chains -->
+Building a GENERAL design-space PCA script (scripts/plot_design_space.py) for the
+oxides sinter/calcine/sinter_calcine scenarios (and any config). Grey = whole valid
+design space sampled by random rollouts through the real env + constraint chain
+(reused run_experiment.build_env with a DummyPredictor — only need env+constraints,
+not rewards). Verified: oxides_sinter env = integer_ratio, 78 species, digits 0-9,
+O reserved last, smact_charge + pauling_en; ~53ms/rollout (smact cost). Overlays one
+or more generated.csv (one color each), formula column auto-detected, projected into
+PCA fit on the design space. Next: simplify the messy header-detection in load_generated,
+then smoke-test end-to-end.
+
+### EARS — Progress (2026-07-06 17:47)
+<!-- concepts: design-space-visualization, constraint-filters, ux-defaults -->
+User clarified "whole design space" = full combinatorial space, not the SMACT/EN-valid
+subset. Added --chemical-checks flag (default OFF) to plot_design_space.py: default now
+strips smact_charge + pauling_en (keeps structural last_step_element / O-last) so grey
+background samples the WHOLE design space fast (~instant vs ~50ms/pt). Opt-in restores
+chemical validity filtering. Wiring the flag through main() next + re-test.
+
+### EARS — Progress (2026-07-07 17:23)
+<!-- concepts: design-space-plotting, sys-path-portability, env-typing -->
+Making `scripts/plot_design_space.py` work across all scenarios (ooh=fraction,
+lips_sse=multi_group, oxides_sinter/calcine=integer_ratio). Root cause of the
+user's `ModuleNotFoundError: run_experiment` was a copied-out script that
+couldn't see the repo's `src/` and `scripts/`. Two of three env types
+(fraction, multi_group) fall into the env-rollout branch that imports
+`run_experiment.{load_config,build_env}`; only integer_ratio uses the fast
+structural sampler. And `featurize_formula` is imported unconditionally, so the
+repo must always be importable. Replaced the fragile `parents[1]` assumption
+with `_find_repo_root()`: honors `--repo-root` / `$RL_MATDESIGN_REPO`, then
+walks up from `__file__` and CWD looking for src/rl_matdesign +
+scripts/run_experiment.py. Still need to add the `--repo-root` argparse arg.
+
+### EARS — Progress (2026-07-07 18:23)
+<!-- concepts: config-driven-resolution, phase-constraints, design-space-expansion -->
+- Task: make fraction-grid resolution fully YAML-driven so changing the step (e.g. OOH 0.05→0.01) needs no code edits, then add a finer OOH config to grow the design space ~10³×.
+- Key discovery: `phase_sampler.py` hardcoded the phase thresholds as integer units assuming `total_units=20` (literal `4` dopant budget, `15` primary min). A config-only `total_units` bump would silently corrupt chemistry (0.04/0.15 instead of 0.25/0.75). Root blocker to "YAML-only step changes".
+- Fix: derive `_max_dopant_units = ceil(0.25*total_units)-1` and `_primary_min_units = round(0.75*total_units)`; byte-identical at total=20. Registry now passes `total_units=env._total_units` (was defaulting to 20). Added `fraction_step` single-knob auto-grid in `run_experiment.py` (`_resolve_fraction_grid` / `_fractions_from_step`), opt-in so existing configs unchanged.
+- Insight for later: OOH reward is a *local* adsorption energy — 0.01 global composition changes may be invisible to the predictor, so nominal design-space growth (~10³×) overstates predictor-distinguishable gains. Finer grid = amount-tuning within known phases, not new chemistry.
+
+### EARS — Error→Fix (2026-07-08)
+<!-- concepts: phase-constraints, config-driven-resolution, forward-feasibility-pruning -->
+- Bug: at total_units=100 the ooh_phase filter walked episodes into dead ends
+  (e.g. `La0.15 Ni0.51 Dy0.14`: dopants=29 units > 24 budget) -> "No valid actions".
+- Root cause: THREE hardcoded `total_units=20` assumptions in phase_sampler.py, not
+  one. Beyond the threshold literals (4, 15), `filter_actions` line 144 did
+  `int(round(float(comp_str) * 20))` to convert a candidate fraction to units — at
+  tu=100 "0.14" became round(0.14*20)=3 units instead of 14, so forward-pruning
+  operated on corrupted unit values and let infeasible actions through.
+- Fix: `* 20` -> `* self._total_units`. Lesson: when de-hardcoding a resolution
+  constant, grep the WHOLE module for the magic number — thresholds AND unit
+  conversions. Verified: rollouts at 0.05 and 0.01 now give 0 structural/phase
+  invalids; fixed-element-set valid patterns 5 -> 12650 (~2500x).

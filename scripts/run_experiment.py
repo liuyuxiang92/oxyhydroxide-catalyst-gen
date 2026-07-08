@@ -278,14 +278,16 @@ def build_env(cfg: dict, predictor):
             built_groups.append(gspec)
         env = MultiGroupEnv(groups=built_groups, reward_fn=mg_reward_fn)
     else:
+        n_comp = int(flat_cfg.get("n_components", 5))
+        fraction_set, total_units = _resolve_fraction_grid(flat_cfg, n_comp)
         env = CompositionEnv(
             species_set=flat_cfg["species_set"],
-            fraction_set=flat_cfg.get("fraction_set", None) or _default_fractions(),
+            fraction_set=fraction_set,
             anion_formula=flat_cfg.get("anion_formula", ""),
-            n_components=int(flat_cfg.get("n_components", 5)),
+            n_components=n_comp,
             reward_fn=reward_fn,
             phase_filter=None,
-            total_units=int(flat_cfg.get("total_units", 20)),
+            total_units=total_units,
             element_bounds=flat_cfg.get("element_bounds"),
             episode_style=flat_cfg.get("episode_style", "element_then_amount"),
         )
@@ -774,6 +776,46 @@ def _default_fractions():
         "0.05", "0.10", "0.15", "0.20", "0.25", "0.30", "0.35",
         "0.40", "0.45", "0.50", "0.55", "0.60", "0.65", "0.70", "0.75", "0.80",
     ]
+
+
+def _fractions_from_step(step, total_units, n_components):
+    """Build a full fraction grid from a single step size.
+
+    Values run from one unit (``step``) up to the largest fraction a single
+    cation can take while still leaving ≥1 unit for each of the other
+    ``n_components - 1`` cations. Returned as strings matching the YAML style.
+    """
+    max_units = total_units - (n_components - 1)
+    max_units = max(1, min(max_units, total_units - 1))
+    ndec = max(2, len(f"{step}".split(".")[-1]))
+    return [f"{k * step:.{ndec}f}" for k in range(1, max_units + 1)]
+
+
+def _resolve_fraction_grid(cfg, n_components):
+    """Resolve ``(fraction_set, total_units)`` from config, precedence:
+
+    1. explicit ``fraction_set``  -> use as-is (``total_units`` from cfg / 20).
+    2. ``fraction_step``          -> derive ``total_units = round(1/step)`` and
+       auto-build the grid. This is the single knob for changing resolution.
+    3. neither                    -> today's default 0.05 grid, ``total_units`` 20.
+
+    Existing configs (no ``fraction_step``) are byte-identical to before.
+    """
+    explicit = cfg.get("fraction_set", None)
+    if explicit:
+        return list(explicit), int(cfg.get("total_units", 20))
+    step = cfg.get("fraction_step", None)
+    if step is not None:
+        step = float(step)
+        total_units = int(round(1.0 / step))
+        if "total_units" in cfg and int(cfg["total_units"]) != total_units:
+            raise ValueError(
+                f"Inconsistent config: fraction_step={step} implies "
+                f"total_units={total_units}, but total_units={cfg['total_units']} "
+                f"was also set. Drop total_units and keep fraction_step only."
+            )
+        return _fractions_from_step(step, total_units, n_components), total_units
+    return _default_fractions(), int(cfg.get("total_units", 20))
 
 
 def _default_digits():

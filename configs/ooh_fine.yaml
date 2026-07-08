@@ -1,0 +1,104 @@
+# OOH catalyst configuration — fine 0.01 fraction grid
+#
+# Same chemistry as ooh.yaml, but the composition grid is refined 0.05 -> 0.01
+# via the single `fraction_step` knob (derives total_units=100 and the full grid).
+# This grows the reachable design space ~10^3x by reopening dopant amount-patterns
+# that the coarse 0.05 grid collapses (see plan). Requires a base POSCAR with
+# >=100 metal sites so the 0.01 fractions are physically realized (1 unit = 1 atom).
+#
+# Usage:
+#   python scripts/run_experiment.py --config configs/ooh_fine.yaml --method reinforce \
+#       --out runs/ooh_fine_reinforce_seed0 \
+#       --dp-seed 321 --train-seed 123 --gen-seed 213
+
+
+# ---- Environment ----
+species_set:
+  - Mg
+  - Ca
+  - Sc
+  - Ti
+  - Cu
+  - Sr
+  - Y
+  - Zr
+  - Hf
+  - Bi
+  - La
+  - Ce
+  - Pr
+  - Nd
+  - Sm
+  - Eu
+  - Gd
+  - Tb
+  - Dy
+  - Ho
+  - Er
+  - Tm
+  - Yb
+  - Lu
+  - Co
+  - Ni
+  - Fe
+  - Mn
+
+fraction_step: 0.01                # <- the ONLY grid knob: derives total_units=100
+                                   #    and the 0.01..0.96 fraction grid automatically.
+
+anion_formula: "O2H1"
+n_components: 5
+
+constraint_filter: ooh_phase       # phase rules unchanged (primary >=0.75 / dopant <0.25,
+target_phases:                     # now enforced at 100-unit resolution: 75 / 24 units)
+  - any
+
+# ---- Predictor ----
+predictor: ooh
+base_poscar: POSCAR_100            # 100-metal-site supercell (~Co100H50O200) — provide this
+dp_models:
+  - 20260514_oc22_1.ckpt.pt
+  - 20260514_oc22_2.ckpt.pt
+  - 20260514_oc22_3.ckpt.pt
+  - 20260514_oc22_4.ckpt.pt
+  - 20260514_oc22_5.ckpt.pt
+objective: mean_plus_kstd          # matches classical-dqn reward = -(mean - std) = -mean + std
+k: 1.0
+n_random_configs: 30              # raised from 10: 100 sites -> more site-arrangement
+                                   #   variance, need more samples for a stable reward mean
+ads_height: 1.9
+ads_dz: 1.0
+geo_opt: false
+geo_opt_model: "./DPA-3.1-3M_1.pt"
+uncertainty: models
+
+# ---- RL hyperparameters ----
+method: reinforce
+pg_warmup_eps: 1000               # --pg-warmup-eps 1000
+pg_num_iters: 50                  # --pg-num-iters 50
+pg_batch_eps: 21                  # --pg-batch-eps 21
+pg_lr_actor: 0.001
+pg_lr_critic: 0.001
+pg_entropy_coef: 0.15                # --entropy-coef 0.15
+gen_temperature: 3.0              # --pg-gen-stochastic --pg-gen-temperature 3.0
+gen_top_frac: 0.0
+gen_epsilon: 0.0
+gamma: 0.9
+
+pg_repeat_penalty_coef: 10           # --repeat-penalty-coef 10
+pg_repeat_penalty_shape: log         # --repeat-penalty-shape log
+
+# ---- Generation ----
+num_gen_eps: 50                   # --num-gen-eps 50
+exploration_gen_eps: 0
+
+# ---- DQN-specific (unused for reinforce, kept for completeness) ----
+dqn_lr: 0.001
+dqn_batch_size: 256
+dqn_warmup_eps: 500
+dqn_num_train_eps: 20000
+dqn_buffer_size: 50000
+dqn_grad_steps_per_ep: 5
+dqn_target_update_freq: 100
+dqn_eps_anneal_eps: 10000
+dqn_eps_min: 0.05
