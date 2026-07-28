@@ -1243,3 +1243,38 @@ Implementation landed and verified (220 passed / 1 pre-existing lips failure).
 - zsh gotcha while smoke-testing: `set -- $spec` does no word splitting in zsh,
   so the loop passed empty args and every run exited 2. Ran the three arms as
   separate commands instead.
+
+### EARS — Progress (2026-07-28 17:33)
+<!-- concepts: ooh-adsorbate-frames, deepmd-batch-semantics, predictor-cost-accounting -->
+- Task: add a config option to choose which OOH adsorbate intermediates get built;
+  user's actual need is the BARE parent slab (no O*/OH*/OOH* at all).
+- Major discovery: two of the three frames were already dead weight. All three
+  frames are packed into ONE dp.eval batch (dp_predictor.py:416-422), then
+  pick_scalar (utils/dp_eval.py:81-89) does `np.asarray(res).reshape(-1)[output_index]`.
+  The batch is frame-major and every ooh config leaves output_index at 0, so only
+  the O* frame's value is ever read — OH*/OOH* are built, optionally relaxed,
+  evaluated, then discarded. DeepMD scores frames independently, so they don't
+  even influence the O* number. Cost today = 3N frames + 3*N*M single-frame evals
+  for N*M consumed values.
+- Also confirmed there is NO thermodynamic overpotential anywhere: no 1.23 V, no
+  ZPE/TS terms, no dG cycle. The DeepProperty head emits the number directly.
+  So dropping frames changes *which structure the model sees*, not a formula.
+- Design decision: "bare" is the EMPTY list, never a member of the adsorbates
+  list. Every frame in a batch must have equal atom count (checked at :382-395);
+  an adsorbate frame is nat_slab+3, a bare one is nat_slab. Making them mutually
+  exclusive keeps that invariant impossible to violate from YAML.
+- Cache hazard to remember: OOHCatalystPredictor._comp_key is composition-only and
+  already documented as stale-prone across output_index. adsorbates makes it worse
+  — a dp_cache restored from a checkpoint would silently serve 3-adsorbate values
+  to a bare run. Fix = prefix the key with an (adsorbates, output_index)
+  fingerprint so old keys miss (cold cache) instead of returning wrong rewards.
+- Pre-existing bug found in the same function: the debug_dir path rebuilds the
+  frames with the SAME rng (:470-481), so dumped POSCARs are not the frames that
+  were evaluated, and merely setting debug_dir shifts the random stream for every
+  later config. Fixing by returning the built frames from the builder.
+
+### EARS — Stuck check (2026-07-28 17:34)
+<!-- concepts: ooh-adsorbate-frames -->
+Not stuck — sequential planned edits to dp_predictor.py (normalizer, DPConfig field,
+frame-builder loop, return signature). Debug-dump call site and _maybe_dump_frames
+mode names next.

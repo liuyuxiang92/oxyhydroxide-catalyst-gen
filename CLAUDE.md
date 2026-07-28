@@ -125,12 +125,60 @@ follows the `--run` order unless you pass `--sort-by-best`.
 python scripts/run_ABCDEOOH_experiment.py --out runs/dp --dp-poscar PATH/TO/POSCAR --dp-model model_1.ckpt.pt --dp-model model_2.ckpt.pt --dp-objective mean_minus_kstd
 ```
 
+### Choosing which adsorbates the OOH predictor builds — `adsorbates`
+
+`predictor: ooh` places adsorbate intermediates on each randomly-doped slab before
+scoring it. The YAML key `adsorbates` selects which ones, in frame order:
+
+```yaml
+predictor: ooh
+adsorbates: [O, OH, OOH]   # default — historical behaviour
+# adsorbates: [O]          # only the frame that is actually read (see below)
+# adsorbates: []           # bare parent slab: no adsorbate atoms at all
+```
+
+**The empty list means the bare parent slab** — one frame per random config instead
+of three, so ~3× fewer DeepMD evaluations and ~3× fewer relaxations under
+`geo_opt: true`. `ads_height` / `ads_dz` are unused in that regime.
+
+Bare is the *empty selection* rather than a member of the list on purpose: every
+frame in one DeepMD batch must have the same atom count (an adsorbate frame has
+`nat_slab + 3` atoms, a bare one `nat_slab`), so the two are mutually exclusive by
+construction and the equal-`natoms` check in `_build_dp_inputs_for_one_doped_slab`
+can never be violated from YAML.
+
+**How `adsorbates` interacts with `output_index`.** All frames go into a single
+`dp.eval` batch, and `pick_scalar` (`utils/dp_eval.py:81-89`) flattens the whole
+batch before indexing. The flattening is frame-major, so with the default list and
+`output_index: 0` **only the O\* frame's value is read** — OH\* and OOH\* are built,
+optionally relaxed, evaluated, and discarded. DeepMD scores frames independently,
+so they do not affect the O\* number. If you are running with the default
+`output_index`, `adsorbates: [O]` is therefore ~3× cheaper for identical rewards.
+
+**Cache invalidation.** `adsorbates` and `output_index` are folded into
+`OOHCatalystPredictor._comp_key`, because both change which structure the cached
+number describes. Changing either means a saved `dp_cache` (carried in the DQN
+`checkpoint.pt`) no longer matches, so a resumed run recomputes once rather than
+returning values for a different structure.
+
+There is no ΔG / Sabatier arithmetic in this repo — no 1.23 V, no ZPE or entropy
+corrections. The DeepProperty head emits the number directly, so changing
+`adsorbates` changes *which structure the model sees*, not a thermodynamic cycle.
+A bare slab may be out of distribution for a head trained on adsorbate-bearing
+slabs; use `--dp-debug-dir` to dump and inspect the exact frames.
+
 ### Evaluate specific formulas with DeepMD (standalone)
 ```bash
 python scripts/evaluate_formulas_dp.py --formula "Ni0.70Fe0.15Ce0.05Er0.05Tm0.05O2H1" --dp-model model.pt --dp-poscar POSCAR
 # Or batch from a file (one formula per line):
 python scripts/evaluate_formulas_dp.py --formulas-file candidates.txt --dp-model model.pt --out-csv results.csv
+# Bare parent slab (flag passed with no names), dumping the structures for inspection:
+python scripts/evaluate_formulas_dp.py --formula "Ni0.70Fe0.15Ce0.05Er0.05Tm0.05O2H1" \
+  --dp-model model.pt --dp-poscar POSCAR --adsorbates --dp-debug-dir /tmp/ooh_bare
 ```
+Omit `--adsorbates` for the default three; pass it bare for the clean slab; pass
+names (`--adsorbates O OH`) for a subset. `--output-index` is also exposed here —
+it previously defaulted to 0 with no way to change it from this script.
 
 ### Summarize a replay buffer
 The DQN replay buffer is persisted inside the periodic `checkpoint.pt` (key `"buffer"`), not as a standalone file. Point the summarizer at the run directory:

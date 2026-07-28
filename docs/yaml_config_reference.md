@@ -207,7 +207,23 @@ contributing equally at every sweep value.
 
 `base_poscar`, `dp_models`, `objective`, `k`, `n_random_configs`, `ads_height`,
 `ads_dz`, `geo_opt` (bool), `geo_opt_model`, `uncertainty`
-(`models`/`configs`/`total`), `output_index`, `target_phases`.
+(`models`/`configs`/`total`), `output_index`, `adsorbates`, `target_phases`.
+
+`adsorbates` selects which intermediates are placed on each doped slab, in frame
+order — default `[O, OH, OOH]`. An **empty list** means the bare parent slab (no
+adsorbate atoms at all): one frame per random config instead of three, so ~3x
+fewer DeepMD evaluations and ~3x fewer relaxations under `geo_opt: true`.
+`ads_height` / `ads_dz` are unused in that case.
+
+Bare is expressed as the empty list rather than as a member of the list because
+all frames in one batch must have the same atom count (an adsorbate frame has
+`nat_slab + 3` atoms, a bare one `nat_slab`).
+
+The list order matters: the batch is frame-major and `output_index` indexes the
+flattened output, so with the default list `output_index: 0` reads the **O\***
+frame. Changing `adsorbates` or `output_index` invalidates a saved `dp_cache`
+(they are folded into the cache key), so a resumed run pays a one-time recompute
+instead of returning values that describe a different structure.
 
 ## `sinter_calcine` keys
 

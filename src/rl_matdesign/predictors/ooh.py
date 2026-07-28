@@ -31,6 +31,12 @@ class OOHCatalystPredictor:
         Seed forwarded to DPConfig.seed for structure generation.
     uncertainty : str
         "models" | "configs" | "total" — how ensemble std is computed.
+    adsorbates : list of str
+        Which intermediates to place on each doped slab, e.g. ``["O", "OH", "OOH"]``
+        (default, historical behaviour). Pass ``[]`` for the **bare parent slab** —
+        no adsorbate atoms at all, one frame per random config instead of three.
+        Order matters: it fixes frame order, which is what ``output_index`` selects
+        from. ``ads_height`` / ``ads_dz`` are unused when the list is empty.
     """
 
     def __init__(
@@ -48,8 +54,14 @@ class OOHCatalystPredictor:
         rng_seed: int = 123,
         uncertainty: str = "models",
         output_index: int = 0,
+        adsorbates=None,
     ) -> None:
-        from abcde_ooh.dp_predictor import DPConfig, DeepMDOverpotentialPredictor
+        from abcde_ooh.dp_predictor import (
+            ADSORBATE_MODES,
+            DPConfig,
+            DeepMDOverpotentialPredictor,
+            normalize_adsorbates,
+        )
         from ..training import objective_from_mean_std
 
         self._objective_fn = objective_from_mean_std
@@ -57,6 +69,9 @@ class OOHCatalystPredictor:
         self.k = k
         self.uncertainty = uncertainty
         self.output_index = output_index
+        self.adsorbates = (
+            ADSORBATE_MODES if adsorbates is None else normalize_adsorbates(adsorbates)
+        )
 
         cfg = DPConfig(
             base_poscar=base_poscar,
@@ -68,26 +83,36 @@ class OOHCatalystPredictor:
             geo_opt=geo_opt,
             geo_opt_model=geo_opt_model,
             output_index=output_index,
+            adsorbates=self.adsorbates,
         )
         self._predictor = DeepMDOverpotentialPredictor(cfg)
+        # Settings that change what a cached number *means*. Folded into every
+        # cache key so a `dp_cache` restored from a checkpoint taken under
+        # different settings misses (and is recomputed) instead of silently
+        # returning a value for a different structure. See _comp_key.
+        self._settings_key = (tuple(self.adsorbates), int(output_index))
         # Composition cache: comp_key → (raw_mean_overpotential, std)
         # Shared across predict_raw() calls to avoid redundant DeepMD evaluations.
         self._cache: Dict[tuple, Tuple[float, float]] = {}
 
-    @staticmethod
-    def _comp_key(composition: Dict[str, float]) -> tuple:
-        """Canonical cache key matching classical-dqn _comp_key (units of 1/20).
+    def _comp_key(self, composition: Dict[str, float]) -> tuple:
+        """Cache key: composition (units of 1/20) plus the settings fingerprint.
 
-        Note: this key is composition-only and does NOT include ``output_index``.
-        If you load a `dp_cache` saved with one ``output_index`` and resume
-        training under a different ``output_index``, the cached values may be
-        stale. Start a fresh run when changing ``output_index``.
+        The composition part matches classical-dqn's ``_comp_key``. The
+        ``(adsorbates, output_index)`` prefix exists because both change which
+        structure the number describes: a cache built with the default three
+        adsorbates must not be served to a run using ``adsorbates: []``.
+
+        Consequence: **changing either setting invalidates a saved ``dp_cache``**
+        (the DQN checkpoint carries one). Old entries simply never match, so a
+        resumed run pays a one-time recompute rather than returning stale values.
         """
-        return tuple(sorted(
+        comp = tuple(sorted(
             (k, int(round(v * 20)))
             for k, v in composition.items()
             if int(round(v * 20)) > 0
         ))
+        return (self._settings_key, comp)
 
     def predict_raw(self, composition: Dict[str, float]) -> Tuple[float, float]:
         """Return (raw_mean_overpotential, std) — untransformed DeepMD values.

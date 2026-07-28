@@ -59,6 +59,55 @@ def stable_species_order(symbols: Sequence[str]) -> List[str]:
     return order
 
 
+#: Adsorbate intermediates that can be placed on the doped slab, in the order the
+#: predictor has historically built them.
+ADSORBATE_MODES: Tuple[str, ...] = ("O*", "OH*", "OOH*")
+
+
+def normalize_adsorbates(spec) -> Tuple[str, ...]:
+    """Normalize a user adsorbate selection into canonical ``("O*", ...)`` form.
+
+    Accepts ``None``, ``[]``, the string ``"none"``, or a list of names in either
+    bare (``O``) or starred (``O*``) form, case-insensitively.  Duplicates are
+    dropped, preserving first-seen order.
+
+    Returns ``()`` for the **bare parent slab** — the doped structure with no
+    adsorbate at all.  Note that "bare" is expressed as the *empty selection*
+    rather than as a member of the list: every frame in one DeepMD batch must
+    carry the same atom count (an adsorbate frame has ``nat_slab + 3`` atoms, a
+    bare one has ``nat_slab``), so making the two mutually exclusive keeps that
+    invariant unrepresentable-to-violate.
+
+    The order is significant: it fixes the frame order inside the batch, which is
+    what ``DPConfig.output_index`` indexes into.
+    """
+    if spec is None:
+        return ()
+    if isinstance(spec, str):
+        spec = [] if spec.strip().lower() in ("none", "") else [spec]
+
+    canonical = {m.rstrip("*").upper(): m for m in ADSORBATE_MODES}
+    out: List[str] = []
+    for raw in spec:
+        key = str(raw).strip().rstrip("*").upper()
+        if key in ("NONE", ""):
+            raise ValueError(
+                "Use an empty list (adsorbates: []) for the bare parent slab; "
+                "'none' cannot be mixed with real adsorbates because the frames "
+                "would have different atom counts."
+            )
+        if key not in canonical:
+            raise ValueError(
+                f"Unknown adsorbate {raw!r}. Valid names: "
+                f"{', '.join(m.rstrip('*') for m in ADSORBATE_MODES)} "
+                "(or the starred forms); use [] for the bare parent slab."
+            )
+        mode = canonical[key]
+        if mode not in out:
+            out.append(mode)
+    return tuple(out)
+
+
 def _choose_counts_from_fractions(n: int, fracs: Dict[str, float]) -> Dict[str, int]:
     raw = {k: fracs[k] * n for k in fracs}
     counts = {k: int(math.floor(raw[k])) for k in fracs}
@@ -91,6 +140,12 @@ class DPConfig:
     ads_height: float = 1.9
     ads_dz: float = 1.0
     seed: int = 123
+
+    # Which adsorbate intermediates to build on each doped slab, in frame order.
+    # An EMPTY tuple means the bare parent slab (no adsorbate atoms at all) — see
+    # normalize_adsorbates for why bare is the empty selection rather than a mode.
+    # ads_height / ads_dz are unused when this is empty.
+    adsorbates: Tuple[str, ...] = ADSORBATE_MODES
 
     # Geometry optimization before DeepProperty evaluation.
     geo_opt: bool = False
@@ -137,6 +192,15 @@ class DeepMDOverpotentialPredictor:
         self.base_slab = self._ase_read(cfg.base_poscar, format="vasp")
         self.nat_slab = len(self.base_slab)
         self.slab_species_order = stable_species_order(self.base_slab.get_chemical_symbols())
+
+        if not cfg.adsorbates:
+            print(
+                "[INFO] OOH predictor: adsorbates=[] — evaluating the bare parent "
+                "slab (no O*/OH*/OOH*). ads_height/ads_dz are unused; "
+                f"{cfg.n_random_configs} frame(s) per composition instead of "
+                f"{cfg.n_random_configs * len(ADSORBATE_MODES)}.",
+                flush=True,
+            )
 
         self.dp_models = [
             self._DeepProperty(model_file=f, auto_batch_size=False, head="property")
@@ -186,7 +250,9 @@ class DeepMDOverpotentialPredictor:
         if len(comp_key) > 120:
             comp_key = comp_key[:120]
 
-        modes = ["O", "OH", "OOH"]
+        # Filename tags follow the configured adsorbate list; the bare parent slab
+        # (empty selection) is a single frame tagged "clean".
+        modes = [m.rstrip("*") for m in self.cfg.adsorbates] or ["clean"]
         for i, (mode, fr) in enumerate(zip(modes, frames)):
             name = f"dp_{comp_key}_seed{base_seed}_cfg{config_idx:03d}_{mode}.vasp"
             path = os.path.join(debug_dir, name)
@@ -284,7 +350,7 @@ class DeepMDOverpotentialPredictor:
         anchor_elems=None,
         rng: Optional[random.Random] = None,
     ):
-        if mode not in {"O*", "OH*", "OOH*"}:
+        if mode not in ADSORBATE_MODES:
             raise ValueError(f"Unknown mode: {mode}")
         a = atoms.copy()
         n_hat = self._get_surface_normal(a)
@@ -352,21 +418,35 @@ class DeepMDOverpotentialPredictor:
         )
 
     def _build_dp_inputs_for_one_doped_slab(self, doped, anchor_elems: List[str], rng: random.Random):
+        """Build the evaluation frames for one doped slab.
+
+        Returns ``(coords, cells, atom_types, frames, masks)``.  The frames are
+        returned so callers (the ``debug_dir`` dump) can write *exactly* what was
+        evaluated instead of rebuilding — rebuilding would consume ``rng`` again
+        and desynchronise every later config.
+        """
         anchor_set = set(anchor_elems)
 
         frames_raw = []
         masks_raw = []
-        for mode in ("O*", "OH*", "OOH*"):
-            fr, masked = self._add_adsorbates_equalized(
-                doped,
-                mode,
-                height=self.cfg.ads_height,
-                dz_chain=self.cfg.ads_dz,
-                anchor_elems=anchor_set,
-                rng=rng,
-            )
-            frames_raw.append(fr)
-            masks_raw.append(masked)
+        if self.cfg.adsorbates:
+            for mode in self.cfg.adsorbates:
+                fr, masked = self._add_adsorbates_equalized(
+                    doped,
+                    mode,
+                    height=self.cfg.ads_height,
+                    dz_chain=self.cfg.ads_dz,
+                    anchor_elems=anchor_set,
+                    rng=rng,
+                )
+                frames_raw.append(fr)
+                masks_raw.append(masked)
+        else:
+            # Bare parent slab: one frame, no adsorbate atoms, nothing masked.
+            # _reorder_slab_then_adsorbates handles this without a special case
+            # (its ads index list comes out empty).
+            frames_raw.append(doped.copy())
+            masks_raw.append([])
 
         frames = []
         masks = []
@@ -379,7 +459,7 @@ class DeepMDOverpotentialPredictor:
             for i in range(len(frames)):
                 frames[i] = self._optimize_structure(frames[i], masks[i])
 
-        nframes = 3
+        nframes = len(frames)
         natoms = len(frames[0])
         for fr in frames[1:]:
             if len(fr) != natoms:
@@ -411,7 +491,7 @@ class DeepMDOverpotentialPredictor:
                 types[idx] = -1
             atom_types[i] = types
 
-        return coords, cells, atom_types
+        return coords, cells, atom_types, frames, masks
 
     def _eval_models_on_prepared_inputs(self, coords: np.ndarray, cells: np.ndarray, atom_types: np.ndarray) -> List[float]:
         from rl_matdesign.utils.dp_eval import pick_scalar
@@ -457,32 +537,20 @@ class DeepMDOverpotentialPredictor:
 
         for cfg_idx in range(n_cfg):
             doped = self._do_random_alloying_on_metal_sites(self.base_slab, metal_elem, fracs, rng)
-            coords, cells, atom_types = self._build_dp_inputs_for_one_doped_slab(
+            coords, cells, atom_types, frames, masks = self._build_dp_inputs_for_one_doped_slab(
                 doped,
                 anchor_elems=anchor_elems,
                 rng=rng,
             )
 
             if effective_debug_dir:
-                # Rebuild the frames (reordered) for writing, matching coords/cells/atom_types.
-                frames_raw = []
-                masks_raw = []
-                for mode in ("O*", "OH*", "OOH*"):
-                    fr, masked = self._add_adsorbates_equalized(
-                        doped,
-                        mode,
-                        height=self.cfg.ads_height,
-                        dz_chain=self.cfg.ads_dz,
-                        anchor_elems=set(anchor_elems),
-                        rng=rng,
-                    )
-                    fr_re, new_mask = self._reorder_slab_then_adsorbates(fr, masked)
-                    frames_raw.append(fr_re)
-                    masks_raw.append(new_mask)
-
+                # Dump the frames that were actually evaluated. Rebuilding them here
+                # (as this used to) drew from `rng` a second time, so the dumped
+                # POSCARs did not match coords/cells/atom_types AND merely setting
+                # debug_dir shifted the random stream for every later config.
                 self._maybe_dump_frames(
-                    frames=frames_raw,
-                    masks=masks_raw,
+                    frames=frames,
+                    masks=masks,
                     comp=fracs,
                     config_idx=cfg_idx,
                     base_seed=base_seed,

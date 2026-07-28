@@ -54,6 +54,10 @@ def _make_ooh(cfg: dict, *, seed: Optional[int] = None, **_):
         rng_seed=seed if seed is not None else 123,
         uncertainty=cfg.get("uncertainty", "models"),
         output_index=int(cfg.get("output_index", 0)),
+        # Absent key => None => all three intermediates (historical behaviour).
+        # An explicit empty list means the bare parent slab, so `.get(...)` must
+        # not collapse [] to the default.
+        adsorbates=cfg.get("adsorbates", None),
     )
 
 

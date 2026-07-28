@@ -118,6 +118,24 @@ def main() -> None:
         help="Path to DP model .pt for geometry optimization (default: ./DPA-3.1-3M_1.pt).",
     )
 
+    parser.add_argument(
+        "--adsorbates",
+        nargs="*",
+        default=None,
+        metavar="NAME",
+        help="Which intermediates to place on each doped slab (O, OH, OOH). "
+             "Pass the flag with NO names (--adsorbates) to evaluate the bare "
+             "parent slab. Omit the flag entirely for the default O OH OOH.",
+    )
+    parser.add_argument(
+        "--output-index",
+        type=int,
+        default=0,
+        help="Which scalar to read from the flattened model output (default 0). "
+             "The batch is frame-major, so with several adsorbates index 0 is the "
+             "first one in --adsorbates order.",
+    )
+
     parser.add_argument("--out-csv", type=str, default=None)
 
     args = parser.parse_args()
@@ -131,7 +149,21 @@ def main() -> None:
             "model_5.ckpt.pt",
         ]
 
-    from abcde_ooh.dp_predictor import DPConfig, DeepMDOverpotentialPredictor, objective_from_mean_std
+    from abcde_ooh.dp_predictor import (
+        ADSORBATE_MODES,
+        DPConfig,
+        DeepMDOverpotentialPredictor,
+        normalize_adsorbates,
+        objective_from_mean_std,
+    )
+
+    # argparse gives None when the flag is absent and [] when it is passed bare,
+    # so "--adsorbates" with no names means the clean slab while omitting it keeps
+    # the historical three.
+    adsorbates = (
+        ADSORBATE_MODES if args.adsorbates is None
+        else normalize_adsorbates(args.adsorbates)
+    )
 
     cfg = DPConfig(
         base_poscar=args.dp_poscar,
@@ -142,6 +174,8 @@ def main() -> None:
         seed=0,
         geo_opt=args.geo_opt,
         geo_opt_model=args.geo_opt_model,
+        output_index=args.output_index,
+        adsorbates=adsorbates,
     )
     predictor = DeepMDOverpotentialPredictor(cfg)
 
