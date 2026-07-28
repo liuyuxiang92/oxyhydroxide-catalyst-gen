@@ -496,6 +496,7 @@ def train_dqn_online(
     checkpoint_cfg: Optional[dict] = None,
     resume_state: Optional[dict] = None,
     augment_permutations: int = 0,
+    timer: Optional[object] = None,
     dqn_target_mode: str = "bootstrap",
 ) -> Tuple[torch.nn.Module, StandardScaler, List[dict]]:
     """Classical online DQN with FIFO replay buffer and TD targets.
@@ -523,6 +524,12 @@ def train_dqn_online(
     (qnet, scaler, metrics):
         Trained Q-network, fitted s_mat scaler, and list of per-episode metric
         dicts (phase="dqn_train").
+
+    ``timer``:
+        Optional :class:`~rl_matdesign.utils.timing.PredictorTimer`. When given,
+        every per-episode row also carries cumulative wall-clock and
+        predictor-call counters, which is what makes a best-reward-vs-time curve
+        plottable after the run.
     """
     from .model import QRegressor
 
@@ -582,6 +589,10 @@ def train_dqn_online(
                 add_episode_to_buffer(env.path, buffer, elem_feats_scaled, fraction_set, gamma=gamma)
             pbar.update(1)
         pbar.close()
+        # Unlike PG warmup (which neutralises reward_fn), DQN warmup pays a real
+        # predictor call per episode. The mark makes that cost visible.
+        if timer is not None:
+            timer.mark("warmup_end")
 
         s_mat_all = np.asarray([r["s_mat_raw"] for r in buffer], dtype=float)
         scaler = StandardScaler().fit(s_mat_all)
@@ -674,7 +685,7 @@ def train_dqn_online(
         # 4. Linear epsilon anneal.
         eps = max(dqn_eps_min, 1.0 - ep / dqn_eps_anneal_eps)
 
-        metrics.append({
+        _row = {
             "phase": "dqn_train",
             "iteration": ep + 1,
             "episode": ep + 1,
@@ -683,7 +694,10 @@ def train_dqn_online(
             "mse_loss": mean_loss,
             "epsilon": eps,
             "buffer_rows": len(buffer),
-        })
+        }
+        if timer is not None:
+            _row.update(timer.snapshot())
+        metrics.append(_row)
         pbar.set_postfix(
             eps=f"{eps:.3f}",
             loss=f"{mean_loss:.4f}" if not math.isnan(mean_loss) else "warmup",
@@ -991,6 +1005,7 @@ def train_pg(
     pg_repeat_penalty_shape: str = "log",
     max_train_attempts: Optional[int] = None,
     checkpoint_cfg: Optional[dict] = None,
+    timer: Optional[object] = None,
 ) -> List[dict]:
     """Batched REINFORCE / A2C training loop (matches feat/classical-dqn).
 
@@ -1133,7 +1148,7 @@ def train_pg(
         mean_return_raw    = float(np.mean([rs[0] for rs in batch_returns])) if batch_returns else 0.0
         mean_return_shaped = float(np.mean([rs[0] for rs in batch_returns_shaped])) if batch_returns_shaped else 0.0
 
-        metrics.append({
+        _row = {
             "phase": "pg_train",
             "iteration": it + 1,
             "update": update_idx,
@@ -1150,7 +1165,10 @@ def train_pg(
             "actor_loss": ep_actor_loss,
             "entropy": ep_entropy,
             "critic_loss": critic_loss_val,
-        })
+        }
+        if timer is not None:
+            _row.update(timer.snapshot())
+        metrics.append(_row)
 
         outer_pbar.set_postfix(
             ret=f"{mean_return_raw:.3f}",

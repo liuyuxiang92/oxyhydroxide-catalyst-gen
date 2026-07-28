@@ -1138,3 +1138,108 @@ scripts/run_experiment.py. Still need to add the `--repo-root` argparse arg.
   constant, grep the WHOLE module for the magic number — thresholds AND unit
   conversions. Verified: rollouts at 0.05 and 0.01 now give 0 structural/phase
   invalids; fixed-element-set valid patterns 5 -> 12650 (~2500x).
+
+### EARS — Progress (2026-07-08 10:58)
+<!-- concepts: design-space-plotting, pca-outlier-view-clipping -->
+plot_design_space.py: a handful of far-flung grey design-space points (out of
+5M) blow out the PCA axis range (PC2 to ~800), compressing all method
+candidates into an indistinguishable dot near origin. Fix = clip the *view*,
+not the data: keep PCA fit on full cloud (axes stay comparable), then set
+xlim/ylim to a central percentile (--clip-percentile, default 99.5) of the grey
+cloud, expanded to always include every generated point so no method drops out
+of frame. Avoids refitting PCA on a filtered set (which would move the axes).
+
+### EARS — Progress (2026-07-09 16:58)
+<!-- concepts: matplotlib-degenerate-inputs, baseline-comparison-plots -->
+Fixed empty dist_<task>.png in scripts/baselines/compare_temperatures.py (plot_task).
+Root cause: single-candidate generated.csv → degenerate plot inputs.
+(1) hist bins = linspace(min,max,40) collapse to zero width when min==max → invisible bars;
+padded lo/hi when hi<=lo. (2) CDF used plot(xs, linspace(0,1,n)) → a lone point at y=0
+with line style draws nothing; switched to empirical CDF ys=arange(1,n+1)/n with
+marker="o" + steps-post and ax.set_ylim(0,1.05). Now one candidate shows as a spike + dot.
+Note: the real cause of one-row generated.csv is deterministic greedy generation collapsing
+under dedup — raise --gen-temperature (DQN) or --pg-gen-stochastic (PG) to get real spread.
+
+### EARS — Session Start (2026-07-13 10:21)
+<!-- concepts: rl-matdesign-visualization, dqn-target-modes -->
+- Task: Debug why scripts/plot_design_space.py fails on OOH catalyst generated.csv (after explaining MC-vs-bootstrap sinter results).
+- Why: Visualize design-space coverage of generated candidates across scenarios for method comparison figures.
+
+### EARS — Progress (2026-07-13 12:00)
+<!-- concepts: rl-matdesign-visualization, design-space-sampling -->
+- Diagnosed user's "plot_design_space.py never stops" on GPU box: OOH fraction env has no fast sampler, so --n-region 500000 means 500k env rollouts at ~40/s (~3.5h) + Magpie featurization; also `--out figures` (a dir) would crash savefig at the end.
+- Root perf difference vs pick_ood_points.py (45 min for 750k): property_benchmark *enumerates* the region with integer combinatorics + check_primary_phase pruning (739,900 valid comps in seconds); plot_design_space pays a 5-step rollout with allowed_actions() rebuilding ~450 one-hot numpy pairs per step, per grey point.
+- Earlier finding (memory saved): OOH formulas missing the O2H1 suffix featurize silently but project ~1000σ outside the PCA cloud, squashing the view.
+- Now implementing: --sampler {auto,rollout,enumerate} in plot_design_space.py; enumerate = pick_ood_points-style exhaustive grid enumeration honoring ooh_phase/target_phases, then uniform subsample.
+
+### EARS — Stuck check (2026-07-13 12:01)
+<!-- concepts: design-space-sampling -->
+Not stuck — sequential planned edits adding --sampler enumerate to plot_design_space.py (docstring, enumerator helpers, argparse wiring next).
+
+### EARS — Stuck check (2026-07-13 13:51)
+<!-- concepts: design-space-sampling, multi-group-env -->
+Not stuck — extending --sampler enumerate to multi_group configs (LiPS) via exhaustive DFS over the env action tree with terminal_comp_key dedup; dispatch wiring + tests next.
+
+### EARS — Progress (2026-07-13 13:59)
+<!-- concepts: design-space-sampling, multi-group-env, sse-builder -->
+- DFS enumerate for multi_group works: full lips_sse region = 66,690 unique compositions (316,080 tree paths, ~2 min).
+- Discovery: for builder-backed configs (lips_sse `builder: sse`), env.terminal_formula emits raw picks with pseudo-elements (O_a/O_b, no Li/P/S/Br) — unparseable by pymatgen → hash-fallback features → grey cloud garbage vs generated.csv's built formulas. Pre-existing bug in the rollout branch too.
+- Fix: _make_formula_fn routes terminals through builder.composition_formula (registry.resolve_builder); builder-infeasible compositions (Li out of range etc.) dropped from the cloud; graceful fallback + warning when base_poscar missing (fu is lazily read; explicit formula_units bypasses it).
+
+### EARS — Session Start (2026-07-24 17:27)
+<!-- concepts: rl-matdesign-visualization, baseline-comparison -->
+- Task: make compare_methods.py plot methods in the order the --run flags were given instead of ranking them by best reward.
+- Why: user wants figure panels to line up with the method order they intend for the paper/report, not a data-dependent ranking.
+
+### EARS — Progress (2026-07-28 15:15)
+<!-- concepts: method-comparison-instrumentation, predictor-cost-accounting -->
+- Task: make DQN(bootstrap) / DQN(mc) / A2C comparable on *total* cost including
+  the reward-model call, with timing recorded on the GPU box and figures plotted
+  later from the saved files.
+- Key finding: the whole RL pipeline had ZERO wall-clock instrumentation and no
+  predictor-call counter. The only counter in the repo is
+  `baselines/_common.score_composition` (BO/GA), which the RL path never touches.
+- Design decision: instrument by wrapping the *predictor object* once, right
+  after `build_predictor`, rather than threading timers through env/training.
+  Justification: every training reward funnels through the `reward_fn` /
+  `mg_reward_fn` closures in `build_env`, and the envs only call them at the
+  terminal step — so one wrapper covers all 3 env types x all 3 methods x all
+  phases. `PredictorTimer.__getattr__` delegation is load-bearing: run_experiment
+  reads `predictor._cache` for DQN checkpointing and generate_candidates probes
+  `predict_raw` / `per_objective_stats` / `check_phase`.
+- `n_unique` is counted against the wrapper's OWN key set, not the predictor's
+  internal cache — the three predictors cache under different attribute names
+  (`_cache` vs `_stats_cache`) and `dummy` doesn't cache at all.
+- Confounder to remember: `mc` is a DQN *ablation* (`--dqn-target-mode`), not a
+  4th method; and configured episode budgets are asymmetric (oxides_sinter: DQN
+  51000 eps vs A2C 7500). Resolution = plot best-reward-so-far vs wall-clock and
+  vs cumulative predictor calls, which is budget-agnostic.
+- Bug found en route: `run_seeds.py` passes `--seed`, which `run_experiment.py`
+  does not define (only `--dp-seed`/`--train-seed`/`--gen-seed`) and which is not
+  an unambiguous prefix — so every seed subprocess has been failing, silently
+  swallowed as a `[WARN]`.
+
+### EARS — Stuck check (2026-07-28 15:16)
+<!-- concepts: method-comparison-instrumentation -->
+Not stuck — sequential planned edits to run_experiment.py (imports, t_start,
+predictor wrap; phase timers around train/generate and timing.json write next).
+
+### EARS — Progress (2026-07-28 15:30)
+<!-- concepts: method-comparison-instrumentation, predictor-cost-accounting, phase-timing -->
+Implementation landed and verified (220 passed / 1 pre-existing lips failure).
+- `PredictorTimer.__getattr__` delegation verified against the two real consumers:
+  `getattr(predictor,"_cache")` returns the *inner* dict so DQN checkpoint
+  mutation still writes through, and `hasattr(wrapper,"predict_raw")` is False
+  when the inner predictor lacks it (generate_candidates branches on that).
+- Phase-split gotcha: DQN's warmup runs INSIDE `train_dqn_online`, so
+  `phases_s["warmup"]` was empty for DQN and populated for PG — exactly backwards
+  from what matters, since DQN warmup pays a real predictor call per episode and
+  PG warmup pays none (`_fit_scaler_from_warmup` neutralises reward_fn). Fixed by
+  reconstructing warmup duration from the `warmup_end` mark minus the recorded
+  train-phase start, then subtracting it out of `train`.
+- `s_to_90pct_of_best` must interpolate along first->final best, not multiply:
+  rewards are routinely negative here (negated overpotentials/energies), so
+  `0.9 * -3.0` would mean *better* than the target.
+- zsh gotcha while smoke-testing: `set -- $spec` does no word splitting in zsh,
+  so the loop passed empty args and every run exited 2. Ran the three arms as
+  separate commands instead.

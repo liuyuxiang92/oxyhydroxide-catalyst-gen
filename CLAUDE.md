@@ -64,6 +64,62 @@ python scripts/run_ABCDEOOH_experiment.py --out runs/a2c --rl-method a2c \
 ```
 Compare `generated.csv` reward distributions across runs.
 
+### Cost accounting — comparing methods on time, not just reward quality
+
+Every run writes `<out>/timing.json` and adds cumulative cost columns to
+`training_log.csv`. Nothing needs to be enabled; the instrumentation is always on.
+
+**How it works.** `run_experiment.py` wraps the predictor in a `PredictorTimer`
+(`src/rl_matdesign/utils/timing.py`) immediately after `build_predictor`, *before*
+`build_env`. Every training reward flows through the `reward_fn` / `mg_reward_fn`
+closures in `build_env`, and the envs only call them at an episode's terminal step
+— so one wrap accounts for every predictor call in every phase, for all three env
+types and all three methods. The proxy delegates unknown attributes to the real
+predictor, so `_cache` checkpointing and `predict_raw` keep working.
+
+`timing.json` holds `phases_s` (`setup` / `warmup` / `train` / `generate`),
+`total_s`, `overhead_s` (= total minus predictor time, i.e. the RL machinery), and
+a `predictor` block with `t_predict_s`, `n_calls`, `n_unique`, `cache_hit_rate`,
+`mean_s_per_unique` and `best_reward`. `n_unique` is counted against the timer's
+own key set, not the predictor's internal cache — the three predictors cache under
+different attribute names (`_cache` vs `_stats_cache`) and `dummy` doesn't cache
+at all.
+
+`training_log.csv` gains `t_wall`, `t_predict_cum`, `n_predict_calls`,
+`n_predict_unique` and `best_reward_so_far` on each `dqn_train` / `pg_train` row.
+`generated.csv` is deliberately unchanged.
+
+**Making the figures** — reads only saved text files, so the expensive runs can
+happen on a GPU box and the plots can be made later on a laptop:
+
+```bash
+python scripts/baselines/compare_timing.py \
+    --run "DQN(bootstrap):runs/ooh_dqn_boot" \
+    --run "DQN(mc):runs/ooh_dqn_mc" \
+    --run "A2C:runs/ooh_a2c" \
+    --out runs/compare/cost --title "OOH: cost to best candidate"
+```
+
+Four panels: best-reward-so-far vs wall-clock, best-reward-so-far vs cumulative
+unique predictor calls, a predictor-vs-overhead wall-clock breakdown, and cost per
+real evaluation with the cache-hit rate overlaid. Each `PATH` is a run directory,
+or a parent holding `seed_*/` dirs (from `run_seeds.py`), in which case curves are
+drawn as a median line with a min–max band. Like `compare_methods.py`, panel order
+follows the `--run` order unless you pass `--sort-by-best`.
+
+**Two things to keep straight when interpreting the result:**
+
+- `--dqn-target-mode mc` is a DQN *ablation*, not a fourth method — same rollout
+  loop, same buffer, same episode count, only the regression target changes. Label
+  the arms `DQN(bootstrap)` / `DQN(mc)` / `A2C`.
+- Configured episode budgets are asymmetric across methods (e.g. `oxides_sinter.yaml`:
+  DQN 1000+50000 episodes vs A2C 500×15 = 7500). That is *why* the comparison is
+  plotted against time and predictor calls rather than episode index — those curves
+  stay comparable no matter how long each arm runs.
+- A run resumed with `--resume-training` restarts its counters with a warm cache,
+  so its hit rate reads artificially high. `compare_timing.py` flags such runs;
+  benchmark without `--resume-training` for clean numbers.
+
 ### DeepMD reward (requires `ase` and `deepmd-kit`)
 ```bash
 python scripts/run_ABCDEOOH_experiment.py --out runs/dp --dp-poscar PATH/TO/POSCAR --dp-model model_1.ckpt.pt --dp-model model_2.ckpt.pt --dp-objective mean_minus_kstd
@@ -117,6 +173,8 @@ There is no test suite, linter configuration, or build step.
 | `value_net.pt` | — | — | ✓ | ValueNet (critic) state dict (PyTorch) |
 | `generated.csv` | ✓ | ✓ | ✓ | Deduplicated candidates with `formula`, `reward`, `dp_mean/std`, `primary_ok/label` |
 | `run_config.json` | ✓ | ✓ | ✓ | Full `argparse` namespace for reproducibility |
+| `training_log.csv` | ✓ | ✓ | ✓ | Per-episode (`phase="dqn_train"`) / per-iteration (`phase="pg_train"`) metrics, plus the cumulative cost columns below |
+| `timing.json` | ✓ | ✓ | ✓ | Wall-clock + predictor-call accounting for the run (see "Cost accounting") |
 
 ### Key modules (`src/abcde_ooh/`)
 

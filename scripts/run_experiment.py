@@ -21,6 +21,7 @@ import copy
 import json
 import os
 import random
+import time
 import warnings
 
 # Required for torch.use_deterministic_algorithms(True) with CUDA >= 10.2.
@@ -49,6 +50,7 @@ from rl_matdesign.training import (
 )
 from rl_matdesign.utils.metrics import RunMetrics
 from rl_matdesign.utils.seeding import set_global_seed
+from rl_matdesign.utils.timing import PhaseTimer, PredictorTimer
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +309,8 @@ def build_env(cfg: dict, predictor):
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    t_start = time.perf_counter()
+    phases = PhaseTimer()
     args = parse_args()
 
     if args.only_generate and args.resume_training:
@@ -334,10 +338,16 @@ def main() -> None:
     print(f"[INFO] device={device}, method={method}, dp_seed={args.dp_seed}, "
           f"train_seed={train_seed}, gen_seed={gen_seed}")
 
-    predictor = build_predictor(cfg, seed=args.dp_seed)
+    with phases("setup"):
+        # Wrapped before build_env so the reward_fn / mg_reward_fn closures call
+        # through the timer: those are the only place a training reward is
+        # produced, so this single wrap accounts for every predictor call in
+        # every phase. The proxy delegates unknown attributes to the real
+        # predictor, so `_cache` checkpointing and `predict_raw` still work.
+        predictor = PredictorTimer(build_predictor(cfg, seed=args.dp_seed), t0=t_start)
 
-    # Build the env + reward_fn + constraint filter (shared with baselines).
-    env, env_type, flat_cfg = build_env(cfg, predictor)
+        # Build the env + reward_fn + constraint filter (shared with baselines).
+        env, env_type, flat_cfg = build_env(cfg, predictor)
 
     # Whether to apply in-episode constraint filters DURING TRAINING. Generation
     # always stays constrained (+ post-episode drop). CLI overrides the config;
@@ -526,34 +536,48 @@ def main() -> None:
             if _aug_K is None:
                 _aug_K = int(cfg.get("dqn_augment_permutations", 0))
             env.constraints_enabled = constrain_training  # toggle in-episode filter for training
-            qnet, scaler, train_rows = train_dqn_online(
-                env=env,
-                elem_feats_scaled=elem_feats_scaled,
-                fraction_set=fraction_set,
-                device=device,
-                n_warmup_eps=int(cfg.get("dqn_warmup_eps", cfg.get("pg_warmup_eps", 500))),
-                dqn_num_train_eps=_n_train_eps,
-                dqn_buffer_size=_buf_size,
-                batch_size=int(cfg.get("dqn_batch_size", 256)),
-                dqn_grad_steps_per_ep=int(cfg.get("dqn_grad_steps_per_ep", 5)),
-                dqn_target_update_freq=int(cfg.get("dqn_target_update_freq", 100)),
-                dqn_eps_anneal_eps=_eps_anneal,
-                dqn_eps_min=_eps_min,
-                gamma=float(cfg.get("dqn_gamma", cfg.get("gamma", 0.9))),
-                hidden_dim=_hidden,
-                lr=_lr_dqn,
-                loss_name=_dqn_loss,
-                checkpoint_cfg=checkpoint_cfg,
-                resume_state=resume_state,
-                augment_permutations=_aug_K,
-                # --- BEGIN mc-target experiment (removable) ---
-                dqn_target_mode=(
-                    args.dqn_target_mode
-                    if args.dqn_target_mode is not None
-                    else str(cfg.get("dqn_target_mode", "bootstrap"))
-                ),
-                # --- END mc-target experiment ---
-            )
+            _t_train_start = time.perf_counter() - t_start
+            with phases("train"):
+                qnet, scaler, train_rows = train_dqn_online(
+                    env=env,
+                    elem_feats_scaled=elem_feats_scaled,
+                    fraction_set=fraction_set,
+                    device=device,
+                    n_warmup_eps=int(cfg.get("dqn_warmup_eps", cfg.get("pg_warmup_eps", 500))),
+                    dqn_num_train_eps=_n_train_eps,
+                    dqn_buffer_size=_buf_size,
+                    batch_size=int(cfg.get("dqn_batch_size", 256)),
+                    dqn_grad_steps_per_ep=int(cfg.get("dqn_grad_steps_per_ep", 5)),
+                    dqn_target_update_freq=int(cfg.get("dqn_target_update_freq", 100)),
+                    dqn_eps_anneal_eps=_eps_anneal,
+                    dqn_eps_min=_eps_min,
+                    gamma=float(cfg.get("dqn_gamma", cfg.get("gamma", 0.9))),
+                    hidden_dim=_hidden,
+                    lr=_lr_dqn,
+                    loss_name=_dqn_loss,
+                    checkpoint_cfg=checkpoint_cfg,
+                    resume_state=resume_state,
+                    augment_permutations=_aug_K,
+                    timer=predictor,
+                    # --- BEGIN mc-target experiment (removable) ---
+                    dqn_target_mode=(
+                        args.dqn_target_mode
+                        if args.dqn_target_mode is not None
+                        else str(cfg.get("dqn_target_mode", "bootstrap"))
+                    ),
+                    # --- END mc-target experiment ---
+                )
+            # DQN's warmup runs inside train_dqn_online, so split it back out of
+            # "train" using the warmup_end mark. Without this, phases_s["warmup"]
+            # would be absent for DQN and present for PG — and the comparison
+            # that matters is precisely that DQN warmup pays real predictor calls
+            # while PG warmup does not.
+            _wm = next((m for m in predictor.marks if m["phase"] == "warmup_end"), None)
+            if _wm is not None:
+                _warm_s = round(max(0.0, _wm["t_wall"] - _t_train_start), 4)
+                phases.totals["warmup"] = _warm_s
+                phases.totals["train"] = round(phases.totals["train"] - _warm_s, 4)
+
             for r in train_rows:
                 metrics.log(**r)
             torch.save(qnet.state_dict(), os.path.join(args.out, "qnet.pt"))
@@ -570,21 +594,22 @@ def main() -> None:
                 else int(cfg.get("max_gen_attempts", 10 * _n_exploit))
             )
             from rl_matdesign.registry import charge_check_enabled, charge_use_pauling
-            gen_rows = generate_candidates(
-                env=env, predictor=predictor, scaler=scaler, device=device,
-                qnet=qnet,
-                elem_feats_scaled=elem_feats_scaled,
-                fraction_set=fraction_set,
-                n_exploit=_n_exploit,
-                n_explore=int(cfg.get("exploration_gen_eps", 0)),
-                gen_temperature=gen_temperature,
-                gen_top_frac=gen_top_frac,
-                gen_epsilon=gen_epsilon_gen,
-                k=float(cfg.get("k", 1.0)),
-                max_attempts=_max_attempts,
-                charge_filter=charge_check_enabled(cfg),
-                charge_use_pauling=charge_use_pauling(cfg),
-            )
+            with phases("generate"):
+                gen_rows = generate_candidates(
+                    env=env, predictor=predictor, scaler=scaler, device=device,
+                    qnet=qnet,
+                    elem_feats_scaled=elem_feats_scaled,
+                    fraction_set=fraction_set,
+                    n_exploit=_n_exploit,
+                    n_explore=int(cfg.get("exploration_gen_eps", 0)),
+                    gen_temperature=gen_temperature,
+                    gen_top_frac=gen_top_frac,
+                    gen_epsilon=gen_epsilon_gen,
+                    k=float(cfg.get("k", 1.0)),
+                    max_attempts=_max_attempts,
+                    charge_filter=charge_check_enabled(cfg),
+                    charge_use_pauling=charge_use_pauling(cfg),
+                )
             for r in gen_rows:
                 metrics.log(phase="generate", **r)
 
@@ -674,7 +699,13 @@ def main() -> None:
             }
 
         else:
-            scaler = _fit_scaler_from_warmup(env, pg_warmup)
+            # PG warmup costs ZERO predictor calls — _fit_scaler_from_warmup
+            # neutralises env.reward_fn while it rolls out. DQN warmup, by
+            # contrast, pays full price for every episode. The mark records that
+            # asymmetry rather than hiding it.
+            with phases("warmup"):
+                scaler = _fit_scaler_from_warmup(env, pg_warmup)
+            predictor.mark("warmup_end")
             joblib.dump(scaler, os.path.join(args.out, "std_scaler.bin"))
             state_dim = int(scaler.n_features_in_)
             print(f"[INFO] state_dim={state_dim} (from warmup scaler)")
@@ -686,25 +717,27 @@ def main() -> None:
 
         if not args.only_generate:
             env.constraints_enabled = constrain_training  # toggle in-episode filter for training
-            train_rows = train_pg(
-                policy=policy,
-                value_net=value_net,
-                env=env,
-                scaler=scaler,
-                elem_feats_scaled=elem_feats_scaled,
-                fraction_set=fraction_set,
-                device=device,
-                num_iters=pg_num_iters,
-                batch_eps=pg_batch_eps,
-                gamma=gamma,
-                lr_actor=lr_actor,
-                lr_critic=lr_critic,
-                pg_entropy_coef=pg_entropy_coef,
-                rl_method=method,
-                pg_repeat_penalty_coef=pg_repeat_penalty_coef,
-                pg_repeat_penalty_shape=pg_repeat_penalty_shape,
-                checkpoint_cfg=checkpoint_cfg,
-            )
+            with phases("train"):
+                train_rows = train_pg(
+                    policy=policy,
+                    value_net=value_net,
+                    env=env,
+                    scaler=scaler,
+                    elem_feats_scaled=elem_feats_scaled,
+                    fraction_set=fraction_set,
+                    device=device,
+                    num_iters=pg_num_iters,
+                    batch_eps=pg_batch_eps,
+                    gamma=gamma,
+                    lr_actor=lr_actor,
+                    lr_critic=lr_critic,
+                    pg_entropy_coef=pg_entropy_coef,
+                    rl_method=method,
+                    pg_repeat_penalty_coef=pg_repeat_penalty_coef,
+                    pg_repeat_penalty_shape=pg_repeat_penalty_shape,
+                    checkpoint_cfg=checkpoint_cfg,
+                    timer=predictor,
+                )
             for r in train_rows:
                 metrics.log(**r)
             torch.save(policy.state_dict(), os.path.join(args.out, "policy.pt"))
@@ -722,21 +755,22 @@ def main() -> None:
                 else int(cfg.get("max_gen_attempts", 10 * _n_exploit))
             )
             from rl_matdesign.registry import charge_check_enabled, charge_use_pauling
-            gen_rows = generate_candidates(
-                env=env, predictor=predictor, scaler=scaler, device=device,
-                policy=policy,
-                elem_feats_scaled=elem_feats_scaled,
-                fraction_set=fraction_set,
-                n_exploit=_n_exploit,
-                n_explore=int(cfg.get("exploration_gen_eps", 0)),
-                gen_temperature=gen_temperature,
-                gen_top_frac=gen_top_frac,
-                gen_epsilon=gen_epsilon_gen,
-                k=float(cfg.get("k", 1.0)),
-                max_attempts=_max_attempts,
-                charge_filter=charge_check_enabled(cfg),
-                charge_use_pauling=charge_use_pauling(cfg),
-            )
+            with phases("generate"):
+                gen_rows = generate_candidates(
+                    env=env, predictor=predictor, scaler=scaler, device=device,
+                    policy=policy,
+                    elem_feats_scaled=elem_feats_scaled,
+                    fraction_set=fraction_set,
+                    n_exploit=_n_exploit,
+                    n_explore=int(cfg.get("exploration_gen_eps", 0)),
+                    gen_temperature=gen_temperature,
+                    gen_top_frac=gen_top_frac,
+                    gen_epsilon=gen_epsilon_gen,
+                    k=float(cfg.get("k", 1.0)),
+                    max_attempts=_max_attempts,
+                    charge_filter=charge_check_enabled(cfg),
+                    charge_use_pauling=charge_use_pauling(cfg),
+                )
             for r in gen_rows:
                 metrics.log(phase="generate", **r)
 
@@ -768,6 +802,42 @@ def main() -> None:
         print(f"\n[SUMMARY] diversity={diversity} | top-10 mean dp_mean="
               f"{float(np.mean([float(r['dp_mean']) for r in top10])):.4f}")
     print(f"[SUMMARY] Pareto front size: {len(pareto)} candidates")
+
+    # ------------------------------------------------------------------
+    # Cost accounting — the file the method-comparison figures are built from.
+    # Small and text-only, so it can be copied off a GPU box on its own.
+    # ------------------------------------------------------------------
+    predictor.mark("run_end")
+    _total_s = time.perf_counter() - t_start
+    _pred = predictor.summary()
+    timing = {
+        "method": method,
+        # mc is a DQN ablation, not a fourth method — record it alongside the
+        # method so the comparison can label the arm DQN(bootstrap) / DQN(mc).
+        "dqn_target_mode": (
+            (args.dqn_target_mode if args.dqn_target_mode is not None
+             else str(cfg.get("dqn_target_mode", "bootstrap")))
+            if method == "dqn" else None
+        ),
+        "config": args.config,
+        "device": str(device),
+        "seeds": {"dp": args.dp_seed, "train": train_seed, "gen": gen_seed},
+        "resumed": bool(args.resume_training),
+        "phases_s": dict(phases.totals),
+        "total_s": round(_total_s, 4),
+        "predictor": _pred,
+        # Everything that is NOT the reward model: rollouts, featurization,
+        # gradient steps. This is the number that separates DQN's replay updates
+        # from A2C's single batch update once predictor cost is factored out.
+        "overhead_s": round(_total_s - _pred["t_predict_s"], 4),
+        "marks": predictor.marks,
+    }
+    with open(os.path.join(args.out, "timing.json"), "w") as f:
+        json.dump(timing, f, indent=2)
+    print(f"[TIMING] total={_total_s:.1f}s | predictor={_pred['t_predict_s']:.1f}s "
+          f"({_pred['n_calls']} calls, {_pred['n_unique']} unique, "
+          f"hit_rate={_pred['cache_hit_rate']:.3f}) | "
+          f"overhead={timing['overhead_s']:.1f}s")
     print(f"[INFO] Results saved to {args.out}")
 
 
