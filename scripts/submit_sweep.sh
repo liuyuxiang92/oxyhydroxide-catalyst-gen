@@ -2,7 +2,15 @@
 #
 # Submit one budget's worth of runs: 3 scenarios x 3 methods x 10 seeds.
 #
-# Edit the episode budget in the YAML configs yourself, then run this with a
+# Reads exactly three configs — configs/oxides_{sinter,calcine,sinter_calcine}.yaml.
+# Each carries the pg_* and dqn_* keys for every method, so the arm is chosen on the
+# command line (--method, --dqn-target-mode), not by swapping config files.
+# So there is ONE file per scenario to edit per budget:
+#
+#     dqn_num_train_eps + dqn_eps_anneal_eps    (the two DQN arms)
+#     pg_num_iters                              (the A2C arm)
+#
+# Edit the episode budget in those configs yourself, then run this with a
 # label naming that budget:
 #
 #     ./scripts/submit_sweep.sh eps2500
@@ -63,11 +71,14 @@ FORCE="${FORCE:-0}"
 DRYRUN="${DRYRUN:-0}"
 
 SCENARIOS="${SCENARIOS:-sinter calcine sinter_calcine}"
-# arm name : config suffix : --method : --dqn-target-mode
+# All three arms come from the SAME configs/oxides_<scenario>.yaml — it carries the
+# pg_* and dqn_* keys for every method, and --method selects which are read. The
+# separate *_a2c.yaml files are not used.
+# arm name : --method : --dqn-target-mode
 ARMS=(
-    "dqn_bootstrap::dqn:bootstrap"
-    "dqn_mc::dqn:mc"
-    "a2c:_a2c:a2c:"
+    "dqn_bootstrap:dqn:bootstrap"
+    "dqn_mc:dqn:mc"
+    "a2c:a2c:"
 )
 
 OUT_BASE="$OUT_ROOT/$LABEL"
@@ -96,9 +107,9 @@ wait_for_slot() {
 
 for scen in $SCENARIOS; do
     for arm_spec in "${ARMS[@]}"; do
-        IFS=':' read -r arm suffix method target <<< "$arm_spec"
+        IFS=':' read -r arm method target <<< "$arm_spec"
 
-        config="configs/oxides_${scen}${suffix}.yaml"
+        config="configs/oxides_${scen}.yaml"
         if [[ ! -f "$config" ]]; then
             echo "[skip] $config not found — skipping ${scen}/${arm}" >&2
             continue
