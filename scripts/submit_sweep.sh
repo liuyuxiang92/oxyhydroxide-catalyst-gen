@@ -1,51 +1,58 @@
 #!/usr/bin/env bash
 #
-# Submit one budget's worth of runs: 3 scenarios x 3 methods x 10 seeds.
+# Submit one budget's worth of runs: 3 scenarios x 3 arms x 10 seeds = 90 runs.
 #
-# Reads exactly three configs — configs/oxides_{sinter,calcine,sinter_calcine}.yaml.
-# Each carries the pg_* and dqn_* keys for every method, so the arm is chosen on the
-# command line (--method, --dqn-target-mode), not by swapping config files.
-# So there is ONE file per scenario to edit per budget:
+# Run it from your working directory — the one where this already works:
 #
-#     dqn_num_train_eps + dqn_eps_anneal_eps    (the two DQN arms)
-#     pg_num_iters                              (the A2C arm)
+#     rl-matdesign --config oxides_sinter.yaml --out calc_time/... --method dqn ...
 #
-# Edit the episode budget in those configs yourself, then run this with a
-# label naming that budget:
+# Config paths stay relative (oxides_<scenario>.yaml) and no directory change is
+# made, so the relative model paths inside the configs keep resolving.
 #
-#     ./scripts/submit_sweep.sh eps2500
-#     ./scripts/submit_sweep.sh eps7500
-#     ./scripts/submit_sweep.sh eps15000
-#     ./scripts/submit_sweep.sh eps30000
+#     ./submit_sweep.sh eps2500          # after setting the budget in the yaml
+#     ./submit_sweep.sh eps7500
+#     ./submit_sweep.sh eps22500
+#     ./submit_sweep.sh eps45000
 #
-# Output lands in runs/sweep/<label>/<scenario>_<arm>/seed_<N>/.
-# run_seeds.py also writes all_seeds.csv and all_seeds_timing.csv per group.
+# DRYRUN=1 prints the commands instead of running them.
+# Runs whose generated.csv already exists are skipped, so a crashed sweep resumes.
 #
-# Already-finished groups are skipped, so re-running after a crash resumes.
-# Set FORCE=1 to redo everything.
+#   OUT=calc_time          output root
+#   MAX_JOBS=30            concurrent runs
+#   SCENARIOS="sinter"     narrow the set
+#   SEEDS="1 2 3"          override the seed list
+#   FORCE=1                redo completed runs
 #
 # ---------------------------------------------------------------------------
-# BEFORE THE FIRST RUN, check two keys in each YAML — both silently invalidate
-# the short-budget arms if left at their 50,000-episode defaults:
+# CHECK THREE KEYS IN EACH YAML BEFORE THE FIRST BUDGET. All three silently
+# invalidate the short-budget arms if left at their 50,000-episode defaults:
 #
-#   dqn_eps_anneal_eps   Epsilon anneals linearly over this many episodes. The
-#                        configs ship with 30000. At a 2,500-episode budget that
-#                        leaves epsilon at 1 - 2500/30000 = 0.92, so the agent is
-#                        ~92% random for the whole run and the "DQN" arm is really
-#                        random search. This is not hypothetical: the archived
-#                        2,500-episode runs ended at epsilon=0.950. Set it to
-#                        roughly 60% of dqn_num_train_eps (the ratio the reference
-#                        config uses: 30000/50000).
+#   dqn_eps_anneal_eps   Ships at 30000. At budget 2500 epsilon only falls to
+#                        1 - 2500/30000 = 0.92, so the agent is ~92% random for the
+#                        whole run and the "DQN" arm is really random search. The
+#                        archived 2,500-episode runs ended at epsilon=0.950. Use
+#                        ~60% of dqn_num_train_eps (the reference ratio 30000/50000):
+#                            budget   dqn_num_train_eps   dqn_eps_anneal_eps
+#                             2500          1500                  900
+#                             7500          6500                 3900
+#                            22500         21500                12900
+#                            45000         44000                26400
+#                        (dqn_num_train_eps = budget - dqn_warmup_eps, warmup=1000)
 #
-#   pg_batch_eps         Hold this FIXED at 15 across all budgets and vary only
-#                        pg_num_iters. Changing both at once confounds budget with
-#                        collapse rate — the archived sweep did this (25 at the
-#                        small budgets, 15 at 45k) and the arms aren't comparable.
+#   gen_epsilon          Ships at 0.0. At 45k the trained Q-net produced THREE
+#                        unique candidates from 1000 generation episodes (calcine:
+#                        one). A budget comparison read through a 3-sample readout
+#                        is noise. Set 0.2 in all three configs — same value at
+#                        every budget, since a probability cannot confound the
+#                        budget axis.
 #
-# Budget is counted in *predictor calls*, which is not the same as episodes:
-#   DQN: dqn_warmup_eps + dqn_num_train_eps   (warmup pays a real call per episode)
-#   PG:  pg_num_iters * pg_batch_eps          (PG warmup is free — reward_fn is
-#                                              neutralised during it)
+#   pg_batch_eps         Keep FIXED at 15; vary only pg_num_iters
+#                        (= budget / 15 -> 167 / 500 / 1500 / 3000). Changing both
+#                        confounds budget with collapse rate.
+#
+# Note budget means PREDICTOR CALLS, not episodes:
+#   DQN: dqn_warmup_eps + dqn_num_train_eps  (warmup pays a real call per episode)
+#   PG:  pg_num_iters * pg_batch_eps         (PG warmup is free)
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -56,24 +63,14 @@ if [[ -z "$LABEL" ]]; then
     exit 1
 fi
 
-cd "$(dirname "$0")/.."
-
-# --- knobs -----------------------------------------------------------------
+RL_BIN="${RL_BIN:-rl-matdesign}"
+OUT="${OUT:-calc_time}"
 SEEDS="${SEEDS:-7 19 23 42 58 61 77 84 96 103}"
-OUT_ROOT="${OUT_ROOT:-runs/sweep}"
-# run_seeds.py --parallel runs all 10 seeds of a group concurrently.
-PARALLEL="${PARALLEL:-1}"
-# How many groups to run at once. 1 => 10 concurrent processes. Raise it if the
-# GPU has headroom (you said it does); 9 runs every group of this sweep at once.
-CONCURRENT_GROUPS="${CONCURRENT_GROUPS:-1}"
+MAX_JOBS="${MAX_JOBS:-30}"
+SCENARIOS="${SCENARIOS:-sinter calcine sinter_calcine}"
 FORCE="${FORCE:-0}"
-# DRYRUN=1 prints every command without launching anything.
 DRYRUN="${DRYRUN:-0}"
 
-SCENARIOS="${SCENARIOS:-sinter calcine sinter_calcine}"
-# All three arms come from the SAME configs/oxides_<scenario>.yaml — it carries the
-# pg_* and dqn_* keys for every method, and --method selects which are read. The
-# separate *_a2c.yaml files are not used.
 # arm name : --method : --dqn-target-mode
 ARMS=(
     "dqn_bootstrap:dqn:bootstrap"
@@ -81,84 +78,79 @@ ARMS=(
     "a2c:a2c:"
 )
 
-OUT_BASE="$OUT_ROOT/$LABEL"
-LOG_DIR="$OUT_BASE/logs"
+LOG_DIR="$OUT/logs"
 mkdir -p "$LOG_DIR"
 
-echo "=== sweep '$LABEL'"
-echo "    seeds:       $SEEDS"
-echo "    scenarios:   $SCENARIOS"
-echo "    out:         $OUT_BASE"
-echo "    groups:      $CONCURRENT_GROUPS at a time, seeds $([[ $PARALLEL == 1 ]] && echo parallel || echo sequential)"
-echo
-
-submitted=0
+launched=0
 skipped=0
-pids=()
 
 wait_for_slot() {
-    while (( ${#pids[@]} >= CONCURRENT_GROUPS )); do
-        wait -n 2>/dev/null || true
-        local alive=()
-        for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null && alive+=("$p"); done
-        pids=("${alive[@]}")
+    while (( $(jobs -rp | wc -l) >= MAX_JOBS )); do
+        wait -n 2>/dev/null || sleep 1
     done
 }
 
 for scen in $SCENARIOS; do
+    config="oxides_${scen}.yaml"
+    if [[ ! -f "$config" ]]; then
+        echo "[skip] $config not in $PWD — skipping scenario '$scen'" >&2
+        continue
+    fi
+
     for arm_spec in "${ARMS[@]}"; do
         IFS=':' read -r arm method target <<< "$arm_spec"
 
-        config="configs/oxides_${scen}.yaml"
-        if [[ ! -f "$config" ]]; then
-            echo "[skip] $config not found — skipping ${scen}/${arm}" >&2
-            continue
-        fi
+        for seed in $SEEDS; do
+            name="${scen}_${arm}_${LABEL}_seed${seed}"
+            run_out="$OUT/$name"
 
-        out="$OUT_BASE/${scen}_${arm}"
-        if [[ "$FORCE" != "1" && -f "$out/all_seeds.csv" ]]; then
-            echo "[done] ${scen}/${arm} already complete — skipping (FORCE=1 to redo)"
-            skipped=$((skipped + 1))
-            continue
-        fi
+            # generated.csv is written last, so its presence means the run finished.
+            if [[ "$FORCE" != "1" && -f "$run_out/generated.csv" ]]; then
+                skipped=$((skipped + 1))
+                continue
+            fi
 
-        cmd=(python scripts/run_seeds.py
-             --config "$config"
-             --method "$method"
-             --out "$out"
-             --seeds $SEEDS)
-        [[ -n "$target" ]] && cmd+=(--dqn-target-mode "$target")
-        [[ "$PARALLEL" == "1" ]] && cmd+=(--parallel)
+            # Decorrelated seeds: training RNG, predictor sampling and generation
+            # sampling get independent streams, so seed-to-seed spread isn't one
+            # shared stream re-used three times.
+            cmd=("$RL_BIN"
+                 --config "$config"
+                 --method "$method"
+                 --out "$run_out/"
+                 --train-seed "$seed"
+                 --dp-seed "$((seed + 10000))"
+                 --gen-seed "$((seed + 20000))")
+            [[ -n "$target" ]] && cmd+=(--dqn-target-mode "$target")
 
-        log="$LOG_DIR/${scen}_${arm}.log"
-        echo "[run ] ${scen}/${arm}  -> $out"
-        echo "       ${cmd[*]}"
-        echo "       log: $log"
+            log="$LOG_DIR/${name}.log"
 
-        if [[ "$DRYRUN" == "1" ]]; then
-            submitted=$((submitted + 1))
-            continue
-        fi
+            if [[ "$DRYRUN" == "1" ]]; then
+                echo "nohup ${cmd[*]} > $log 2>&1 &"
+                launched=$((launched + 1))
+                continue
+            fi
 
-        wait_for_slot
-        ( "${cmd[@]}" >"$log" 2>&1 \
-            && echo "[ok  ] ${scen}/${arm}" \
-            || echo "[FAIL] ${scen}/${arm} — see $log" ) &
-        pids+=($!)
-        submitted=$((submitted + 1))
+            wait_for_slot
+            echo "[run ] $name"
+            nohup "${cmd[@]}" > "$log" 2>&1 &
+            launched=$((launched + 1))
+        done
     done
 done
 
+if [[ "$DRYRUN" == "1" ]]; then
+    echo "# $launched commands ($skipped already complete)" >&2
+    exit 0
+fi
+
 wait
 echo
-echo "=== sweep '$LABEL' finished: $submitted submitted, $skipped skipped"
-echo
-echo "Next, once every budget label exists, build the comparison figures:"
-echo "  python scripts/baselines/compare_timing.py \\"
-for scen in $SCENARIOS; do
-    echo "      --run \"DQN(bootstrap):$OUT_BASE/${scen}_dqn_bootstrap\" \\"
-    echo "      --run \"DQN(mc):$OUT_BASE/${scen}_dqn_mc\" \\"
-    echo "      --run \"A2C:$OUT_BASE/${scen}_a2c\" \\"
-    break
+echo "=== '$LABEL': $launched launched, $skipped already complete"
+echo "    logs: $LOG_DIR/"
+failed=0
+for f in "$LOG_DIR"/*"${LABEL}"*.log; do
+    [[ -f "$f" ]] || continue
+    d="$OUT/$(basename "$f" .log)"
+    [[ -f "$d/generated.csv" ]] || { echo "    [FAIL] $(basename "$f")"; failed=$((failed + 1)); }
 done
-echo "      --out $OUT_BASE/compare --title \"$LABEL\""
+(( failed == 0 )) && echo "    all runs produced generated.csv" || echo "    $failed run(s) failed — see logs above"

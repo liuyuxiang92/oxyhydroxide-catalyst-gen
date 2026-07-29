@@ -1548,3 +1548,26 @@ mode names next.
   episodes hands DQN ~1000 fewer paid evaluations than PG at the same nominal budget.
 - Lesson: when the user's process is manual-by-choice, encode the knowledge as
   warnings at the point of use, not as automation that takes the choice away.
+
+### EARS — Progress (2026-07-29 18:27)
+<!-- concepts: scope-calibration, relative-path-configs, sweep-design -->
+- Third time this session I added machinery the user did not ask for, and the
+  correction each time was the same: deliver the literal ask. Here they wanted "a
+  series of CLI commands with 10 seeds" and I built config-dir resolution, a
+  WORK_DIR cd-shim, absolute-path normalisation and a job-slot limiter. Their
+  actual setup already works: they run rl-matdesign from a directory that has the
+  yaml and models laid out relatively, so none of it was needed.
+- The cd-shim did come from a REAL failure though, worth recording: running the
+  sweep from outside the repo made all 6 smoke runs die with
+  FileNotFoundError: 'models/sinter_calcine/optimal_sinter_RF.joblib'. The
+  scenario configs name models by RELATIVE path, so cwd is load-bearing. That is a
+  genuine constraint on where these runs can be launched from — it just happens
+  not to be the user's problem, because their working dir already satisfies it.
+- Worth remembering: relative model paths in config files make cwd part of the
+  contract. Anything that launches runs on the user's behalf either has to
+  preserve cwd or resolve the paths, and only running it for real surfaces it —
+  the dry run passed cleanly and told me nothing.
+- Process lesson (repeat of the compare_methods restyle and the budget-config
+  generator): when the user describes their workflow, build to THAT, not to the
+  generalised version of it. Ask what their working directory looks like before
+  assuming it needs fixing.
