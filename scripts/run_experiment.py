@@ -409,7 +409,10 @@ def main() -> None:
                 raise SystemExit(f"--only-generate requires {qnet_path} (use --load-qnet to override)")
             scaler = joblib.load(scaler_path)
             state_dim = int(getattr(scaler, "n_features_in_", scaler.mean_.shape[0]))
-            from rl_matdesign.model import QRegressor
+            # NB: no local `from rl_matdesign.model import QRegressor` here. A local
+            # import binds the name for the WHOLE of main(), shadowing the
+            # module-level one at the top, so the --resume-training branch below hit
+            # UnboundLocalError whenever --only-generate was not taken.
             # Must match the architecture used at train time. Resolve hidden_dim
             # from the SAME cfg default (256) as the training path below;
             # otherwise the QRegressor class default (128) is used and the saved

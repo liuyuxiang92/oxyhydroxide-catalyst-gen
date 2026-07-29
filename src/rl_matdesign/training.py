@@ -550,6 +550,11 @@ def train_dqn_online(
             )
     # --- END mc-target experiment ---
 
+    # Warmup pays one real predictor call per episode (see below), so those
+    # episodes are part of the training cost and belong in the log. Collected
+    # here because `metrics` isn't built until after the warmup branch.
+    warmup_rows: List[dict] = []
+
     if resume_state is not None:
         scaler     = resume_state["scaler"]
         qnet       = resume_state["qnet"]
@@ -578,8 +583,17 @@ def train_dqn_online(
         else:
             print(f"[INFO] DQN warmup: {n_warmup_eps} random episodes with real rewards...")
         pbar = tqdm(total=n_warmup_eps, desc="DQN warmup")
-        for _ in range(n_warmup_eps):
+        for _w in range(n_warmup_eps):
             _rollout_random_episode(env)
+            if env.path:
+                warmup_rows.append({
+                    "phase": "dqn_warmup",
+                    "episode": _w + 1,
+                    "return": float(env.path[-1].reward),
+                    "terminal_reward": float(env.path[-1].reward),
+                    "epsilon": 1.0,          # warmup is uniformly random by definition
+                    "terminal_comp_key": str(env.terminal_comp_key()),
+                })
             if augment_permutations > 0:
                 _augment_episode_in_buffer(
                     env, env.path, buffer, elem_feats_scaled, fraction_set,
@@ -621,6 +635,7 @@ def train_dqn_online(
         dp_cache_ref = checkpoint_cfg.get("dp_cache")
 
     metrics: List[dict] = []
+    metrics.extend(warmup_rows)
 
     if start_ep >= dqn_num_train_eps:
         print(
@@ -690,6 +705,10 @@ def train_dqn_online(
             "iteration": ep + 1,
             "episode": ep + 1,
             "return": episode_reward,
+            # Identical to `return` for DQN (it already logs the undiscounted
+            # terminal reward), but present so every phase carries the column that
+            # is comparable across methods — see the PG rows, where they differ.
+            "terminal_reward": episode_reward,
             "train_loss": mean_loss,
             "mse_loss": mean_loss,
             "epsilon": eps,
@@ -1126,6 +1145,10 @@ def train_pg(
         batch_terminal_keys: List[tuple] = []
         batch_repeat_penalties: List[float] = []
         batch_visits_before: List[int] = []
+        # One record per *sampled episode*, so the PG training-reward distribution is
+        # comparable with DQN's (which logs every episode). The pg_train row below
+        # only carries the batch mean, which hides the low-temperature tail entirely.
+        batch_ep_rows: List[dict] = []
 
         collected = 0
         while collected < int(batch_eps):
@@ -1172,6 +1195,22 @@ def train_pg(
             batch_visits_before.append(n_visits_before)
             collected += 1
             accepted += 1
+            batch_ep_rows.append({
+                "phase": "pg_episode",
+                "iteration": it + 1,
+                "episode": accepted,
+                "return": returns[0],
+                "return_raw": returns[0],
+                # `return` is the *discounted* return G_0 = gamma^(n-1) * r_T for a
+                # terminal-only reward — the training signal, not a temperature.
+                # DQN's `return` column is the undiscounted terminal reward, so the
+                # two are NOT comparable without this column. Log it explicitly
+                # rather than making every reader re-derive gamma from run_config.
+                "terminal_reward": float(path[-1].reward),
+                "repeat_penalty": repeat_penalty,
+                "visit_count_before": n_visits_before,
+                "terminal_comp_key": str(terminal_key),
+            })
 
         if not batch_paths:
             continue
@@ -1246,6 +1285,10 @@ def train_pg(
         ep_actor_loss = float(actor_loss.item())
         ep_entropy    = float(entropy_bonus.item())
         mean_return_raw = float(np.mean([rs[0] for rs in batch_returns])) if batch_returns else 0.0
+        # Undiscounted terminal reward, in the property's own units — the only
+        # column comparable with DQN's `return` (see the pg_episode row above).
+        mean_terminal_reward = (float(np.mean([float(p[-1].reward) for p in batch_paths]))
+                                if batch_paths else 0.0)
         # In σ units now, like the penalty itself — see the class docstring.
         mean_return_shaped = mean_return_raw - float(np.mean(all_penalty)) * adv_std
 
@@ -1258,6 +1301,7 @@ def train_pg(
             "return": mean_return_raw,
             "return_raw": mean_return_raw,
             "return_shaped": mean_return_shaped,
+            "terminal_reward": mean_terminal_reward,
             "repeat_penalty": float(np.mean(batch_repeat_penalties)) if batch_repeat_penalties else 0.0,
             "visit_count_before": int(np.max(batch_visits_before)) if batch_visits_before else 0,
             "unique_comps_seen": len(visit_counts),
@@ -1276,6 +1320,7 @@ def train_pg(
         if timer is not None:
             _row.update(timer.snapshot())
         metrics.append(_row)
+        metrics.extend(batch_ep_rows)
 
         outer_pbar.set_postfix(
             ret=f"{mean_return_raw:.3f}",

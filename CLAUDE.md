@@ -64,6 +64,83 @@ python scripts/run_ABCDEOOH_experiment.py --out runs/a2c --rl-method a2c \
 ```
 Compare `generated.csv` reward distributions across runs.
 
+### Training-reward distribution — `pg_episode` / `dqn_warmup` and `compare_training_rewards.py`
+
+DQN writes one `dqn_train` row per training episode. PG originally wrote only one
+`pg_train` row per *iteration*, holding `mean_return_raw` over the whole batch — so
+a 7,500-episode A2C run produced 300 numbers against DQN's 6,500, and every one of
+them was an average.
+
+That is not just a plotting inconvenience. **The batch mean is precisely the
+statistic A2C optimises**, and on the oxide benchmark it improved monotonically
+(−695 → −435) while the *best* candidate froze ~20% in. Logging only the mean makes
+the failure invisible: you cannot see the tail thin out, and the tail is what
+materials discovery cares about.
+
+**`return` does not mean the same thing in the two loggers.** DQN logs
+`env.path[-1].reward` — the *undiscounted terminal reward*, i.e. the property
+itself. PG logs `returns[0]` — the *discounted* return `G₀ = γ^(n-1) · r_T`. With
+`gamma: 0.9` and `n_components: 5` that is a factor of 0.6561, so a PG log reading
+437 K is really a 666 K composition. Plotting the two columns on one axis makes A2C
+look ~100 K better than it is. Both `pg_train` and `pg_episode` rows therefore also
+carry **`terminal_reward`** (undiscounted, property units) — that is the column to
+compare against DQN's `return`. `compare_training_rewards.py` prefers it and
+un-discounts legacy PG logs via `gamma`/`n_components` from `run_config.json`,
+printing the correction it applied.
+
+`train_pg` therefore also emits one `phase="pg_episode"` row per sampled episode,
+reusing existing column names (`return`, `return_raw`, `repeat_penalty`,
+`visit_count_before`, `terminal_comp_key`) so `RunMetrics.to_csv`'s key-union needs
+no new columns and readers that filter on `phase` are unaffected.
+
+**`warmup_eps` costs completely different amounts in the two methods.** DQN's warmup
+calls `_rollout_random_episode`, which goes through `env.step` → `reward_fn` → the
+predictor: one **real predictor call per warmup episode**. PG's warmup is free —
+`_fit_scaler_from_warmup` (`training.py:846`) temporarily replaces `reward_fn` with a
+no-op, so it pays nothing and produces no rewards to log. Only DQN's warmup belongs
+on the reward axis, and `train_dqn_online` emits it as `phase="dqn_warmup"`
+(`return`, `terminal_reward`, `epsilon: 1.0`, `terminal_comp_key`). Before this,
+1,000 warmup episodes at a 2,500-episode budget meant 40% of the run was invisible.
+
+`compare_training_rewards.py` prepends those rows to `dqn_train` on a **re-indexed
+episode axis** (warmup 1…1000, then training 1001…45000, dotted line at the
+handover), because both phases number their own episodes from 1. `best_reward_so_far`
+was always correct — it comes from `PredictorTimer`, which wraps the predictor before
+warmup, so its cumulative counters already included those calls.
+
+Adding rows at the *front* of the metrics list broke append-mode resume: `to_csv`
+used to seed its column order from `rows[0]`, and a resumed run skips warmup, so it
+would append `dqn_train`-ordered rows under a `dqn_warmup`-ordered header — silent
+misalignment, no error. `to_csv` now reads the existing header when appending
+(`utils/metrics.py`), pinned by `tests/test_training_log_phases.py`.
+
+```bash
+python scripts/baselines/compare_training_rewards.py \
+    --run "DQN(bootstrap):runs/sinter_dqn_eps_7500" \
+    --run "DQN(mc):runs/sinter_mc_eps_7500" \
+    --run "A2C:runs/sinter_a2c_eps_7500" \
+    --out runs/compare/train_rewards \
+    --minimize --y-label "Sintering temperature (K)"
+```
+
+One scatter panel per method (every training episode, with a running-best line),
+plus a shared marginal-distribution panel. `training_reward_summary.csv` adds
+`best_at_budget_frac` — the fraction of the budget at which the best sample was
+first drawn. A small value with a long flat tail after it *is* the freeze
+signature.
+
+**Runs predating this only have batch means.** The script detects which phase is
+present, prefers `pg_episode`, falls back to `pg_train`, and labels each panel with
+what it actually drew. In the mixed case it prints a warning and stamps the figure:
+a mean over B episodes has ~1/√B the spread of raw episodes, so violin widths and
+the ★ are not comparable across granularities — only `best_at_budget_frac` and the
+best-so-far curve are. The `_best_noun` helper is why the A2C panel says "best batch
+mean" rather than "best episode"; conflating those reads as A2C finding a candidate
+100 K better than DQN when it is really a 25-episode average.
+
+The driver (`make_compare_time_figures.py`) emits this figure alongside
+`comparison.png` in the same per-budget output directory.
+
 ### Cost accounting — comparing methods on time, not just reward quality
 
 Every run writes `<out>/timing.json` and adds cumulative cost columns to
@@ -245,7 +322,7 @@ Consequences to keep straight:
 | `value_net.pt` | — | — | ✓ | ValueNet (critic) state dict (PyTorch) |
 | `generated.csv` | ✓ | ✓ | ✓ | Deduplicated candidates with `formula`, `reward`, `dp_mean/std`, `primary_ok/label` |
 | `run_config.json` | ✓ | ✓ | ✓ | Full `argparse` namespace for reproducibility |
-| `training_log.csv` | ✓ | ✓ | ✓ | Per-episode (`phase="dqn_train"`) / per-iteration (`phase="pg_train"`) metrics, plus the cumulative cost columns below |
+| `training_log.csv` | ✓ | ✓ | ✓ | Per-episode (`phase="dqn_train"`) / per-iteration (`phase="pg_train"`) metrics, plus the cumulative cost columns below. Every episode that costs a predictor call also gets its own row: `phase="dqn_warmup"` for DQN, `phase="pg_episode"` for PG — see below |
 | `timing.json` | ✓ | ✓ | ✓ | Wall-clock + predictor-call accounting for the run (see "Cost accounting") |
 
 ### Key modules (`src/abcde_ooh/`)

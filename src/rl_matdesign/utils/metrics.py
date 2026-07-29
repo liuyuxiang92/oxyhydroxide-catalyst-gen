@@ -39,17 +39,34 @@ class RunMetrics:
     # ------------------------------------------------------------------
 
     def to_csv(self, path: str | Path, mode: str = "w") -> None:
-        """Write all rows to a CSV file. Use mode='a' to append (e.g. resume)."""
+        """Write all rows to a CSV file. Use mode='a' to append (e.g. resume).
+
+        When appending to an existing file the column order is taken from that
+        file's header, never from ``rows[0]``. Different phases carry different key
+        sets (a DQN run opens with ``dqn_warmup`` rows, a *resumed* one opens with
+        ``dqn_train`` rows), so deriving the order from the first row would append
+        under a header whose columns no longer line up — silent data corruption
+        rather than an error.
+        """
         if not self.rows:
             return
-        fieldnames = list(self.rows[0].keys())
-        for row in self.rows[1:]:
+        write_header = mode == "w" or not Path(path).exists()
+
+        fieldnames: List[str] = []
+        if not write_header:
+            with open(path, newline="") as f:
+                fieldnames = next(csv.reader(f), []) or []
+        for row in self.rows:
             for k in row:
                 if k not in fieldnames:
                     fieldnames.append(k)
-        write_header = mode == "w" or not Path(path).exists()
+
         with open(path, mode, newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            # restval: a row missing a column writes blank instead of raising.
+            # extrasaction: keys absent from an existing header are dropped rather
+            # than shifting every later column.
+            writer = csv.DictWriter(f, fieldnames=fieldnames,
+                                    restval="", extrasaction="ignore")
             if write_header:
                 writer.writeheader()
             writer.writerows(self.rows)

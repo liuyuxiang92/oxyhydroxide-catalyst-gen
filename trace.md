@@ -1425,3 +1425,102 @@ mode names next.
   a run where nothing happened.
 - Honest gap: the default pg_entropy_min=0.3 is therefore untested against a real
   45k collapse. It may need raising when the benchmark is re-run.
+
+### EARS — Progress (2026-07-29 15:13)
+<!-- concepts: logging-granularity, a2c-entropy-collapse, method-comparison -->
+- Discovered an asymmetry that makes the DQN-vs-A2C training-reward comparison
+  invalid as logged: DQN writes one `dqn_train` row per *episode* (6500 rows at
+  the 7500 budget), while PG writes one `pg_train` row per *iteration* — 300 rows
+  for 7500 episodes, each holding only `mean_return_raw` over the 25-episode batch.
+- Why it matters beyond plotting: the batch mean is exactly the statistic A2C is
+  optimising, and it kept improving (-695 -> -435) while the *best* candidate
+  froze. So logging only the mean makes the failure mode invisible in the log —
+  you cannot see the tail thin out, which is the thing materials discovery cares
+  about.
+- Fix: emit a `pg_episode` row per sampled episode in `train_pg`, reusing existing
+  column names (`return`, `return_raw`, `repeat_penalty`, `visit_count_before`,
+  `terminal_comp_key`) so `MetricsLogger.to_csv`'s key-union needs no new columns
+  and old readers that filter on `phase` are unaffected.
+- The 27 archived benchmark runs predate this, so their A2C arms only have batch
+  means. Any plot over that data must label the two granularities differently
+  rather than silently mixing 300 means with 6500 raw samples.
+
+### EARS — Progress (2026-07-29 15:31)
+<!-- concepts: logging-semantics, method-comparison, discounted-return -->
+- Found a genuine apples-to-oranges bug while answering "why does A2C look better
+  in training but worse in generation?". The two loggers record DIFFERENT
+  QUANTITIES under the same column name `return`:
+    * DQN (training.py:657): `episode_reward = env.path[-1].reward` — undiscounted
+      TERMINAL reward, i.e. the actual temperature.
+    * PG  (training.py:1272): `mean_return_raw` = mean of `returns[0]` — the
+      DISCOUNTED return G_0 = gamma^(n-1) * r_T.
+- With gamma=0.9 and n_components=5, gamma^4 = 0.6561. So A2C's logged "437 K" is
+  really 437/0.6561 = 666 K. That reconciles exactly with its generation best of
+  649 K — there was never a training/generation contradiction, only a unit error.
+- My compare_training_rewards.py figure put both on a shared y-axis, which made
+  A2C look ~100 K better than DQN when it is in fact worse. Caught only because
+  the training-vs-generation gap (216 K for A2C vs 19 K for DQN) was too large to
+  be explained by any plausible mechanism — the discrepancy was the clue, not a
+  finding.
+- Ruled out first, in order: constraint mismatch (`constrain_training: True` for
+  both, so train and generate search the same space), policy drift after the best
+  iteration (batch means were flat at ~437 for the final 2500 iters), and
+  generation decode mode (both use gen_temperature=1.0 softmax sampling, and PG
+  generation is the same softmax-over-allowed as the training rollout). Only after
+  all three failed did I check what the column actually meant.
+- Lesson: when two logs share a column NAME, verify they share a DEFINITION before
+  plotting them on one axis. Grep for every assignment to the column
+  (`grep -n '"return"'` found 3 sites, 2 semantics) rather than trusting the header.
+- Fix: `pg_episode` rows now carry an explicit `terminal_reward` column so no
+  reader has to re-derive gamma from run_config.json.
+
+### EARS — Progress (2026-07-29 16:23)
+<!-- concepts: logging-granularity, budget-accounting, method-comparison -->
+- A user question ("why does the 45k MC panel only show 20,000 eps?") surfaced two
+  separate things behind one confusing label:
+    * 20,000 was MY scatter thinning (--max-points default). The best-so-far curve
+      always used all 44,000; only the cloud was thinned. Raised the default to
+      60,000 so the largest arm draws in full, and reordered the panel title to
+      state the true point count FIRST — "44,000 pts (per episode)" — because
+      "20,000 of 44,000" reads as missing data.
+    * 44,000 != 45,000 because `dqn_warmup_eps: 1000` is NOT LOGGED. train_dqn_online
+      only emits `dqn_train` rows for the `dqn_num_train_eps` loop.
+- The warmup gap is the substantive one. DQN warmup calls _rollout_random_episode,
+  which goes through env.step -> reward_fn -> predictor: 1,000 real predictor calls
+  that appear nowhere in training_log.csv. At the 2,500 budget that is 40% of the
+  whole budget invisible, and it biases best-so-far curves and any cost-to-best
+  claim read off the log.
+- Asymmetry worth remembering: PG warmup is FREE. _fit_scaler_from_warmup
+  temporarily replaces reward_fn with a no-op (training.py:846), so pg warmup pays
+  zero predictor calls and has no rewards to log. DQN warmup pays full price. So
+  "warmup_eps: 1000" means completely different things for the two methods, and
+  only DQN's belongs on the reward axis.
+- Fix: emit `phase="dqn_warmup"` rows, and have compare_training_rewards.py prepend
+  them to the dqn_train rows with a continuous re-indexed episode axis (warmup
+  1..1000, then training 1001..45000) so the x axis is the true cumulative budget.
+
+### EARS — Progress (2026-07-29 17:20)
+<!-- concepts: csv-schema-evolution, resume-safety, logging-granularity -->
+- Caught a data-corruption bug that MY OWN change introduced, before it ever ran.
+  Adding `phase="dqn_warmup"` rows changed which row is `metrics.rows[0]`, and
+  `RunMetrics.to_csv` seeded its DictWriter fieldnames from exactly that row:
+      fieldnames = list(self.rows[0].keys())
+  A fresh DQN run now opens with a dqn_warmup row (6 keys), but a run resumed with
+  --resume-training SKIPS warmup (training.py:553 takes the resume_state branch, so
+  warmup_rows stays empty) and opens with a dqn_train row (18 keys, different
+  order). Resume appends with mode="a" and writes no header, so the appended rows
+  would land under the original header in a DIFFERENT COLUMN ORDER — silently
+  misaligned numbers, no exception, no warning.
+- Pre-existing code was safe only by accident: both fresh and resumed runs used to
+  open with a dqn_train row, so the orders happened to match.
+- Fix: in append mode, read the existing file's header and use THAT as fieldnames;
+  add restval="" so a row missing a column writes blank. extrasaction="ignore"
+  was already there and now does useful work (drops keys the old header lacks
+  instead of shifting every later column).
+- Generalisable lesson: any append-mode CSV writer that derives its schema from
+  in-memory data is one schema change away from silent corruption. The schema must
+  come from the FILE being appended to, not from the rows being written. Worth
+  checking anywhere else we append to a CSV.
+- How it was found: not by running anything. Tracing "what else depends on row
+  order?" after adding rows at the FRONT of the metrics list. The question to ask
+  after any insertion at position 0 is "who reads rows[0]?".
