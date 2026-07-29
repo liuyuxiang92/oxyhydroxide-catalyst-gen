@@ -108,11 +108,21 @@ Key YAML fields (edit `configs/ooh.yaml`):
 pg_warmup_eps: 1000          # random episodes to fit the StandardScaler
 pg_num_iters: 1000           # outer training iterations
 pg_batch_eps: 21             # episodes per batch; one gradient step per batch
-pg_entropy_coef: 0.15        # entropy bonus weight
-pg_repeat_penalty_coef: 10   # penalises revisiting the same composition
+pg_entropy_coef: 0.15        # entropy bonus weight, in σ of batch return
+pg_entropy_min: 0.3          # floor on normalised entropy H/ln|A|; 0 disables
+pg_repeat_penalty_coef: 10   # penalises revisiting the same composition, in σ
 gen_temperature: 3.0         # Boltzmann T for generation diversity
 num_gen_eps: 2000            # unique compositions to generate
 ```
+
+PG advantages are standardised per batch (no flag), so `pg_entropy_coef` and
+`pg_repeat_penalty_coef` are in standard deviations of batch return rather than in
+the property's own units. `pg_entropy_min` floors the policy's normalised entropy
+so it keeps exploring for the whole budget instead of going deterministic partway
+through — see [`docs/yaml_config_reference.md`](docs/yaml_config_reference.md).
+
+When sweeping budgets, hold `pg_batch_eps` fixed and vary only `pg_num_iters`;
+changing both confounds episode budget with update density.
 
 ---
 

@@ -270,10 +270,35 @@ charge-neutral Li vacancy are derived. (No `cl_map` / `o_off`.)
 | Key | Default | Key | Default |
 |---|---|---|---|
 | `pg_warmup_eps` | 200 | `pg_entropy_coef` | 0.01 |
-| `pg_num_iters` | 1000 | `pg_repeat_penalty_coef` | 0.0 |
-| `pg_batch_eps` | 15 | `pg_repeat_penalty_shape` | `log` (also `sqrt`) |
-| `pg_lr_actor` | 0.001 | `gamma` (or `pg_gamma`) | 0.9 |
-| `pg_lr_critic` | 0.001 (a2c only) | | |
+| `pg_num_iters` | 1000 | `pg_entropy_min` | 0.3 |
+| `pg_batch_eps` | 15 | `pg_repeat_penalty_coef` | 0.0 |
+| `pg_lr_actor` | 0.001 | `pg_repeat_penalty_shape` | `log` (also `sqrt`) |
+| `pg_lr_critic` | 0.001 (a2c only) | `gamma` (or `pg_gamma`) | 0.9 |
+
+Advantages are **standardised across each batch** before the actor update. This is
+unconditional and has no flag: without it the actor term scales with the raw
+reward (sintering temperatures are 400–700, so |advantage| is O(hundreds)) while
+the entropy bonus is at most `pg_entropy_coef · ln|A| ≈ 0.5`, which leaves the
+entropy term ~2 orders of magnitude too small to matter. Two consequences:
+
+- `pg_entropy_coef` and `pg_repeat_penalty_coef` are in **standard deviations of
+  batch return**, so they mean the same thing in every scenario whatever units the
+  property has. A `pg_repeat_penalty_coef` of 0.1 shifts the advantage by 0.1σ.
+- In `training_log.csv`, `repeat_penalty` is now in σ, while `return_shaped`
+  converts it back to the property's units so it stays comparable against
+  `return_raw`. Logs written before this change match neither.
+
+`pg_entropy_min` is a floor on **normalised** entropy `H / ln|A|` in `[0, 1]`, not
+absolute nats — `|A|` is ~268 for the 80-element oxide env but far smaller for
+OOH, so an absolute floor would not port. A proportional controller raises the
+effective entropy weight while entropy sits below the floor and decays it back to
+`pg_entropy_coef` above it; the base value is the lower clamp, so the controller
+can only ever add exploration pressure. Set `pg_entropy_min: 0` to disable.
+
+Watch `entropy_norm` and `entropy_coef_eff` in `training_log.csv`: `entropy_norm`
+is directly comparable to `pg_entropy_min`, and a run whose `entropy_coef_eff` is
+pinned at the ceiling is telling you the policy wants to collapse harder than the
+controller can prevent — raise `pg_entropy_coef`.
 
 ## DQN
 

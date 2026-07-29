@@ -623,6 +623,7 @@ def main() -> None:
         lr_actor             = float(cfg.get("pg_lr_actor", 1e-3))
         lr_critic            = float(cfg.get("pg_lr_critic", 1e-3))
         pg_entropy_coef         = float(cfg.get("pg_entropy_coef", 0.01))
+        pg_entropy_min          = float(cfg.get("pg_entropy_min", 0.3))
         gamma                   = float(cfg.get("pg_gamma", cfg.get("gamma", 0.9)))
         pg_repeat_penalty_coef  = float(cfg.get("pg_repeat_penalty_coef", 0.0))
         pg_repeat_penalty_shape = cfg.get("pg_repeat_penalty_shape", "log")
@@ -696,6 +697,7 @@ def main() -> None:
                 "opt_actor_state": _mid_ckpt.get("opt_actor_state") if _mid_ckpt else None,
                 "opt_critic_state": _mid_ckpt.get("opt_critic_state") if _mid_ckpt else None,
                 "visit_counts": _mid_ckpt.get("visit_counts") if _mid_ckpt else None,
+                "entropy_coef_eff": _mid_ckpt.get("entropy_coef_eff") if _mid_ckpt else None,
             }
 
         else:
@@ -732,6 +734,7 @@ def main() -> None:
                     lr_actor=lr_actor,
                     lr_critic=lr_critic,
                     pg_entropy_coef=pg_entropy_coef,
+                    pg_entropy_min=pg_entropy_min,
                     rl_method=method,
                     pg_repeat_penalty_coef=pg_repeat_penalty_coef,
                     pg_repeat_penalty_shape=pg_repeat_penalty_shape,

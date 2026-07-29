@@ -158,6 +158,20 @@ pg_batch_eps: 15
 pg_lr_actor: 0.001
 pg_lr_critic: 0.001
 pg_entropy_coef: 0.01
+# Floor on normalised policy entropy H/ln|A| (0-1), held by a proportional
+# controller on the entropy weight. Without it a fixed pg_entropy_coef lets the
+# policy go deterministic — how far it collapses depends on the NUMBER OF
+# UPDATES, so the same value that behaves at 500 iters produced entropy 0.00 at
+# 3000 and the best candidate stopped improving ~20% into the run. Set 0 to
+# disable and use the bare pg_entropy_coef.
+pg_entropy_min: 0.3
+
+# Budget sweeps: hold pg_batch_eps FIXED and vary only pg_num_iters, so episodes
+# are the only variable. Changing both confounds budget with gradient-noise and
+# update density (batch 15 does 67% more updates per episode than batch 25, and
+# collapses earlier in episode terms). At pg_batch_eps: 15 —
+# total episodes = pg_warmup_eps + pg_num_iters * pg_batch_eps, so
+#   pg_num_iters: 167 -> 2,705 eps  |  500 -> 7,700  |  3,000 -> 45,200
 gen_temperature: 3.0
 gen_top_frac: 0.0
 gen_epsilon: 0.0

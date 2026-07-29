@@ -210,6 +210,30 @@ There is no test suite, linter configuration, or build step.
 2. **Online training** — Each episode: roll out using `PolicyNet` (softmax sampling), compute MC returns, update actor with REINFORCE gradient; A2C additionally updates `ValueNet` critic to reduce variance
 3. **Candidate generation** — Greedy argmax (default) or stochastic sampling (`--pg-gen-stochastic`) via trained `PolicyNet`
 
+**Advantage standardisation and the entropy floor (PG only).** Advantages are
+standardised across each batch in `train_pg` — unconditionally, no flag. Without
+it the actor term scales with the raw reward (sintering temperatures are 400–700)
+while the entropy bonus is at most `pg_entropy_coef · ln|A| ≈ 0.5`, so the entropy
+term cannot influence the update and the policy collapses to a single composition.
+The observed failure: A2C got *worse* with more episodes (best 632 → 670 → 649 as
+the budget went 2.7k → 7.7k → 45.2k), because mean return kept improving while the
+best candidate froze ~20% in and `unique_comps_seen` stopped growing.
+
+Consequences to keep straight:
+
+- `pg_entropy_coef` and `pg_repeat_penalty_coef` are in **σ of batch return**, not
+  the property's units, as is the `repeat_penalty` log column. `return_shaped`
+  converts the penalty back to the property's units so it stays comparable against
+  `return_raw`. Logs from before this change match neither convention.
+- `pg_entropy_min` (default 0.3) floors **normalised** entropy `H / ln|A|`, not
+  nats, so it ports between the 80-element oxide env and OOH. `entropy_norm` and
+  `entropy_coef_eff` in `training_log.csv` are the diagnostic columns.
+- DQN is unaffected — ε-greedy is exogenous exploration and the replay buffer keeps
+  diverse transitions alive, so it does not have this failure mode.
+- When sweeping budgets, hold `pg_batch_eps` fixed and vary only `pg_num_iters`.
+  Batch size changes gradient noise *and* updates-per-episode, so varying both
+  confounds budget with collapse rate.
+
 ### Output files (under `--out`)
 
 | File | DQN | REINFORCE | A2C | Description |

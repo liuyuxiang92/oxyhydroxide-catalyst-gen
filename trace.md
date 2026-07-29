@@ -1278,3 +1278,150 @@ Implementation landed and verified (220 passed / 1 pre-existing lips failure).
 Not stuck — sequential planned edits to dp_predictor.py (normalizer, DPConfig field,
 frame-builder loop, return signature). Debug-dump call site and _maybe_dump_frames
 mode names next.
+
+### EARS — Stuck (2026-07-28 18:37)
+<!-- concepts: dpa4-sezm-descriptor, deepmd-type-embedding, ooh-adsorbate-frames -->
+- Context: user's DPA-4 (sezm) OOH property model crashes in
+  `torch.embedding(self.adam_type_embedding, atype)` with a CUDA device-side
+  assert, i.e. an out-of-range index in the type embedding.
+- Goal: find which index is out of range and fix the input we hand DeepMD.
+- Ruled out: the `-1` ghost-atom masking. The user reran with `adsorbates: []`,
+  which builds a bare slab with NO masked atoms, and it fails identically.
+- Hypothesis 2 (type map): dp_predictor builds atom_types from ASE periodic-table
+  order (`_periodic_index`, index = Z-1) instead of the model's own
+  `get_type_map()`. The sibling StructureScorePredictor does it correctly
+  (structure_score.py:508-509) and eval_property_ensemble even validates
+  (dp_eval.py:165-170) — the OOH path forks and skips that. BUT the user reports
+  dpa3 and dpa4 share a type_map, and dpa3 worked, which weakens this.
+- Unexplored and now the leading suspect: `extended_atype` in
+  sezm.py:1470 is the EXTENDED (ghost-padded) type array. DeepMD pads ghost atoms
+  with -1, and sezm_nn/embedding.py:146 does a raw torch.embedding with no clamp.
+  That -1 would be independent of anything we pass. Could mean DPA-4 needs
+  different eval kwargs (mixed_type?) rather than a different type array.
+- Lesson: stop hypothesising remotely. A CUDA assert is asynchronous and names the
+  wrong line; running the same call with CUDA_VISIBLE_DEVICES="" turns it into a
+  Python IndexError naming the actual offending index. Ask for that FIRST next
+  time instead of reasoning from the traceback.
+
+### EARS — Session Start / Progress (2026-07-29 10:15)
+<!-- concepts: rl-benchmarking, dataviz, experiment-hygiene -->
+- Task: plot method comparison (DQN-bootstrap / DQN-MC / A2C) at matched sampling
+  budgets and matched target property, plus a cost-vs-budget comparison, from a
+  27-run sinter/calcine/sinter+calcine sweep the user shipped as compare_time.tar.bz2.
+- Why: decide which RL arm is worth the wall-clock for the oxide temperature task.
+- Key framing correction from the user: reward is `-T`. Temperature is a positive
+  physical quantity and we want the LOWEST one, so every figure must be drawn on
+  the positive-T axis with "lower is better", not on raw reward.
+  → added `--minimize` to compare_methods.py rather than pre-negating the CSVs;
+  ranking still happens on reward internally so the winner can't flip, and the
+  summary CSV renames `*_reward` → `*_objective` so a minimized table can't be
+  misread as a maximized one.
+- Discovery (data hygiene, matters more than the plots): the sweep directory names
+  are NOT trustworthy. `calcine_*_eps_2500` and `calcine_*_eps_7500` hold identical
+  configs and identical predictor-call counts — the same run twice. a2c calcine is
+  12700 episodes in BOTH. Only sinter and sinter_calcine label their budgets
+  correctly.
+  → compare_budget_cost.py derives the x-axis budget from run_config.json, never
+  from the directory name, and warns on duplicate budgets per method. A mislabelled
+  sweep then shows as two stacked points instead of a fake trend.
+- Discovery: all three `dqn_eps_45000` arms are incomplete (run_config.json only,
+  no timing.json/generated.csv). The 45k panels are 2/3 methods and say so in the title.
+- Discovery: at 45k episodes generation collapses — 1-6 unique candidates out of
+  1000-7500 generation episodes for every method. The distribution panel is
+  honestly degenerate there; n= is annotated on every panel so it can't be missed.
+- Discovery worth a follow-up: DQN(bootstrap) costs ~8x DQN(MC) in wall-clock at
+  the same episode count (sinter 7500: 6.1 h vs 0.74 h) and the split panel shows
+  it is nearly all RL overhead, not predictor time. The bootstrap target evaluates
+  Q over `next_allowed` actions, which is ~80 elements x digits wide in the oxide env.
+
+### EARS — Progress (2026-07-29 10:47)
+<!-- concepts: dataviz, user-feedback -->
+- User rejected my redesigned comparison figure: "very hard to read compared to
+  the last version." Asked which version + scope rather than guessing; they chose
+  the ORIGINAL repo style (single-hue violins + green vertical bar chart) and said
+  the 4-panel budget_cost figures are fine.
+- Reverted compare_methods.py's plotting block to the committed style. Kept only
+  the parts that were about correctness, not taste: the `--minimize` axis flip,
+  `--y-label`, run-directory input, best_formula in the summary CSV.
+- Dropped from compare_methods.py: per-method colours, jittered strip, hollow
+  best-marker, horizontal lollipop, the n>=12 violin guard, `--series-color`.
+  Colour pinning stays in compare_budget_cost.py, which the user kept.
+- Kept one addition on purpose: n= now rides in the x tick label ("A2C\nn=21")
+  instead of as a floating annotation. Candidate counts differ 300x at a fixed
+  budget because generated.csv is deduplicated, so a violin's width is not
+  comparable across methods without it — and a tick label costs no clutter.
+- Lesson: I redesigned a figure the repo already had a house style for. The
+  --minimize axis flip was the actual ask; the restyling was unrequested scope
+  I added on top, and it was the part that failed. Change what was asked, keep
+  the surrounding conventions.
+
+### EARS — Progress (2026-07-29 11:49)
+<!-- concepts: policy-gradient, a2c-entropy-collapse, rl-diagnostics -->
+- Diagnosed WHY A2C degrades with budget on the oxide benchmark, from
+  training_log.csv rather than by guessing. Root cause is three compounding bugs
+  in train_pg (src/rl_matdesign/training.py):
+  1. advantages never normalised (training.py:977) — raw returns are 400-700 K, so
+     the actor term is O(hundreds) while the entropy bonus is 0.1*5.6 = 0.56. The
+     entropy term is drowned by ~2 orders of magnitude.
+  2. entropy coef is a constant with no feedback, so collapse timing is set by
+     NUMBER OF UPDATES, not by budget. 3000 updates = 6x the collapse pressure of
+     500 at identical YAML.
+  3. repeat_penalty is a no-op at this reward scale: 0.1*ln(1+4472) = 0.84 against
+     returns of ~436, i.e. 0.2%.
+- Signature evidence: mean return improves the whole run (-695 -> -435) while
+  best-so-far FREEZES at iter 750/3000 and unique_comps_seen goes 3635 -> 3661 in
+  the last 33,750 episodes. calcine_a2c_45000 ends at entropy 0.00 with one
+  composition sampled 31,843 times out of 45,200 episodes.
+- Framing that made it click: A2C maximises the MEAN of its sampled distribution;
+  materials discovery wants the MINIMUM of the tail. Those agree while the policy
+  is broad and diverge completely once it sharpens. Worth reusing for any
+  generative-design-via-RL argument.
+- Confound found in the sweep itself: A2C 2500/7500 used pg_batch_eps=25 but 45000
+  used 15, so the 45k arm did 67% more updates per episode and collapsed ~40%
+  EARLIER in episode terms. DQN's sweep was clean (grad_steps_per_ep=5 throughout).
+  "More episodes made it worse" was not attributable to budget alone.
+- User direction on the fix: no on/off flags, no compatibility branch — normalise
+  unconditionally and delete the wrong path. One tunable value only
+  (pg_entropy_min), mirroring dqn_eps_min. Entropy floor expressed as a FRACTION
+  of ln|A|, not absolute nats, because |A| is ~268 for the 80-element oxide env
+  but much smaller for OOH — an absolute floor would not port across scenarios.
+
+### EARS — Progress (2026-07-29 11:59)
+<!-- concepts: testing, a2c-entropy-collapse -->
+- Implemented the A2C fix in src/rl_matdesign/training.py: _episode_pg_terms now
+  returns raw components (logp, advantage, entropy, max_entropy, critic_loss)
+  instead of a finished actor loss. Folding advantage into the loss inside the
+  per-episode helper was the structural reason batch-level normalisation was
+  impossible — worth remembering as a general shape: if you want a batch-level
+  statistic, the per-item helper must not pre-reduce.
+- Extracted entropy_coef_update() as a module-level pure function rather than
+  leaving the controller inline in the training loop, purely so it is unit
+  testable. Inline controllers are untestable without running training.
+- Dead end worth recording: my first controller test asserted h > floor*0.8 after
+  60 steps and failed at h=0.206. The controller HAD arrested the collapse — the
+  threshold was an arbitrary number I made up. Rewrote it as an A/B: run the same
+  toy dynamics with floor=0 (collapses to exactly 0.0) vs floor=0.3 (settles
+  >0.15). Lesson: when a test needs a magic constant, that usually means the
+  assertion should be a comparison against a baseline instead.
+- max_entropy is per-step ln(len(allowed)), not a global constant, because the env
+  prunes infeasible actions so |A| varies within an episode.
+
+### EARS — Progress (2026-07-29 12:55)
+<!-- concepts: a2c-entropy-collapse, verification-design -->
+- Verified the A2C fix on the real oxide scenario, not just unit tests.
+- Decisive number for the original bug: adv_std_raw logs 127 -> 28 over training.
+  Advantages were O(100) while the entropy bonus was pg_entropy_coef*H = 0.01*5.6
+  = 0.056. ~1000x mismatch, which is why the entropy term could not hold the
+  policy open. After standardisation advantages are O(1) and the coefficient is
+  comparable by construction.
+- Verification design worth reusing: I could NOT reproduce a full collapse on the
+  laptop (2000 episodes only got entropy_norm down to 0.402, above the 0.3 floor,
+  so floor-on and floor-off came out BIT-IDENTICAL). Rather than claim success
+  from a null result, I ran a third arm with pg_entropy_min raised to 0.75 —
+  above the observed entropy — to force the controller to engage. That showed the
+  closed loop: entropy 0.641 -> coef_eff 0.01 -> 0.62 (62x base) -> entropy back
+  to 0.843 -> coef_eff decays to base. Lesson: when the failure needs more compute
+  than you have, move the THRESHOLD to meet the system instead of concluding from
+  a run where nothing happened.
+- Honest gap: the default pg_entropy_min=0.3 is therefore untested against a real
+  45k collapse. It may need raising when the benchmark is re-run.

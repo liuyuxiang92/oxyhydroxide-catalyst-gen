@@ -907,11 +907,35 @@ def _rollout_pg_episode(
 # Policy gradient training (REINFORCE / A2C)
 # ---------------------------------------------------------------------------
 
+# Entropy-floor controller. The failure it exists to prevent: with a fixed
+# coefficient, how far the policy collapses is set by the *number of gradient
+# updates*, so the same YAML that behaves at 100 updates goes deterministic at
+# 3000 (observed: entropy 0.00 with one composition sampled 31,843 times out of
+# 45,200 episodes). A proportional controller on normalised entropy removes that
+# dependence on run length, so one setting serves every budget.
+_ENTROPY_CTRL_GAIN = 2.0    # how hard coef_eff reacts to a floor violation
+_ENTROPY_CTRL_MAX  = 100.0  # coef_eff ceiling, as a multiple of pg_entropy_coef
+
+
+def entropy_coef_update(coef_eff: float, entropy_norm: float,
+                        base_coef: float, floor: float) -> float:
+    """One step of the entropy-floor controller.
+
+    ``entropy_norm`` is ``H / ln|A|`` in [0, 1]; ``floor`` is ``pg_entropy_min``.
+    Below the floor the weight grows, above it decays back toward ``base_coef``,
+    which acts as the lower clamp so the controller can only ever *add* pressure
+    to explore. ``floor <= 0`` disables it and pins the weight at ``base_coef``.
+    """
+    if floor <= 0.0:
+        return base_coef
+    coef_eff *= math.exp(_ENTROPY_CTRL_GAIN * (floor - entropy_norm))
+    return min(max(coef_eff, base_coef), base_coef * _ENTROPY_CTRL_MAX)
+
+
 def _episode_pg_terms(
     *,
     path,
     returns: List[float],
-    returns_shaped: List[float],
     policy: torch.nn.Module,
     value_net: Optional[torch.nn.Module],
     scaler: "StandardScaler",
@@ -919,16 +943,25 @@ def _episode_pg_terms(
     fraction_set: List[str],
     device: "torch.device",
 ) -> tuple:
-    """Build per-step actor/entropy/critic loss tensors for one episode.
+    """Build per-step policy-gradient *components* for one episode.
 
-    Tensors carry autograd state so they can be stacked with terms from other
-    episodes in the same batch and backproped together.
+    Returns ``(logp_taken, advantage_raw, entropy, max_entropy, critic_loss)``
+    rather than a finished actor loss. The advantage is deliberately left
+    un-scaled and separate from ``logp`` so :func:`train_pg` can standardise it
+    across the whole batch before forming ``-logp * adv`` — folding the two
+    together here would make batch-level normalisation impossible.
+
+    ``logp_taken`` and ``entropy`` carry autograd state; ``advantage_raw`` and
+    ``max_entropy`` are plain floats (the advantage is a constant w.r.t. the
+    actor by construction — ``G`` is data and ``V`` is detached).
     """
-    actor_losses: List[torch.Tensor] = []
+    logp_taken: List[torch.Tensor] = []
+    advantages_raw: List[float] = []
     entropy_terms: List[torch.Tensor] = []
+    max_entropies: List[float] = []
     critic_losses: List[torch.Tensor] = []
 
-    for step, G_t, G_t_shaped in zip(path, returns, returns_shaped):
+    for step, G_t in zip(path, returns):
         allowed = step.allowed_actions
         if not allowed:
             continue
@@ -967,22 +1000,30 @@ def _episode_pg_terms(
         if taken_idx is None:
             continue
 
-        G_raw_t    = torch.tensor(G_t,        dtype=torch.float32, device=device)
-        G_shaped_t = torch.tensor(G_t_shaped, dtype=torch.float32, device=device)
+        G_raw_t = torch.tensor(G_t, dtype=torch.float32, device=device)
 
         if value_net is not None:
             s_mat_single  = torch.tensor(s_mat.reshape(1, -1),  dtype=torch.float32, device=device)
             s_step_single = torch.tensor(s_step.reshape(1, -1), dtype=torch.float32, device=device)
             value = value_net(s_mat_single, s_step_single).reshape(-1)[0]
-            advantage = G_shaped_t - value.detach()
+            # The critic regresses the *raw* return: it is a value function for the
+            # real objective, not for the exploration-shaped one.
             critic_losses.append((value - G_raw_t) ** 2)
+            advantage = G_t - float(value.detach().item())
         else:
-            advantage = G_shaped_t
+            # REINFORCE: no baseline. Batch standardisation in train_pg supplies
+            # the variance reduction a critic would otherwise give.
+            advantage = G_t
 
-        actor_losses.append(-log_probs[taken_idx] * advantage)
+        logp_taken.append(log_probs[taken_idx])
+        advantages_raw.append(float(advantage))
         entropy_terms.append(-(probs * log_probs).sum())
+        # Max entropy of this step's action set. |A| varies per step (the env
+        # prunes infeasible actions), so the floor has to be measured against the
+        # live action count, not a global constant.
+        max_entropies.append(math.log(n) if n > 1 else 0.0)
 
-    return actor_losses, entropy_terms, critic_losses
+    return logp_taken, advantages_raw, entropy_terms, max_entropies, critic_losses
 
 
 def train_pg(
@@ -1000,6 +1041,7 @@ def train_pg(
     lr_actor: float = 1e-3,
     lr_critic: float = 1e-3,
     pg_entropy_coef: float = 0.01,
+    pg_entropy_min: float = 0.3,
     rl_method: str = "a2c",
     pg_repeat_penalty_coef: float = 0.0,
     pg_repeat_penalty_shape: str = "log",
@@ -1012,8 +1054,30 @@ def train_pg(
     Structure:
         for it in range(num_iters):
             collect batch_eps episodes under current policy
-            accumulate per-step actor/entropy/critic terms across all of them
+            standardise advantages across the batch
             one optimizer step over the entire batch
+
+    Scale invariance
+    ----------------
+    Advantages are **standardised across the batch** before forming the actor
+    loss, unconditionally. Without it the actor term scales with the raw reward
+    (sintering temperatures are 400-700, so |advantage| is O(hundreds)) while the
+    entropy bonus is ``pg_entropy_coef * H`` with ``H <= ln|A| ~ 5.6``. The
+    entropy term is then ~2 orders of magnitude too small to influence the update
+    and the policy collapses to a single composition. After standardisation both
+    ``pg_entropy_coef`` and ``pg_repeat_penalty_coef`` are expressed in standard
+    deviations of batch return, so they mean the same thing in every scenario
+    regardless of the property's units.
+
+    ``pg_entropy_min`` is a floor on *normalised* entropy ``H / ln|A|`` in [0, 1],
+    held by a proportional controller (see ``_ENTROPY_CTRL_GAIN``). Set it to 0 to
+    disable the floor and use the bare ``pg_entropy_coef``.
+
+    .. note::
+       In the metrics rows ``repeat_penalty`` is now in σ, while ``return_shaped``
+       converts it back to the property's units so it stays comparable against
+       ``return_raw``. Logs written before this change are not comparable to
+       either.
     """
     policy.train()
     opt_actor = torch.optim.Adam(policy.parameters(), lr=lr_actor)
@@ -1037,6 +1101,13 @@ def train_pg(
     if checkpoint_cfg and checkpoint_cfg.get("visit_counts"):
         visit_counts = Counter(checkpoint_cfg["visit_counts"])
 
+    # Effective entropy weight, carried across updates by the floor controller.
+    # Restored on resume so a resumed run doesn't snap back to the base weight and
+    # re-collapse the policy it had just re-opened.
+    coef_eff = float(pg_entropy_coef)
+    if checkpoint_cfg and checkpoint_cfg.get("entropy_coef_eff") is not None:
+        coef_eff = float(checkpoint_cfg["entropy_coef_eff"])
+
     metrics: List[dict] = []
     accepted = int(checkpoint_cfg.get("start_episode", 0)) if checkpoint_cfg else 0
     attempted = 0
@@ -1052,7 +1123,6 @@ def train_pg(
     for it in outer_pbar:
         batch_paths: List[list] = []
         batch_returns: List[List[float]] = []
-        batch_returns_shaped: List[List[float]] = []
         batch_terminal_keys: List[tuple] = []
         batch_repeat_penalties: List[float] = []
         batch_visits_before: List[int] = []
@@ -1090,11 +1160,13 @@ def train_pg(
             else:
                 repeat_penalty = 0.0
             visit_counts[terminal_key] += 1
-            returns_shaped = [G_t - repeat_penalty for G_t in returns]
+            # The penalty is applied *after* advantage standardisation (below), so
+            # the coefficient is in σ of batch return rather than in the property's
+            # own units. Subtracting it from the raw return here would make it a
+            # no-op: 0.1*ln(1+4472) = 0.84 against returns of ~436 is 0.2%.
 
             batch_paths.append(path)
             batch_returns.append(returns)
-            batch_returns_shaped.append(returns_shaped)
             batch_terminal_keys.append(terminal_key)
             batch_repeat_penalties.append(repeat_penalty)
             batch_visits_before.append(n_visits_before)
@@ -1104,14 +1176,16 @@ def train_pg(
         if not batch_paths:
             continue
 
-        all_actor: List[torch.Tensor] = []
+        all_logp: List[torch.Tensor] = []
+        all_adv_raw: List[float] = []
+        all_penalty: List[float] = []
         all_entropy: List[torch.Tensor] = []
+        all_max_entropy: List[float] = []
         all_critic: List[torch.Tensor] = []
-        for path, returns, returns_shaped in zip(batch_paths, batch_returns, batch_returns_shaped):
-            a_terms, e_terms, c_terms = _episode_pg_terms(
+        for path, returns, penalty in zip(batch_paths, batch_returns, batch_repeat_penalties):
+            lp, adv, e_terms, h_max, c_terms = _episode_pg_terms(
                 path=path,
                 returns=returns,
-                returns_shaped=returns_shaped,
                 policy=policy,
                 value_net=value_net,
                 scaler=scaler,
@@ -1119,16 +1193,42 @@ def train_pg(
                 fraction_set=fraction_set,
                 device=device,
             )
-            all_actor.extend(a_terms)
+            all_logp.extend(lp)
+            all_adv_raw.extend(adv)
+            all_penalty.extend([penalty] * len(adv))
             all_entropy.extend(e_terms)
+            all_max_entropy.extend(h_max)
             all_critic.extend(c_terms)
 
-        if not all_actor:
+        if not all_logp:
             continue
 
-        actor_loss       = torch.stack(all_actor).mean()
-        entropy_bonus    = torch.stack(all_entropy).mean()
-        total_actor_loss = actor_loss - pg_entropy_coef * entropy_bonus
+        # --- advantage standardisation (the whole point; see docstring) -------
+        adv_raw = torch.tensor(all_adv_raw, dtype=torch.float32, device=device)
+        adv_mean = float(adv_raw.mean().item())
+        adv_std  = float(adv_raw.std(unbiased=False).item())
+        if adv_std > 1e-8:
+            adv = (adv_raw - adv_mean) / adv_std
+        else:
+            # Every episode in the batch scored identically — there is no signal to
+            # extract. Dividing by an epsilon here would amplify float noise into a
+            # full-magnitude gradient, so emit a zero update instead.
+            adv = torch.zeros_like(adv_raw)
+        # Repeat penalty now lives in σ units, applied to the standardised value.
+        adv = adv - torch.tensor(all_penalty, dtype=torch.float32, device=device)
+
+        logp_t        = torch.stack(all_logp)
+        entropy_t     = torch.stack(all_entropy)
+        actor_loss    = -(logp_t * adv).mean()
+        entropy_bonus = entropy_t.mean()
+
+        # --- entropy floor controller ----------------------------------------
+        mean_max_entropy = float(np.mean(all_max_entropy)) if all_max_entropy else 0.0
+        entropy_norm = (float(entropy_bonus.item()) / mean_max_entropy
+                        if mean_max_entropy > 1e-8 else 0.0)
+        coef_eff = entropy_coef_update(coef_eff, entropy_norm,
+                                       pg_entropy_coef, pg_entropy_min)
+        total_actor_loss = actor_loss - coef_eff * entropy_bonus
 
         opt_actor.zero_grad(set_to_none=True)
         total_actor_loss.backward()
@@ -1145,8 +1245,9 @@ def train_pg(
         update_idx += 1
         ep_actor_loss = float(actor_loss.item())
         ep_entropy    = float(entropy_bonus.item())
-        mean_return_raw    = float(np.mean([rs[0] for rs in batch_returns])) if batch_returns else 0.0
-        mean_return_shaped = float(np.mean([rs[0] for rs in batch_returns_shaped])) if batch_returns_shaped else 0.0
+        mean_return_raw = float(np.mean([rs[0] for rs in batch_returns])) if batch_returns else 0.0
+        # In σ units now, like the penalty itself — see the class docstring.
+        mean_return_shaped = mean_return_raw - float(np.mean(all_penalty)) * adv_std
 
         _row = {
             "phase": "pg_train",
@@ -1164,6 +1265,12 @@ def train_pg(
             "terminal_comp_key": str(batch_terminal_keys[-1]) if batch_terminal_keys else "",
             "actor_loss": ep_actor_loss,
             "entropy": ep_entropy,
+            # entropy_norm is directly comparable to pg_entropy_min — this is the
+            # column to watch for collapse, since raw entropy depends on |A|.
+            "entropy_norm": entropy_norm,
+            "entropy_coef_eff": coef_eff,
+            "adv_mean_raw": adv_mean,
+            "adv_std_raw": adv_std,
             "critic_loss": critic_loss_val,
         }
         if timer is not None:
@@ -1189,6 +1296,7 @@ def train_pg(
                 "opt_actor_state": opt_actor.state_dict(),
                 "opt_critic_state": opt_critic.state_dict() if opt_critic is not None else None,
                 "visit_counts": dict(visit_counts),
+                "entropy_coef_eff": coef_eff,
             }, numbered_path=_numbered)
             tqdm.write(f"[INFO] PG checkpoint saved at iter {it + 1} → {_numbered}")
 
