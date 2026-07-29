@@ -1524,3 +1524,27 @@ mode names next.
 - How it was found: not by running anything. Tracing "what else depends on row
   order?" after adding rows at the FRONT of the metrics list. The question to ask
   after any insertion at position 0 is "who reads rows[0]?".
+
+### EARS — Progress (2026-07-29 18:00)
+<!-- concepts: scope-calibration, sweep-design, budget-confounds -->
+- Over-engineered a request and got corrected. User asked for "a bash script to
+  submit the CLI commands"; I started building scripts/make_budget_configs.py to
+  materialise budget-scaled YAML per (scenario, method, budget). Their actual
+  workflow is simpler: edit ONE yaml by hand, run the sweep, repeat per budget.
+  Deleted the generator. Second time this session the failure was the same shape —
+  adding unrequested machinery on top of the thing that was actually asked for
+  (cf. the compare_methods restyling). The ask WAS the deliverable.
+- What survived from the over-build, correctly, as COMMENTS rather than code: the
+  two config keys that silently invalidate short-budget arms when a 50k-episode
+  config is reused at 2.5k.
+    * dqn_eps_anneal_eps: ships at 30000. At budget 2500 epsilon only reaches
+      1 - 2500/30000 = 0.92, so the DQN arm is ~92% random search. Confirmed in the
+      archived runs, which ended at epsilon=0.950 with training bests matching
+      random draws. Should be ~60% of dqn_num_train_eps (the reference's 30k/50k).
+    * pg_batch_eps: must stay FIXED while pg_num_iters varies. The archived sweep
+      used 25 at small budgets and 15 at 45k, confounding budget with collapse rate.
+- Also worth stating in the script: budget in PREDICTOR CALLS != budget in episodes.
+  DQN pays dqn_warmup_eps real calls, PG's warmup pays zero. Matching on total
+  episodes hands DQN ~1000 fewer paid evaluations than PG at the same nominal budget.
+- Lesson: when the user's process is manual-by-choice, encode the knowledge as
+  warnings at the point of use, not as automation that takes the choice away.
