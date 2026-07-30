@@ -14,13 +14,32 @@
 #     ./submit_sweep.sh eps22500
 #     ./submit_sweep.sh eps45000
 #
+# Each call launches 3 scenarios x 3 arms x len(SEEDS) runs, all in parallel (up to
+# MAX_JOBS). With the default 10 seeds that's 90 runs sharing one GPU at once, which
+# slows every run down. Pin ONE seed per call with -seed to submit only 9 at a time
+# (3 scenarios x 3 arms):
+#
+#     ./submit_sweep.sh eps2500 -seed 7
+#
+# The script blocks until its own runs finish (see `wait` below), so looping over
+# seeds gives you a queue of 9-at-a-time batches with no extra tooling:
+#
+#     for s in 7 19 23 42 58 61 77 84 96 103; do
+#         ./submit_sweep.sh eps2500 -seed "$s"
+#     done
+#
+# Put that in its own nohup'd wrapper script if you want the whole queue to survive
+# a logout; each ./submit_sweep.sh call already blocks until its batch is done, so
+# the wrapper's job is only to not exit between iterations.
+#
 # DRYRUN=1 prints the commands instead of running them.
-# Runs whose generated.csv already exists are skipped, so a crashed sweep resumes.
+# Runs whose generated.csv already exists are skipped, so a crashed sweep resumes
+# (and a seed already finished in an earlier -seed call is skipped, not rerun).
 #
 #   OUT=calc_time          output root
-#   MAX_JOBS=30            concurrent runs
+#   MAX_JOBS=30            concurrent runs (only matters if SEEDS has >1 value)
 #   SCENARIOS="sinter"     narrow the set
-#   SEEDS="1 2 3"          override the seed list
+#   SEEDS="1 2 3"          override the seed list (ignored if -seed is passed)
 #   FORCE=1                redo completed runs
 #
 # ---------------------------------------------------------------------------
@@ -59,13 +78,35 @@ set -euo pipefail
 
 LABEL="${1:-}"
 if [[ -z "$LABEL" ]]; then
-    echo "usage: $0 <label>    e.g. $0 eps2500" >&2
+    echo "usage: $0 <label> [-seed N]    e.g. $0 eps2500 -seed 7" >&2
     exit 1
 fi
+shift
+
+SEED_ONE=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -seed|--seed)
+            SEED_ONE="${2:-}"
+            if [[ -z "$SEED_ONE" ]]; then
+                echo "error: -seed needs a value" >&2
+                exit 1
+            fi
+            shift 2
+            ;;
+        *)
+            echo "error: unrecognised argument '$1'" >&2
+            exit 1
+            ;;
+    esac
+done
 
 RL_BIN="${RL_BIN:-rl-matdesign}"
 OUT="${OUT:-calc_time}"
+# -seed pins the sweep to one seed (9 jobs: 3 scenarios x 3 arms). Without it, all
+# of SEEDS runs in this one call (up to MAX_JOBS at a time).
 SEEDS="${SEEDS:-7 19 23 42 58 61 77 84 96 103}"
+[[ -n "$SEED_ONE" ]] && SEEDS="$SEED_ONE"
 MAX_JOBS="${MAX_JOBS:-30}"
 SCENARIOS="${SCENARIOS:-sinter calcine sinter_calcine}"
 FORCE="${FORCE:-0}"
