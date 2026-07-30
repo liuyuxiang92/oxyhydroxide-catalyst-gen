@@ -1571,3 +1571,27 @@ mode names next.
   generator): when the user describes their workflow, build to THAT, not to the
   generalised version of it. Ask what their working directory looks like before
   assuming it needs fixing.
+
+### EARS — Progress (2026-07-30 09:30)
+<!-- concepts: config-precedence, run-metadata, verification-by-testing -->
+- Writing a budget-config checker surfaced a real metadata bug in
+  run_experiment.py. run_config.json was built as:
+      run_config = {"config_file":..., "method": method, ...seeds..., **cfg}
+  with **cfg spread LAST, so a YAML `method: dqn` OVERWROTE the resolved method
+  whenever --method selected a different arm. An A2C run recorded method="dqn"
+  while correctly writing policy.pt and value_net.pt. Same hazard for
+  train_seed/dp_seed/gen_seed if a config defines them.
+- Newly exposed by the workflow I had just recommended: selecting the arm with
+  --method against the shared oxides_<scen>.yaml (which pins method: dqn at line
+  143). The archived a2c runs were unaffected because they used oxides_*_a2c.yaml,
+  whose `method:` already said a2c. So the bug was latent until the configs and the
+  CLI disagreed.
+- Fix: spread **cfg FIRST so resolved runtime values win. Precedence rule worth
+  keeping: run_config.json is meant to record WHAT RAN, so anything computed at
+  runtime must override the file it came from, never the reverse.
+- timing.json was correct throughout (t.get("method") == "a2c"), which is what let
+  me detect it. Two independent records of the same fact caught a bug neither would
+  have caught alone — the checker now cross-checks them and flags disagreement, so
+  existing affected runs are identifiable rather than silently mislabelled.
+- Found only by running the checker against REAL run dirs. Reading the code would
+  not have flagged the dict-spread order; the false-positive triage did.

@@ -325,10 +325,15 @@ def main() -> None:
     set_global_seed(train_seed, deterministic=(args.train_seed is not None))
     os.makedirs(args.out, exist_ok=True)
 
+    # cfg FIRST so the resolved runtime values win. With **cfg spread last, a YAML
+    # `method: dqn` overwrote the real method whenever --method selected a different
+    # arm on the command line — the run was correct (it wrote policy.pt/value_net.pt)
+    # but run_config.json recorded "dqn" for an A2C run. Same hazard for the seeds if
+    # a config happens to define them.
     run_config = {
+        **cfg,
         "config_file": args.config, "method": method,
         "dp_seed": args.dp_seed, "train_seed": train_seed, "gen_seed": gen_seed,
-        **cfg,
     }
     with open(os.path.join(args.out, "run_config.json"), "w") as f:
         json.dump(run_config, f, indent=2)
