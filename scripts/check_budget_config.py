@@ -37,6 +37,7 @@ import csv
 import glob
 import json
 import os
+import re
 from typing import List, Optional
 
 _EPISODE_PHASES = ("dqn_warmup", "dqn_train", "pg_episode", "pg_train")
@@ -107,11 +108,21 @@ def inspect(run: str) -> dict:
                     method_conflict = (cfg_method, t_method)
         except (ValueError, OSError):
             pass
-    # The presence of these files is the ground truth for which trainer ran.
+    # The presence of these files is the ground truth for which trainer ran, but they
+    # are written at the END, so they are absent while a job is still going.
     if os.path.exists(os.path.join(run, "policy.pt")) and method == "dqn":
         method = "a2c"
     elif os.path.exists(os.path.join(run, "qnet.pt")) and method in ("a2c", "reinforce"):
         method = "dqn"
+    elif method_conflict is None and not os.path.exists(timing_path):
+        # Nothing to corroborate against yet. The directory name is the only other
+        # record of intent, and submit_sweep.sh puts the arm in it. Cheap sanity
+        # check that catches runs launched before the run_config method fix.
+        base = os.path.basename(run.rstrip("/")).lower()
+        if "a2c" in base and method == "dqn":
+            method, method_conflict = "a2c", ("dqn", "a2c (from dir name)")
+        elif ("_mc_" in base or "bootstrap" in base) and method != "dqn":
+            method_conflict = (method, "dqn (from dir name)")
 
     info = {
         "run": os.path.basename(run.rstrip("/")),
@@ -167,30 +178,38 @@ def inspect(run: str) -> dict:
         info["expect"] = iters * batch
         info["detail"] = f"{iters:,} iters x {batch} batch (warmup {warm:,}, free)"
         info["actual"] = counts["pg_episode"] or counts["pg_train"] * batch
-        if counts["pg_train"] and not counts["pg_episode"]:
+        if counts["pg_train"] and not counts["pg_episode"] \
+                and os.path.exists(os.path.join(run, "generated.csv")):
             info["problems"].append(
                 "no pg_episode rows -- this run predates per-episode PG logging, so "
                 "only batch means are available (spread compressed ~1/sqrt(batch))."
             )
 
+    # --- status: config checks always run; execution checks need a finished run ---
+    finished = info["n_candidates"] is not None
+    if finished:
+        info["status"] = "done"
+    elif info["actual"]:
+        info["status"] = "running"
+    else:
+        info["status"] = "queued"
+
     expect = info.get("expect") or info["configured"]
-    if info["actual"] and expect:
+    if finished and info["actual"] and expect:
         drift = info["actual"] - expect
         if abs(drift) > max(5, 0.02 * expect):
             info["problems"].append(
                 f"expected {expect:,} logged episodes but found {info['actual']:,} "
                 f"({drift:+,}) -- config and log disagree"
             )
-    if not info["actual"]:
-        info["problems"].append("no training_log.csv rows -- run may be incomplete")
 
     if method_conflict:
         info["problems"].append(
-            f"run_config.json says method={method_conflict[0]!r} but timing.json says "
-            f"{method_conflict[1]!r}. The run itself was fine; the recorded metadata "
-            f"is wrong because run_config.json was written with the YAML spread last, "
-            f"so a config-file `method:` overwrote the --method that actually ran. "
-            f"Fixed in run_experiment.py; re-runs will record it correctly."
+            f"run_config.json says method={method_conflict[0]!r} but this run is really "
+            f"{method_conflict[1]}. The run itself is fine; the recorded metadata is "
+            f"wrong because run_config.json used to be written with the YAML spread "
+            f"last, so a config-file `method:` overwrote the --method that actually "
+            f"ran. Fixed in run_experiment.py; re-runs record it correctly."
         )
 
     gen_eps = info["gen_epsilon"]
@@ -214,16 +233,19 @@ def main() -> None:
     infos = [inspect(r) for r in runs]
 
     if not args.quiet:
-        print(f"{'run':<44} {'arm':<14} {'paid calls':>11} {'logged':>9} "
-              f"{'eps_end':>8} {'anneal':>7} {'cands':>6}")
-        print("-" * 104)
+        print(f"{'run':<42} {'arm':<14} {'status':<8} {'paid calls':>11} "
+              f"{'eps_end':>8} {'anneal/train':>12} {'cands':>6}")
+        print("-" * 108)
         for i in infos:
             eps_end = f"{i['eps_end']:.3f}" if "eps_end" in i else "-"
             frac = f"{i['anneal_frac']:.2f}" if "anneal_frac" in i else "-"
             cands = i["n_candidates"] if i["n_candidates"] is not None else "-"
             flag = " !" if i["problems"] else ""
-            print(f"{i['run'][:44]:<44} {i['arm']:<14} {i['configured']:>11,} "
-                  f"{i['actual']:>9,} {eps_end:>8} {frac:>7} {cands:>6}{flag}")
+            print(f"{i['run'][:42]:<42} {i['arm']:<14} {i['status']:<8} "
+                  f"{i['configured']:>11,} {eps_end:>8} {frac:>12} {cands:>6}{flag}")
+        print()
+        print("  eps_end     = epsilon at the last training episode; must equal dqn_eps_min")
+        print("  anneal/train = dqn_eps_anneal_eps / dqn_num_train_eps; target 0.60")
         print()
         for i in infos:
             note = f"   [{i['note']}]" if i.get("note") else ""
@@ -239,6 +261,28 @@ def main() -> None:
             f"pg_batch_eps differs across runs: {sorted(batches)}. Hold it FIXED and "
             f"vary only pg_num_iters, or budget is confounded with collapse rate."
         )
+    # Do the arms at a given budget label actually pay for the same number of
+    # evaluations? This is the fairness question the whole sweep rests on, and it is
+    # easy to miss because DQN's budget includes its warmup while PG's does not.
+    groups: dict = collections.defaultdict(list)
+    for i in infos:
+        m = re.search(r"eps_?(\d+)", i["run"], re.IGNORECASE)
+        groups[m.group(1) if m else "(all)"].append(i)
+    for label, members in sorted(groups.items()):
+        paid = {i["arm"]: i["configured"] for i in members if i["configured"]}
+        if len(paid) < 2:
+            continue
+        lo, hi = min(paid.values()), max(paid.values())
+        if hi > lo * 1.05:
+            spread = ", ".join(f"{a}={c:,}" for a, c in sorted(paid.items()))
+            cross.append(
+                f"budget '{label}': arms pay for different numbers of evaluations "
+                f"({spread}; {hi - lo:+,} spread). DQN's budget is "
+                f"dqn_warmup_eps + dqn_num_train_eps while PG's is "
+                f"pg_num_iters * pg_batch_eps -- PG's warmup is free. Match the paid "
+                f"totals, e.g. dqn_num_train_eps = {lo:,} - dqn_warmup_eps."
+            )
+
     gen = {(i["gen_epsilon"], i["gen_temperature"]) for i in infos}
     if len(gen) > 1:
         cross.append(

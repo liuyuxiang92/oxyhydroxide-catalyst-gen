@@ -1595,3 +1595,24 @@ mode names next.
   existing affected runs are identifiable rather than silently mislabelled.
 - Found only by running the checker against REAL run dirs. Reading the code would
   not have flagged the dict-spread order; the false-positive triage did.
+
+### EARS — Progress (2026-07-30 09:40)
+<!-- concepts: in-flight-verification, run-metadata, config-precedence -->
+- Requirement shift: the checker must work on runs that are STILL RUNNING, so it
+  can only rely on run_config.json. That file is written early (right after
+  os.makedirs, before training), while training_log.csv / generated.csv / qnet.pt /
+  policy.pt / timing.json all appear later or at the end.
+- Consequence for the method cross-check: for an in-flight run there is nothing to
+  corroborate run_config.json against, and run_config's `method` is exactly the
+  field that was wrong before commit 14790cf (YAML `method: dqn` clobbered the
+  --method arm). So jobs launched with the old code are mislabelled AND unverifiable
+  by file presence.
+- Fallback chosen: the output DIRECTORY NAME. submit_sweep.sh encodes the arm in it
+  (sinter_a2c_eps2500_seed7), so comparing dir name against cfg["method"] catches
+  the mislabelled case while a run is in flight. Weak evidence, but it is the only
+  other independent record of intent, and it is flagged as "(from dir name)" rather
+  than presented as ground truth.
+- Design rule this reinforces: a verification tool must degrade by CHECKING LESS,
+  never by reporting false problems. Missing execution artifacts mean "not finished
+  yet" (status), not "broken" (problem). Splitting checks into config-only vs
+  execution-dependent is the structure that makes that possible.
