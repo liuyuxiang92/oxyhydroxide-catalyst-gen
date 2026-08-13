@@ -1,5 +1,10 @@
 # Trace: oxyhydroxide-catalyst-gen
 
+### EARS — Session Start (2026-08-11 10:33)
+<!-- concepts: genetic-algorithm, bayesian-optimization -->
+- Task: Explain in detail how the GA and BO baselines work in scripts/baselines/run_ga.py and run_bo.py.
+- Why: User wants to learn the benchmark baseline methods used for comparison against the RL approaches.
+
 ### EARS — Progress (2026-06-30 10:09)
 <!-- concepts: a2c, config-management -->
 Nothing new beyond the entry below — flipping `method: a2c` in the three copied configs (mechanical edits).
@@ -1616,3 +1621,271 @@ mode names next.
   never by reporting false problems. Missing execution artifacts mean "not finished
   yet" (status), not "broken" (problem). Splitting checks into config-only vs
   execution-dependent is the structure that makes that possible.
+
+### EARS — Session Start (2026-08-04 13:07)
+<!-- concepts: budget-benchmark-analysis, dqn-vs-a2c-comparison, submit_sweep-sweep-results -->
+- Task: analyze the completed 10-seed submit_sweep.sh benchmark (3 scenarios x 3
+  arms x 4 budgets x 10 seeds) shipped as ~/Downloads/compare_time.tar.bz2;
+  extracted to scratchpad/compare_time_extract/compare_time/.
+- Why: user wants a per-scenario comparison of dqn_bootstrap / dqn_mc / a2c across
+  the 2500/5000/10000/20000 budget sweep that was the subject of most of the prior
+  session's tooling work (submit_sweep.sh, check_budget_config.py,
+  compare_training_rewards.py, compare_timing.py all exist for exactly this).
+- Directory also contains older single-seed archived runs (e.g.
+  sinter_dqn_eps_7500_temp1, sinter_calcine_mc_eps_45000_temp1_25_batch) mixed in
+  alongside the new seed-swept ones (sinter_dqn_bootstrap_eps10000_seed7) — need to
+  filter to only the *_seedNN dirs matching the 10-seed sweep for a clean
+  apples-to-apples comparison.
+- Result: all 360 runs (3 scenario x 3 arm x 4 budget x 10 seed) completed with
+  generated.csv present. check_budget_config.py flagged only one class of issue:
+  all 120 A2C runs lack pg_episode rows (predate that logging commit) -- so A2C
+  training-curve granularity is batch-mean only, but generated.csv (what the
+  quality comparison uses) is unaffected. No budget mismatches, no epsilon-anneal
+  failures, no gen_epsilon/pg_batch_eps inconsistencies, no generation-diversity
+  collapse (n_unique_formula == n_candidates almost everywhere).
+- Two-part finding, written up for the user with figures in
+  runs/compare/seed_sweep_2026-08-04/:
+  1. Quality (best temperature found, mean+-std over 10 seeds): welch t-tests show
+     most arm-vs-arm differences at a given (scenario, budget) are NOT significant
+     at n=10 -- no arm is a consistent winner. A few budgets are exceptions
+     (calcine@5000: bootstrap significantly better than both, p<0.01; sinter@20000:
+     mc significantly better than bootstrap, p=0.011).
+  2. Cost: DQN(bootstrap) wall-clock is ~10x DQN(mc)/A2C at the SAME budget-in-
+     predictor-calls, consistent across all three scenarios and all four budgets
+     (e.g. sinter@10000: 495 min vs 46 min vs 58 min). timing.json phase breakdown
+     confirms this is 100% in the `train` phase, not `predictor.t_predict_s` (which
+     is near-identical across arms, ~250-370s) -- i.e. it's RL-side overhead
+     (target-network forward passes for the bootstrap TD max_a' term), not extra
+     lab calls. Combined with (1), this means DQN(bootstrap) is currently paying a
+     large wall-clock tax for no measurable quality advantage on this benchmark.
+  3. Actionable framing given to user: plot best-temp vs actual wall-clock (fig3)
+     rather than vs budget -- on that axis DQN(mc) and A2C reach comparable-or-better
+     temperatures in the time DQN(bootstrap) needs for its smallest budget.
+
+### EARS — Progress (2026-08-05 09:19)
+<!-- concepts: ood-benchmarking, data-split-integrity, active-learning-indexing -->
+Repaired the round-4 split in the OOD property benchmark and extended it to 7 rounds.
+
+Discovery (the real bug, not the one I first named): rounds 1,2,3,5,6,7 form a
+strictly nested chain where a composition keeps its train/valid side forever.
+Round 4 was split independently, so 31 points that are `valid` elsewhere sat in
+`iter-4_train.csv` and 32 that are `train` elsewhere sat in `iter-4_valid.csv` —
+**287 cross-round side conflicts** in total, and `va_4` shared only ~48% of its
+points with neighbouring validation sets. Consequences: (a) round 4's in-dist MAE
+is measured on a different population, so it is not comparable along the curve —
+visible in prop_v2 as a kink in *opposite directions* per model (DPA3 peaks 14.1,
+RF/SVR dip, KRR spikes); (b) a *cumulatively fine-tuned* model has trained on
+24/65 of `va_4` (via tr_3) and 26/65 of `va_5` (via tr_4), leakage that
+retrain-from-scratch baselines do not have — so the DP reference is optimistically
+biased at exactly rounds 4-5.
+
+Key decision: **redistribute rather than renumber.** I first offered drop-round-4 /
+absorb-iter-4-forward / minimal-patch, all aimed at *pool* nesting. User asked
+"is it possible to redistribute" — better framing. Keeping pool_4 fixed and
+re-deriving only the sides from a canonical map built off the conflict-free chain
+takes conflicts 287 -> 0 and `va_4 ∩ va_3` 31/61 -> 57/61, without inventing data or
+disturbing rounds 5-7. Pool nesting is deliberately NOT restored: under
+retrain-from-scratch each round is an independent fit, so pool membership need not
+nest — nesting was a side effect of the AL loop, not a requirement. 38 round-4-only
+orphans have no canonical answer and are split deterministically (seed 0) to hold
+the 20% val fraction. Script: `redistribute_iter4.py`, idempotent, verifies before
+writing. Also found + fixed 1 within-round train/valid duplicate in iter-7.
+
+Interpretation trap worth remembering: 299/391 measurements are tagged iter-1 and AL
+adds only 12-14 train points/round, so `va_k` stays ~54/69 iter-1 points even at
+round 6. The rising in-dist MAE across rounds is **dilution away from the iter-1
+distribution, not degradation on new chemistry** — the natural reading of that curve
+is backwards.
+
+Dead end / still blocked: user said they appended iter-7 measurements, but
+`data/measurements.csv` is byte-identical to my pre-edit backup (md5 a2ba96b5…),
+still 398 rows, tags iter-1..iter-6. So round-7 in-dist and round-6 OOD cannot run
+yet. Made `load_rounds` skip incomplete rounds loudly instead of KeyError-ing at
+`targets[ck]` — a partially-labelled round yields a number that *looks* comparable
+but is fit on less data, so silent absorption is the failure mode to avoid.
+
+### EARS — Progress (2026-08-05 09:35)
+<!-- concepts: ood-benchmarking, data-split-integrity, defensive-tooling -->
+Dataset was replaced wholesale mid-edit (09:20): measurements.csv 398 -> 320 rows,
+every split file shrank (iter-1_train 216 -> 170). My iter-4 redistribution from
+yesterday was overwritten. Re-ran the diagnostics on the new data before touching
+anything — and the new splits are **already clean**: 0 cross-round side conflicts
+(was 287), 0 within-round overlap, chain 1,2,3,5,6,7 nested. The regeneration fixed
+the assignment problem at source, so the repair is obsolete.
+
+Key defensive lesson: `redistribute_iter4.py --dry-run` on the clean data reported it
+would still move 10 orphan compositions, purely to force VAL_FRAC=20% that the new
+data (~18%) doesn't use. An idempotent-on-its-own-output script is NOT the same as
+safe-to-rerun on different input. Added a guard: refuse when cross-round conflicts
+are already 0, `--force` to override. Verified it now no-ops and leaves md5 unchanged.
+
+Round 4 remains off-lineage in *pool membership* (34 orphans; the iter-4 batch enters
+pool_4 and vanishes at pool_5). Deliberately left alone — under retrain-from-scratch
+each round is an independent fit, so pools need not nest.
+
+Benchmark rerun (prop_v3, 7 models, KRR dropped): in-dist rounds 1-6, OOD rounds 1-5.
+Two guards added because DP now carries reference values for rounds no baseline can be
+fitted on: (a) `common_rounds()` restricts the degradation summary + bar chart to
+rounds every model has — otherwise DP's mean OOD would average over 7 rounds including
+the two new low values (6.77, 7.34) against the baselines' 5, and look far stronger
+than a like-for-like comparison; (b) plot.py draws DP-only points as open markers so
+the absent baseline curve reads as "not run", not "failed".
+
+Planned verification VOID: I intended to check rounds 1,2,3,5,6 reproduce prop_v2
+exactly as an integrity check. The dataset changed underneath, so nothing is expected
+to reproduce and the check carries no signal.
+
+Still blocked: measurements.csv STILL has no iter-7 rows (user believed they appended;
+file went down 78 rows instead). Round-7 in-dist and round-6 OOD cannot run.
+
+### EARS — Progress (2026-08-13 17:02)
+<!-- concepts: perovskite-design, config-authoring, generated-csv-formula-column -->
+Wrote configs/perovskite_level1.yaml (multi_group env, two 1-slot categorical
+groups A_site/B_site over the 73-element pool, site_pick builder, geo_opt with
+perovskite_dpa4.ckpt.pt, MGTransformerPredictor FQN property) and
+scripts/submit_perovskite_sweep.sh (5-arm sweep: dqn_bootstrap/dqn_mc/a2c via
+rl-matdesign CLI + bo/ga via their own scripts, budget as a required numeric
+arg forwarded to BO/GA's --budget, RL episode counts still hand-edited in the
+YAML per the established submit_sweep.sh convention — deliberately did NOT
+build a budget-to-YAML auto-generator, that was explicitly rejected before,
+see the 2026-07-29 "scope-calibration" entries above).
+
+Two real bugs caught by actually running things instead of just reading code:
+(1) submit_perovskite_sweep.sh's first draft used `declare -A` (bash 4+
+associative arrays) — macOS ships bash 3.2 by default (no assoc-array
+support), which produced a confusing "unbound variable" error that looked
+unrelated to the real cause. Rewrote as a `case` statement, portable
+everywhere. (2) Validated configs/perovskite_level1.yaml for real:
+`build_env()` + a full random episode against it works (species_set union
+size 2, fraction_set union size 73, valid terminal), but
+`env.terminal_formula` comes back EMPTY — CategoricalGroup's
+`assembled_composition()` only sums values that are `isinstance(val,
+(int,float))`; ours are element-symbol strings. That's a documented, expected
+limitation (the builder's own `composition_formula` hook is supposed to cover
+this, per structure_score.py's docstring — SSESupercellBuilder already
+implements it for exactly this reason). Added `composition_formula()` to
+SitePickBuilder mirroring sse.py's pattern (reads the template's spectator
+atoms, e.g. O, plus each site_map group's picked element at its real site
+count) so generated.csv's formula column isn't blank for this scenario.: MGTransformer featurizer gap + generic structure-predictor hook
+
+### EARS — Progress (2026-08-13 16:29)
+<!-- concepts: perovskite-design, multi-group-env, mgtransformer-integration, predictor-registry -->
+New campaign: ABO3 perovskite level 1 (A-site + B-site each 1 of the same 73-element
+pool -> exactly 73*73=5329 candidates, verified). Plan approved at
+~/.claude/plans/you-need-to-think-streamed-toucan.md after 3 rounds of user correction:
+(1) no lookup-table shortcut for training-time reward — every method (BO/GA/DQN-bootstrap/
+DQN-mc/A2C) must call the real DPA4-relax->MGTransformer pipeline for every composition,
+same-run result cache (existing `_stats_cache`) is the only memoization, never cross-run;
+(2) the missing MGTransformer raw-structure->graph featurizer belongs in ../MGTransformer/
+itself, not this repo; (3) the rl-matdesign-side predictor bridge must be generic
+(config-driven target/ckpt), reusable for e.g. oxides with a different MGT head, not
+perovskite-specific.
+
+Key discovery from reading ../MGTransformer end-to-end: its finetune.py/pretraining.py/
+tutorial.ipynb ONLY ever load a pre-built `dft_3d_processed.pt` dataset via
+CrystalDataLoader — there is NO code anywhere in that repo that turns a raw POSCAR into
+the model's graph input (se3_graph needs x/edge_index/edge_attr/edge_nei_angle/
+edge_nei_len; so3_graph needs x/edge_index/edge_attr). `from jarvis.core.graphs import
+nearest_neighbor_edges` is imported in utils/dataset.py but never called — the actual
+offline preprocessing script that built the dataset was not shipped. Reverse-engineered
+the exact field contract by reading models/{mgt,nnutils}.py + models/se3/{utils,layers}.py
++ models/so3/{utils,atoms}.py: edge_attr = raw Cartesian displacement vector (confirmed via
+so3/atoms.py's torch.norm + so3/utils.py's raw-vector spherical harmonics use);
+edge_nei_len/edge_nei_angle are [N_edges,3] triplet features (3 nearest other bonds per
+edge), angle range confirmed [-1,1] via the RBF embedding domain -> these are bond-angle
+cosines, not degrees. atom_input_features=92 strongly suggests CGCNN's atom_init.json
+table. Real unknowns that can't be recovered from this repo: neighbor cutoff/max_neighbors,
+which endpoint's neighbors fill the 3 triplet slots, and the JARVIS-dataset mean/std needed
+to un-normalize the output back to eV/atom (decided: don't even try — argmin ranking is
+invariant to that fixed affine transform, so report raw model output as an uncalibrated
+relative score, never as eV/atom). Plan requires a calibration gate (known compounds
+SrTiO3/BaTiO3/CaTiO3/LaFeO3 + hyperparameter sensitivity sweep) before trusting any of it.
+
+Started implementing the rl-matdesign side (independent of the MGTransformer work, can
+proceed in parallel): extending structure_score.py so an FQN/registry predictor leaf can
+opt into being a **structure** objective (gets built+relaxed ASE Atoms) instead of always
+being treated as composition-only, by exposing `predict_structures(atoms_list)->(mean,std)`
+— detected via `hasattr`, no new YAML flag. Mirrors the existing optional-method pattern
+already used for OOHCatalystPredictor.predict_raw/check_phase. This is what makes the
+planned MGTransformerPredictor bridge (not yet written) usable from any structure_score
+config, not just perovskite. Renamed the old `is_structure` (which meant "is dp_energy/
+dp_property") to `is_dp_backend` to free up `is_structure` for the real semantic meaning
+now that it covers three backends (energy/property/structure_fqn) instead of two.
+
+### EARS — Progress (2026-08-13 16:51)
+<!-- concepts: mgtransformer-integration, subprocess-bridge, jarvis-tools-api -->
+User corrected scope mid-implementation, twice: (1) no local conda env / no
+local test execution — everything runs on a separate GPU machine, so all
+MGTransformer-side work here is write-only (syntax-checked via `ast.parse`,
+never actually run); (2) confirmed jarvis-tools API by WebFetching the real
+usnistgov/jarvis source (graphs.py, atoms.py, specie.py) rather than trusting
+the earlier subagent's paraphrase — `nearest_neighbor_edges`/
+`build_undirected_edgedata`/`Atoms.from_poscar`/`get_node_attributes(...,
+atom_features="cgcnn")` all confirmed to exist with exactly the signatures
+used. Also fully confirmed (not just inferred) from se3/layers.py +
+so3/utils.py source: `edge_attr` is the RAW displacement vector for both
+graphs (so3's UpdateConvEqui feeds it raw into `o3.spherical_harmonics`);
+`edge_nei_len` is pre-transformed to `-0.75/length` by the featurizer (the
+model's edge_embedding does NOT transform it again, unlike the primary
+edge_attr which the model transforms internally) — this asymmetry was a guess
+in the plan, now verified from actual model forward-pass code.
+
+Also found and understood a red herring: `mgt.py:106` reads
+`config_model['text_encoder_num_layers']`, a key genuinely absent from every
+shipped `config/*.yml`. Looked scary (would KeyError on model construction)
+until checking: it's inside `if pn.endswith("c_proj.weight")` over
+`named_parameters()` — this architecture apparently has no such-named layer,
+so the branch never executes and the missing key is never touched. Confirmed
+via tutorial.ipynb cell 5-7, which loads the YAML as-is and constructs the
+model with no patch — so this is the shipped, presumably-working path, not a
+bug I need to route around.
+
+Wrote (untested, no local env): MGTransformer/graph_builder.py (featurizer),
+predict.py (single-structure inference + MGTPredictor class), serve.py
+(persistent stdin/stdout JSON-lines server), calibrate.py (sanity gate on
+SrTiO3/BaTiO3/CaTiO3/LaFeO3 across a small grid of the unverified featurizer
+hyperparameters — deliberately does NOT hardcode "expected" formation-energy
+values, since inventing literature numbers would be a second unverified guess
+stacked on the first). Also wrote rl-matdesign's
+src/rl_matdesign/predictors/mgtransformer.py (MGTransformerPredictor): talks
+to serve.py as a persistent subprocess over JSON lines, one reused scratch
+POSCAR path per instance (calls are sequential, no concurrency hazard).
+Exposes predict_structures() per the structure_score.py hook added earlier
+this session. None of this can be smoke-tested here — the calibration gate
+(calibrate.py) and a first real run are both deferred to the user's GPU
+machine.
+
+### EARS — Session End (2026-08-13 17:18)
+<!-- concepts: perovskite-level1-campaign, mgtransformer-integration, session-wrapup -->
+All 12 plan tasks (~/.claude/plans/you-need-to-think-streamed-toucan.md) done
+in one session, entirely write-only on the rl-matdesign side (no local conda
+env, no local execution — deferred to the user's GPU machine, confirmed
+mid-session). Full suite green except the one pre-existing
+`test_lips_masking_and_charge_neutrality` flake (confirmed unrelated by
+stashing all changes and reproducing it identically on bare HEAD).
+
+Three deliverables, in three different locations, per the user's explicit
+repo-boundary corrections:
+1. `../MGTransformer/` (separate repo): graph_builder.py, predict.py, serve.py,
+   calibrate.py — the missing raw-structure featurizer + inference stack.
+   UNTESTED — needs the calibration gate run for real before anyone trusts it.
+2. `rl-matdesign` (this repo): structure_score.py's predict_structures hook,
+   SitePickBuilder (+composition_formula), MGTransformerPredictor bridge (all
+   target-agnostic, reusable beyond perovskite — e.g. oxides with a different
+   MGT head, just a YAML change), configs/perovskite_level1.yaml,
+   submit_perovskite_sweep.sh (5 arms, real predictor every episode, no
+   lookup-table), compare_to_ground_truth.py. Full test coverage on everything
+   testable without the real model (fake serve.py subprocess, real
+   perovskite.vasp fixture, synthetic compare_to_ground_truth.py fixtures).
+3. `../perovskite_ground_truth/` (new standalone project, NOT part of either
+   repo): enumerate.py — the one-off brute-force 5,329-candidate ground truth,
+   resumable, imports rl-matdesign as a library.
+
+Open items for the user's GPU machine, in order: (1) set `geo_opt.head` in
+perovskite_level1.yaml once the DPA4 checkpoint's heads are known; (2) run
+calibrate.py — if it fails the sanity gate, fall back to a DPA4-only formation-
+energy proxy instead of MGTransformer; (3) run enumerate.py once for the
+ground truth table; (4) run submit_perovskite_sweep.sh per budget
+(100/250/500/1000), editing dqn_num_train_eps/dqn_eps_anneal_eps/pg_num_iters
+by hand each time per the YAML's budget table; (5) compare_to_ground_truth.py
+for the final gap-vs-budget figure.

@@ -100,9 +100,15 @@ def _make_sse_builder(cfg: dict, *, seed: Optional[int] = None, **_):
     return SSESupercellBuilder(cfg, seed=seed)
 
 
+def _make_site_pick_builder(cfg: dict, *, seed: Optional[int] = None, **_):
+    from .predictors.builders.site_pick import SitePickBuilder
+    return SitePickBuilder(cfg, seed=seed)
+
+
 BUILDERS: Dict[str, Factory] = {
     "substitute": _make_substitute_builder,
     "sse":        _make_sse_builder,
+    "site_pick":  _make_site_pick_builder,
 }
 
 

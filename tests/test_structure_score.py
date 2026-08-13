@@ -394,3 +394,86 @@ def test_old_predictor_modules_deleted():
     for mod in ("dp_structure", "dp_property", "composite", "structure_pipeline"):
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module(f"rl_matdesign.predictors.{mod}")
+
+
+# --------------------------------------------------------------------------- #
+# FQN leaf opting into structure scoring via predict_structures()
+# --------------------------------------------------------------------------- #
+
+def test_fqn_with_predict_structures_is_a_structure_objective(tmp_path, monkeypatch):
+    mod = tmp_path / "fake_struct_pred.py"
+    mod.write_text(
+        "class FakeStructPredictor:\n"
+        "    def __init__(self, cfg, *, seed=None):\n"
+        "        self.cfg = cfg\n"
+        "    def predict_structures(self, atoms_list):\n"
+        "        return 7.0, 0.3\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    p = StructureScorePredictor({"base_poscar": "x", "properties": [
+        {"name": "p", "predictor": "fake_struct_pred:FakeStructPredictor",
+         "direction": "min"}]})
+
+    prop = p.properties[0]
+    assert prop["backend"] == "structure_fqn"
+    assert p._has_structure is True          # a shared builder is required
+    assert p._shared_builder is not None
+
+    mean, std = p._score(prop, [object(), object()])
+    assert (mean, std) == (7.0, 0.3)
+
+
+def test_fqn_without_predict_structures_stays_composition(tmp_path, monkeypatch):
+    # Regression pin: a leaf exposing only predict() must be unaffected by the
+    # new dispatch — still composition-backed, no builder required.
+    mod = tmp_path / "fake_comp_pred.py"
+    mod.write_text(
+        "class FakeCompPredictor:\n"
+        "    def __init__(self, cfg, *, seed=None):\n"
+        "        pass\n"
+        "    def predict(self, composition):\n"
+        "        return 1.0, 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    p = StructureScorePredictor({"properties": [
+        {"name": "p", "predictor": "fake_comp_pred:FakeCompPredictor",
+         "direction": "min"}]})
+
+    prop = p.properties[0]
+    assert prop["backend"] == "composition"
+    assert p._has_structure is False
+    assert p._shared_builder is None
+
+    mean, std = p._score(prop, {"Fe": 1.0})
+    assert (mean, std) == (1.0, 0.0)
+
+
+def test_shared_structure_routes_built_cells_to_predict_structures(tmp_path, monkeypatch):
+    # End-to-end through predict(): the shared builder's output must be exactly
+    # what predict_structures() receives.
+    mod = tmp_path / "fake_struct_pred2.py"
+    mod.write_text(
+        "class FakeStructPredictor2:\n"
+        "    def __init__(self, cfg, *, seed=None):\n"
+        "        pass\n"
+        "    def predict_structures(self, atoms_list):\n"
+        "        return float(len(atoms_list)), 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    p = StructureScorePredictor({
+        "base_poscar": "x", "n_random_configs": 3,
+        "properties": [
+            {"name": "p", "predictor": "fake_struct_pred2:FakeStructPredictor2",
+             "direction": "min", "objective": "mean"},
+        ],
+    })
+    sentinel_structures = [object(), object(), object()]
+    p._shared_builder = type(
+        "B", (), {"build": lambda self, cand, *, n_configs, rng: sentinel_structures}
+    )()
+
+    stats = p.per_objective_stats({"Fe": 1.0})
+    assert stats["p"] == (3.0, 0.0)          # len(sentinel_structures) == 3

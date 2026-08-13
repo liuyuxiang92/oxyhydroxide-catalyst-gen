@@ -21,9 +21,16 @@ Structure objectives (``dp_energy``/``dp_property``) build a cell; the
 * ``share_structure: false`` — each structure objective builds (and optionally
   relaxes) its **own** cell independently (objectives may use different builders).
 
-Composition objectives (``rf_magpie`` and any FQN leaf) never build a structure;
-they receive the candidate composition. A config with no structure objective
-needs no builder / ``base_poscar`` at all.
+Composition objectives (``rf_magpie`` and most FQN leaves) never build a
+structure; they receive the candidate composition. A config with no structure
+objective needs no builder / ``base_poscar`` at all.
+
+An FQN leaf may instead opt into being a **structure** objective by exposing a
+``predict_structures(atoms_list) -> (mean, std)`` method (in addition to, or
+instead of, ``predict(composition)``). This is detected automatically (no YAML
+flag) — see ``StructureScorePredictor.__init__``. Use this when the property
+genuinely depends on 3D geometry, not just stoichiometry (e.g. an external
+structure-based model reached over a subprocess bridge).
 
 Consumer contract (``training.py``): exposes ``predict`` (reward, std),
 ``predict_raw`` (Σ weight·direction·mean/scale, for the ``dp_mean`` CSV column),
@@ -140,7 +147,7 @@ class StructureScorePredictor:
                     "'dp_energy', 'dp_property', a registry leaf (e.g. 'rf_magpie', "
                     "'ooh'), or an FQN 'pkg.mod:Class'."
                 )
-            is_structure = predictor_name in ("dp_energy", "dp_property")
+            is_dp_backend = predictor_name in ("dp_energy", "dp_property")
 
             # direction is REQUIRED — the sign (lower vs higher is better) must be
             # explicit, never implied.
@@ -188,7 +195,7 @@ class StructureScorePredictor:
                     f"{sorted(_TRANSFORMS)}. Use 'exp' for heads that emit log(value)."
                 )
 
-            if is_structure:
+            if is_dp_backend:
                 models = p.get("models") or p.get("dp_models")
                 if not models:
                     raise ValueError(
@@ -197,15 +204,19 @@ class StructureScorePredictor:
                     )
                 backend = "energy" if predictor_name == "dp_energy" else "property"
                 instance = None
+                is_structure = True
             else:
-                # Composition predictor: resolve the leaf once (registry or FQN);
-                # it is scored on the candidate composition directly (no structure).
+                # Registry leaf or FQN: resolve it once, then ask what it wants.
+                # A leaf exposing predict_structures() is a structure objective
+                # (gets the built/relaxed cells); otherwise it's a composition
+                # objective (gets the raw candidate dict, no structure built).
                 from ..registry import resolve_predictor
 
-                backend = "composition"
                 models = None
                 child_seed = None if seed is None else int(seed) + i
                 instance = resolve_predictor(predictor_name, p, seed=child_seed)
+                is_structure = hasattr(instance, "predict_structures")
+                backend = "structure_fqn" if is_structure else "composition"
 
             self.properties.append({
                 "name": name,
@@ -466,6 +477,13 @@ class StructureScorePredictor:
             # `structures` is the candidate composition; the leaf returns (mean, std)
             # directly. Composition leaves don't use structures, sweep, or transform.
             mean, std = prop["instance"].predict(structures)
+            return float(mean), float(std)
+        if prop["backend"] == "structure_fqn":
+            # `structures` is the built/relaxed ASE Atoms list; the leaf folds its own
+            # ensemble and returns (mean, std) directly. No sweep/transform support here
+            # (the leaf owns its own units) — a leaf needing either should fold it
+            # internally rather than relying on this engine's per-member transform.
+            mean, std = prop["instance"].predict_structures(structures)
             return float(mean), float(std)
         if prop["backend"] == "energy":
             from ..utils.dp_eval import eval_energy_ase
