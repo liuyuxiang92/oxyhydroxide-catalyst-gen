@@ -17,6 +17,14 @@
 #     ./submit_perovskite_sweep.sh 500
 #     ./submit_perovskite_sweep.sh 1000
 #
+# An optional second positional argument restricts the sweep to ONE arm
+# (default: all 5). Combine with -seed to pin both the method and the seed:
+#
+#     ./submit_perovskite_sweep.sh 100 bo             # bo, all seeds
+#     ./submit_perovskite_sweep.sh 100 bo -seed 7      # bo, seed 7 only
+#
+# Valid arms: dqn_bootstrap dqn_mc a2c bo ga (or 'all', the default).
+#
 # Unlike submit_sweep.sh's free-text <label>, BUDGET here is a REQUIRED number:
 # it is passed straight through as --budget to the BO/GA baselines (their own
 # CLI reads it directly, no YAML edit needed for those two arms). It is NOT
@@ -50,12 +58,26 @@
 
 set -euo pipefail
 
+_VALID_ARMS="dqn_bootstrap dqn_mc a2c bo ga"
+
 BUDGET="${1:-}"
 if [[ -z "$BUDGET" || ! "$BUDGET" =~ ^[0-9]+$ ]]; then
-    echo "usage: $0 <budget:int> [-seed N]    e.g. $0 250 -seed 7" >&2
+    echo "usage: $0 <budget:int> [arm] [-seed N]    e.g. $0 250 bo -seed 7" >&2
+    echo "       arm: one of {$_VALID_ARMS} or 'all' (default)" >&2
     exit 1
 fi
 shift
+
+ARM="all"
+if [[ $# -gt 0 && "$1" != "-seed" && "$1" != "--seed" ]]; then
+    ARM="$1"
+    shift
+    case " $_VALID_ARMS " in
+        *" $ARM "*) ;;
+        *) echo "error: unknown arm '$ARM'. Expected one of: $_VALID_ARMS (or 'all')" >&2
+           exit 1 ;;
+    esac
+fi
 
 SEED_ONE=""
 while [[ $# -gt 0 ]]; do
@@ -89,8 +111,14 @@ if [[ ! -f "$CONFIG" ]]; then
     exit 1
 fi
 
-echo "Reminder: dqn_num_train_eps/pg_num_iters in $CONFIG should reflect budget" \
-     "$BUDGET before this call — see the header comment in this script." >&2
+ARMS_TO_RUN="$_VALID_ARMS"
+[[ "$ARM" != "all" ]] && ARMS_TO_RUN="$ARM"
+
+if [[ "$ARMS_TO_RUN" == *dqn* || "$ARMS_TO_RUN" == *a2c* ]]; then
+    echo "Reminder: dqn_num_train_eps/pg_num_iters in $CONFIG should reflect budget" \
+         "$BUDGET before this call — see the header comment in this script." >&2
+fi
+echo "Arm(s): $ARMS_TO_RUN" >&2
 
 LOG_DIR="$OUT/logs"
 mkdir -p "$LOG_DIR"
@@ -129,7 +157,7 @@ for seed in $SEEDS; do
     dp_seed=$((seed + 10000))
     gen_seed=$((seed + 20000))
 
-    for arm in dqn_bootstrap dqn_mc a2c bo ga; do
+    for arm in $ARMS_TO_RUN; do
         name="${arm}_eps${BUDGET}_seed${seed}"
         run_out="$OUT/$name"
 

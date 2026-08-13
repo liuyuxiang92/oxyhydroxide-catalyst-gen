@@ -37,13 +37,13 @@ class SitePickBuilder:
         poscar = cfg.get("base_poscar") or cfg.get("poscar") or cfg.get("poscar_template")
         if not poscar:
             raise ValueError(
-                "SitePickBuilder needs a POSCAR template — set 'base_poscar' "
+                "SitePickBuilder needs a POSCAR template -- set 'base_poscar' "
                 "(or legacy 'poscar' / 'poscar_template') in the config."
             )
         if not isinstance(poscar, (str, bytes)):
             raise TypeError(
                 f"SitePickBuilder's base_poscar must be a single path, got "
-                f"{type(poscar).__name__}. (Multi-template mode isn't supported here — "
+                f"{type(poscar).__name__}. (Multi-template mode isn't supported here -- "
                 "use one call per template if you need that.)"
             )
         self.base_poscar: str = str(poscar)

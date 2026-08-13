@@ -1889,3 +1889,12 @@ ground truth table; (4) run submit_perovskite_sweep.sh per budget
 (100/250/500/1000), editing dqn_num_train_eps/dqn_eps_anneal_eps/pg_num_iters
 by hand each time per the YAML's budget table; (5) compare_to_ground_truth.py
 for the final gap-vs-budget figure.
+
+### EARS — Progress (2026-08-13 19:23)
+<!-- concepts: perovskite-level1-campaign, sweep-tooling -->
+User asked to extend submit_perovskite_sweep.sh to support picking a single
+arm (`./submit_perovskite_sweep.sh 100 bo`) alongside the existing -seed
+filter, rather than always launching all 5 arms. Added an optional second
+positional ARM argument between BUDGET and -seed, defaulting to "all" (5
+arms) when omitted -- fully backward compatible with every existing usage
+example already given to the user.

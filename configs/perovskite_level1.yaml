@@ -70,12 +70,7 @@ n_random_configs: 1                    # single-element sites — nothing random
 
 geo_opt:
   model: perovskite_dpa4.ckpt.pt
-  # head: <REQUIRED USER EDIT — verify before the first real run. If this
-  #        checkpoint is a multi-task DPA4 model, the first geo_opt call raises
-  #        "head is not None" (same failure hit before with the Ti-alloy
-  #        multi-task checkpoints — see trace.md 2026-06-01). Inspect the
-  #        checkpoint's available heads on the GPU machine and set this key;
-  #        leave it commented (no head kwarg) only if the model is single-task.
+  head: PUT_HEAD_NAME_HERE   # REQUIRED USER EDIT — see below for how to find it
   fmax: 0.01
   steps: 200
   relax_cell: true

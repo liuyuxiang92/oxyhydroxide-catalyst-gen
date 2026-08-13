@@ -60,8 +60,19 @@ for line in sys.stdin:
 '''
 
 
-def _fake_mgt_repo(tmp_path):
-    (tmp_path / "serve.py").write_text(_FAKE_SERVE_SRC)
+_FAKE_SERVE_CRASH_SRC = '''
+import sys
+# Simulates the real failure this test pins: serve.py dying on an import
+# (e.g. ModuleNotFoundError: torch_geometric) before it ever prints the
+# ready line -- stdout is empty, only stderr (a real traceback) has content.
+print("Traceback (most recent call last):", file=sys.stderr)
+print("ModuleNotFoundError: No module named 'torch_geometric'", file=sys.stderr)
+sys.exit(1)
+'''
+
+
+def _fake_mgt_repo(tmp_path, src=_FAKE_SERVE_SRC):
+    (tmp_path / "serve.py").write_text(src)
     return str(tmp_path)
 
 
@@ -100,6 +111,23 @@ def test_missing_serve_script_raises(tmp_path):
             "mgt_repo": str(tmp_path), "mgt_python": sys.executable, "target": "t",
         })
     assert "serve.py" in str(info.value)
+
+
+def test_crashed_subprocess_reports_real_returncode_not_none(tmp_path):
+    # Regression test: a serve.py that dies before printing the ready line
+    # (e.g. a missing dependency in mgt_python's env, ModuleNotFoundError)
+    # used to report "returncode=None" because poll() raced the child's
+    # teardown -- wait() must be used so the real exit code is reported.
+    cfg = {
+        "mgt_repo": _fake_mgt_repo(tmp_path, src=_FAKE_SERVE_CRASH_SRC),
+        "mgt_python": sys.executable,
+        "target": "formation_energy_peratom",
+    }
+    with pytest.raises(RuntimeError) as info:
+        MGTransformerPredictor(cfg)
+    msg = str(info.value)
+    assert "returncode=None" not in msg
+    assert "returncode=1" in msg
 
 
 def test_predict_structures_round_trip(tmp_path):

@@ -80,7 +80,7 @@ class MGTransformerPredictor:
         if not mgt_python:
             raise ValueError(
                 "MGTransformerPredictor needs 'mgt_python' (the interpreter of "
-                "MGTransformer's own conda env — its deps are incompatible with "
+                "MGTransformer's own conda env -- its deps are incompatible with "
                 "this repo's, see module docstring)."
             )
         target = cfg.get("target")
@@ -129,11 +129,18 @@ class MGTransformerPredictor:
     def _await_ready(self) -> None:
         line = self._proc.stdout.readline()
         if not line:
-            code = self._proc.poll()
+            # stdout closed with nothing read -> the process is exiting/exited.
+            # wait() (not poll()) so returncode is actually populated instead
+            # of racing the child's teardown and reporting None.
+            try:
+                code = self._proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                code = None
             raise RuntimeError(
                 f"MGTransformer serve.py exited during startup (returncode={code}) "
-                "with no output — check its stderr (inherited to this process's "
-                "stderr) for the real error."
+                "with no output on its own stdout -- its stderr (inherited to "
+                "this process's stderr) printed above this traceback and has "
+                "the real error (e.g. a missing Python package in mgt_python's env)."
             )
         try:
             msg = json.loads(line)
