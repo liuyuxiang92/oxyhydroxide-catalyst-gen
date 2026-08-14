@@ -1960,3 +1960,26 @@ process's stderr, printed just above the new, more informative error) for
 the real traceback. Suspect it's connected to the same categorical-group
 'V' pick from the two composition-key bugs earlier this session, now
 surfacing on the structure-building side instead, but unconfirmed.
+
+### EARS — Progress (2026-08-14 11:19)
+<!-- concepts: perovskite-level1-campaign, cache-key-duplication -->
+User then interrupted mid-fix (declined the MGTransformer stdout-noise
+defensive-read change I'd proposed) and pasted a *real training run* crash
+instead of another BO trial: train_dqn_online -> _rollout_random_episode ->
+env.step -> mg_reward_fn -> PredictorTimer.predict -> _record ->
+candidate_key (utils/timing.py:45-46), same `float(f)`-on-every-leaf bug,
+now on `'Hf'` instead of `'V'`. This is the third independent copy of the
+same "flatten {group:{el:val}} into a hashable key" logic in this repo
+(_common.py's _comp_cache_key, structure_score.py's _key, timing.py's
+candidate_key) -- timing.py's own docstring says it "mirrors
+StructureScorePredictor._key in shape", i.e. it was already known to be a
+duplicate and got the same bug copy-pasted along with the shape. Confirms
+this bug family reaches real RL training, not just the BO/GA baselines --
+PredictorTimer wraps every predictor call in every phase per its own
+docstring, so DQN warmup, online training, and generation all go through
+candidate_key. Applied the identical try/float-except-ValueOrTypeError/
+str(v) fallback as the other two fixes. Flagged to the user (not yet acted
+on): three independent copies of this exact logic is a real duplication
+risk -- worth a follow-up to consolidate into one shared helper so a fourth
+occurrence can't reintroduce the same landmine, but held off since it wasn't
+asked for and each fix so far has been minimal/targeted.

@@ -36,16 +36,28 @@ def candidate_key(candidate: Any) -> tuple:
 
     Non-dict inputs (a custom predictor taking some other candidate object) fall
     back to ``repr``, which keeps counting sane rather than raising.
+
+    A ``categorical`` group's leaf value need not be numeric either -- it can
+    be an element symbol or an O-form label stored verbatim (see
+    ``env_multigroup.py:230`` / ``CategoricalGroup``) -- so a leaf that
+    doesn't parse as a float falls back to its string form.
     """
     if not isinstance(candidate, dict):
         return ("__repr__", repr(candidate))
+
+    def _leaf(v: Any) -> Any:
+        try:
+            return round(float(v), 6)
+        except (TypeError, ValueError):
+            return str(v)
+
     items = []
     for el, v in candidate.items():
         if isinstance(v, dict):
             items.append((str(el), tuple(sorted(
-                (str(e), round(float(f), 6)) for e, f in v.items()))))
+                (str(e), _leaf(f)) for e, f in v.items()))))
         else:
-            items.append((str(el), round(float(v), 6)))
+            items.append((str(el), _leaf(v)))
     return tuple(sorted(items, key=lambda t: t[0]))
 
 
