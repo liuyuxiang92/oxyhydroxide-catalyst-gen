@@ -160,7 +160,21 @@ def random_choices(env, rng: random.Random) -> Tuple[List[int], Dict[str, object
 # Scoring (cached)
 # ---------------------------------------------------------------------------
 
-def score_composition(predictor, comp: Dict[str, float], cache: dict,
+def _comp_cache_key(comp) -> object:
+    """Canonical hashable key for a (possibly nested) composition mapping.
+
+    Single-group envs (OOH, oxides) pass ``{element: fraction}``. Multi-group
+    envs (e.g. the perovskite ABO3 scenario) pass the *structured*
+    ``{group_name: {element: fraction}}`` mapping straight through to
+    ``predictor.predict`` (see ``env_multigroup.py:498``), so the key builder
+    must recurse rather than assume every value is a float.
+    """
+    if isinstance(comp, dict):
+        return tuple(sorted((str(k), _comp_cache_key(v)) for k, v in comp.items()))
+    return round(float(comp), 6)
+
+
+def score_composition(predictor, comp, cache: dict,
                       counter: Optional[List[int]] = None) -> Tuple[float, float]:
     """Cached ``predictor.predict``.
 
@@ -168,7 +182,7 @@ def score_composition(predictor, comp: Dict[str, float], cache: dict,
     ``cache`` is keyed on the canonical composition so duplicates don't consume
     the evaluation budget; ``counter[0]`` (if given) counts unique predictor calls.
     """
-    key = tuple(sorted((str(el), round(float(v), 6)) for el, v in comp.items()))
+    key = _comp_cache_key(comp)
     if key not in cache:
         mean, std = predictor.predict(comp)
         cache[key] = (float(mean), float(std) if std is not None else float("nan"))

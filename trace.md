@@ -1898,3 +1898,23 @@ filter, rather than always launching all 5 arms. Added an optional second
 positional ARM argument between BUDGET and -seed, defaulting to "all" (5
 arms) when omitted -- fully backward compatible with every existing usage
 example already given to the user.
+
+### EARS — Progress (2026-08-14 10:39)
+<!-- concepts: perovskite-level1-campaign, baseline-scripts -->
+User pasted a run_bo.py crash from a remote GPU box: `score_composition`
+(scripts/baselines/_common.py:171) did `round(float(v), 6)` over
+`comp.items()` and hit a dict value -> TypeError. Root cause: `_common.py`
+(BO + GA baselines) predates `MultiGroupEnv` (perovskite ABO3). Single-group
+envs' `terminal_cation_fractions()` returns flat `{element: fraction}`, but
+`MultiGroupEnv.terminal_cation_fractions()` returns structured
+`{group_name: {element: fraction}}` (env_multigroup.py:526-533) — and that
+structured dict is exactly what `predictor.predict()` expects for the
+perovskite `structure_score`/`site_pick` path (confirmed via
+env_multigroup.py:498 and structure_score.py:298's `candidate: Any` passthrough
+to the builder), so the fix must keep passing the nested dict through, not
+flatten it. Fixed by making the cache-key builder recurse (`_comp_cache_key`)
+instead of assuming every composition value is a float. `decode_choices` /
+`random_choices` / `terminal_formula` were already fine for MultiGroupEnv —
+only the BO/GA cache-key builder was flat-only. Both run_bo.py and run_ga.py
+share this via `_common.py`, so one fix covers both baselines for the
+perovskite scenario.
