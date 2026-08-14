@@ -162,8 +162,23 @@ class MGTransformerPredictor:
         self._proc.stdin.flush()
         line = self._proc.stdout.readline()
         if not line:
-            raise RuntimeError("MGTransformer serve.py closed its output unexpectedly.")
-        resp = json.loads(line)
+            code = self._proc.poll()
+            raise RuntimeError(
+                f"MGTransformer serve.py closed its output unexpectedly while "
+                f"scoring {self._tmp_poscar!r} (returncode={code}); its stderr "
+                "(inherited to this process's stderr) printed above and has "
+                "the real error."
+            )
+        try:
+            resp = json.loads(line)
+        except json.JSONDecodeError as exc:
+            code = self._proc.poll()
+            raise RuntimeError(
+                f"MGTransformer serve.py sent a non-JSON response line while "
+                f"scoring {self._tmp_poscar!r} (subprocess returncode={code}, "
+                f"None means still alive): {line!r}. Its stderr (inherited to "
+                "this process's stderr) has the real error."
+            ) from exc
         if "error" in resp:
             raise RuntimeError(f"MGTransformer serve.py failed on {self._tmp_poscar!r}: {resp['error']}")
         return float(resp["score"])

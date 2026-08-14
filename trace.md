@@ -1936,3 +1936,27 @@ pattern as `_common.py`'s `_comp_cache_key`. Noted but did NOT touch:
 `rf_magpie.py:72` has the same `float(f)` cache-key pattern, but it's only
 ever fed flat (single-group) compositions today (OOH/oxides), so left alone
 unless it's later wired to a multi-group scenario.
+
+### EARS — Progress (2026-08-14 11:05)
+<!-- concepts: perovskite-level1-campaign, mgtransformer-bridge -->
+Third error in the same BO run, different class of bug: trial 5 hit a bare
+`JSONDecodeError('Expecting value: line 1 column 1 (char 0)')` inside
+`MGTransformerPredictor._score_one` (mgtransformer.py:166), talking to the
+external `MGTransformer/serve.py` subprocess over stdin/stdout JSON lines.
+Confirmed via a quick `json.loads` repro that this exact error message
+(`char 0`) means the read line was non-empty (the `if not line` EOF guard
+upstream didn't fire) but was NOT valid JSON from its very first character
+-- could be a stray control byte, a crashed/partial write, anything; can't
+tell which without seeing the raw bytes, and serve.py isn't in this repo so
+its internal logic isn't inspectable here. What *was* fixable on our side:
+`_score_one`'s `json.loads(line)` had zero error handling, while the
+near-identical call in `_await_ready` (a few lines up) already wraps decode
+failures with the raw line + subprocess returncode. Brought `_score_one` up
+to the same standard: on decode failure it now raises a RuntimeError naming
+the exact POSCAR path, subprocess returncode, and `repr(line)`. Left the
+underlying "why did serve.py send garbage" question open for the user --
+next step is to rerun and read serve.py's stderr (inherited to this
+process's stderr, printed just above the new, more informative error) for
+the real traceback. Suspect it's connected to the same categorical-group
+'V' pick from the two composition-key bugs earlier this session, now
+surfacing on the structure-building side instead, but unconfirmed.
