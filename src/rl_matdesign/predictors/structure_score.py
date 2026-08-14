@@ -546,13 +546,24 @@ class StructureScorePredictor:
 
     @staticmethod
     def _key(candidate: Any) -> tuple:
-        """A hashable key for the candidate (flat comp or {group: {el: frac}})."""
+        """A hashable key for the candidate (flat comp or {group: {el: frac}}).
+
+        A ``categorical`` group's picked value need not be numeric — it can be
+        an element symbol or an O-form label stored verbatim (see
+        ``env_multigroup.py:230`` / ``CategoricalGroup``) — so a leaf that
+        doesn't parse as a float falls back to its string form.
+        """
+        def _leaf(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return str(v)
         def _flatten(d):
             items = []
             for el, v in d.items():
                 if isinstance(v, dict):
-                    items.append((str(el), tuple(sorted((str(e), float(f)) for e, f in v.items()))))
+                    items.append((str(el), tuple(sorted((str(e), _leaf(f)) for e, f in v.items()))))
                 else:
-                    items.append((str(el), float(v)))
+                    items.append((str(el), _leaf(v)))
             return tuple(sorted(items, key=lambda t: t[0]))
         return _flatten(candidate)

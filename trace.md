@@ -1918,3 +1918,21 @@ instead of assuming every composition value is a float. `decode_choices` /
 only the BO/GA cache-key builder was flat-only. Both run_bo.py and run_ga.py
 share this via `_common.py`, so one fix covers both baselines for the
 perovskite scenario.
+
+### EARS — Progress (2026-08-14 10:49)
+<!-- concepts: perovskite-level1-campaign, structure-score-predictor -->
+Follow-up to the score_composition fix: after that landed, BO trial 2 hit the
+*same* ValueError one layer deeper — now inside
+`StructureScorePredictor._key` (structure_score.py:547-558), the predictor's
+own internal LRU cache key builder (`_raw_stats` -> `_key`), used by every
+caller (RL training included, not just BO/GA). It had the identical bug:
+`float(f)` on every leaf of a group's composition dict, with no fallback for
+`CategoricalGroup`'s non-numeric picks (element symbols / O-form labels like
+'oxide', stored verbatim per env_multigroup.py:230). This is the more
+important half of the fix — it means any RL run (not just the baselines)
+touching a categorical perovskite group would have hit this once it sampled
+a non-numeric leaf. Fixed with the same try/float-except/str(v) fallback
+pattern as `_common.py`'s `_comp_cache_key`. Noted but did NOT touch:
+`rf_magpie.py:72` has the same `float(f)` cache-key pattern, but it's only
+ever fed flat (single-group) compositions today (OOH/oxides), so left alone
+unless it's later wired to a multi-group scenario.
