@@ -72,20 +72,28 @@ def main() -> None:
     ub = C.action_upper_bound(env)
     budget = args.budget or C.default_budget(cfg)
     print(f"[BO] env_type={env_type}, n_components={n}, action_ub={ub}, "
-          f"trials(budget)={budget}, startup={args.n_startup_trials}")
+          f"budget(valid trials)={budget}, startup={args.n_startup_trials}")
 
     cache: dict = {}
     eval_count = [0]
     # Unique candidates keyed on canonical composition -> best row.
     results: dict = {}
+    valid_count = [0]
+    invalid_count = [0]
 
     def objective(trial: "optuna.Trial") -> float:
         choices = [trial.suggest_int(f"step_{k}", 0, ub - 1) for k in range(n)]
         decoded = C.decode_choices(env, choices)
         if decoded is None:
-            # Dead-end trajectory (a custom filter emptied the action set). Prune
-            # rather than return a sentinel — pruned trials don't poison TPE.
+            # Dead-end trajectory (a custom filter emptied the action set). The RL
+            # agent's env guarantees every episode completes, so a dead-end here is
+            # not something an RL episode would ever spend on — prune it and don't
+            # let it consume the valid-trial budget below; a duplicate of an
+            # already-seen (valid) composition still does, since RL pays for that
+            # too (one episode, cached predictor call).
+            invalid_count[0] += 1
             raise optuna.TrialPruned()
+        valid_count[0] += 1
         mean, std = C.score_composition(predictor, decoded["comp"], cache, eval_count)
         key = decoded["key"]
         if key not in results or mean > results[key]["reward"]:
@@ -108,7 +116,22 @@ def main() -> None:
         study_name=f"bo_{os.path.basename(args.out)}",
         storage=storage, load_if_exists=True,
     )
-    study.optimize(objective, n_trials=budget, show_progress_bar=True)
+
+    # n_trials=None + a stop callback lets us keep sampling past pruned (invalid)
+    # trials until `budget` valid ones have been scored, rather than letting dead
+    # ends eat into the budget. `_safety_cap` bounds the loop if a config makes
+    # almost every trajectory infeasible.
+    _safety_cap = max(budget * 20, budget + 1000)
+
+    def _stop_when_budget_reached(study: "optuna.Study", _trial: "optuna.trial.FrozenTrial") -> None:
+        if valid_count[0] >= budget or (valid_count[0] + invalid_count[0]) >= _safety_cap:
+            study.stop()
+
+    study.optimize(objective, n_trials=None, callbacks=[_stop_when_budget_reached],
+                    show_progress_bar=False)
+    if valid_count[0] < budget:
+        print(f"[BO] WARNING: hit safety cap of {_safety_cap} total trials with only "
+              f"{valid_count[0]}/{budget} valid — search space may be too constrained.")
 
     rows = list(results.values())
     out_csv = C.write_outputs(
@@ -117,13 +140,15 @@ def main() -> None:
             "method": "bo", "backend": "optuna_tpe",
             "config": args.config, "seed": args.seed,
             "budget": budget, "n_startup_trials": args.n_startup_trials,
+            "valid_trials": valid_count[0],
+            "invalid_trials_skipped": invalid_count[0],
             "total_evaluations": eval_count[0],
             "n_unique_candidates": len(rows),
         },
     )
     best = max(rows, key=lambda r: r["reward"]) if rows else None
-    print(f"[BO] Done. {eval_count[0]} unique predictor evals, "
-          f"{len(rows)} unique candidates.")
+    print(f"[BO] Done. {valid_count[0]} valid trials ({invalid_count[0]} invalid skipped), "
+          f"{eval_count[0]} unique predictor evals, {len(rows)} unique candidates.")
     if best:
         print(f"[BO] Best: {best['formula']} reward={best['reward']:.4f}")
     print(f"[BO] Results -> {out_csv}")

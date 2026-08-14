@@ -1983,3 +1983,32 @@ on): three independent copies of this exact logic is a real duplication
 risk -- worth a follow-up to consolidate into one shared helper so a fourth
 occurrence can't reintroduce the same landmine, but held off since it wasn't
 asked for and each fix so far has been minimal/targeted.
+
+### EARS — Progress (2026-08-14 11:51)
+<!-- concepts: baseline-budget-accounting, ga-bo-baselines -->
+User asked to change BO/GA budget semantics: dead-end (invalid) candidates
+currently consume a budget slot (1 Optuna trial in run_bo.py, 1 of the
+pop_size*n_gen evaluate() slots in run_ga.py) even though they never reach
+the predictor. Rationale: the RL env guarantees every episode completes, so
+RL never "spends" an episode on an infeasible trajectory the way BO/GA can
+-- for a fair budget comparison, invalid decodes shouldn't count either, but
+duplicates of an already-seen valid composition should (RL pays an episode
+for those too, just with a cached predictor call).
+
+Fixed run_bo.py: replaced `study.optimize(objective, n_trials=budget)` with
+`n_trials=None` + a stop callback that only calls `study.stop()` once
+valid_count[0] >= budget, with a `_safety_cap = max(budget*20, budget+1000)`
+backstop to avoid an infinite loop if a config makes almost everything
+infeasible. TrialPruned (dead-end) trials now retry for free; valid_count
+only increments past the decode-None check, so duplicates (which still
+reach score_composition, cache hit or not) count normally. run_config.json
+gains `valid_trials` / `invalid_trials_skipped` for visibility.
+
+run_ga.py not yet fixed -- same principle applies but is more invasive:
+DEAP's `algorithms.eaSimple` has no repair hook, so eliminating this needs a
+custom generational loop (variation via `algorithms.varAnd`, then a repair
+step that replays each offspring via `C.decode_choices` and resamples a
+fresh valid individual in place of any dead-end before `evaluate()` is
+called, so `pop_size*n_gen` stays an exact count of scored -- possibly
+duplicate -- individuals). Planned but not yet written; next step picks up
+there.
