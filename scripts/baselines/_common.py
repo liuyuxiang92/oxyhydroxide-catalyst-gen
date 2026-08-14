@@ -167,11 +167,18 @@ def _comp_cache_key(comp) -> object:
     envs (e.g. the perovskite ABO3 scenario) pass the *structured*
     ``{group_name: {element: fraction}}`` mapping straight through to
     ``predictor.predict`` (see ``env_multigroup.py:498``), so the key builder
-    must recurse rather than assume every value is a float.
+    must recurse rather than assume every value is a float. A ``categorical``
+    group's leaf values need not be numeric either — ``CategoricalGroup``
+    stores the picked *label* verbatim (e.g. an element symbol or an O-form
+    string like ``"oxide"``, see ``env_multigroup.py:133,230``), so a leaf that
+    doesn't parse as a float falls back to its string form rather than raising.
     """
     if isinstance(comp, dict):
         return tuple(sorted((str(k), _comp_cache_key(v)) for k, v in comp.items()))
-    return round(float(comp), 6)
+    try:
+        return round(float(comp), 6)
+    except (TypeError, ValueError):
+        return str(comp)
 
 
 def score_composition(predictor, comp, cache: dict,
