@@ -2012,3 +2012,108 @@ fresh valid individual in place of any dead-end before `evaluate()` is
 called, so `pop_size*n_gen` stays an exact count of scored -- possibly
 duplicate -- individuals). Planned but not yet written; next step picks up
 there.
+
+### EARS — Progress (2026-08-14 12:14)
+<!-- concepts: multi-group-constraint-filters, perovskite-level1-campaign -->
+User asked to add smact_charge/pauling_en filters to configs/perovskite_level1.yaml
+(two categorical single-atom sites, A_site + B_site, ABO3). Discovered the existing
+SMACTChargeFilter genuinely cannot attach to a CategoricalGroup as-is: its
+filter_actions indexes `allowed_units[argmax(comp_oh)]`, but CategoricalGroup always
+passes `allowed_units=[]` (empty) -> IndexError. Also, for CategoricalGroup the real
+picked element lives in the `comp_oh` code (decoded via a per-slot code->value map
+internal to CategoricalGroup), not in `elem_oh`/species_set like CompositionEnv
+groups -- so even fixing the indexing crash wouldn't let the filter recover the real
+chemistry. The existing top-level `constraint_filter: null` line in
+perovskite_level1.yaml is also dead for multi_group envs -- build_env only reads it
+for env_type != multi_group; multi_group filters must live per-group under
+`groups[i].constraint_filter` / `groups[i].filters`.
+
+Fix: added a new `code_to_value` context kwarg (CategoricalGroup.allowed_actions ->
+env_multigroup.py, documented in constraints/base.py's ConstraintFilter interface
+alongside the existing prior_groups kwarg) and branched SMACTChargeFilter.
+filter_actions on its presence into a new _filter_categorical path: decodes each
+candidate's real value via code_to_value, folds prior_groups' string-valued picks in
+as +1 atom each (mirrors MultiGroupEnv.assembled_composition's own categorical-value
+interpretation), adds scaffold_formula (e.g. O3) as the fixed part, and reuses the
+same charge_neutral() amount-weighted SMACT check. ElectronegativityFilter (pauling_en)
+inherits this for free since it only overrides use_pauling default.
+
+Filters must be attached to B_site only (not A_site) -- A charge check needs both
+sites' picks, and prior_groups only has A's completed pick by the time B_site's
+filter runs; A_site is picked first so it has no prior_groups to check against yet.
+
+Not yet done: haven't actually edited perovskite_level1.yaml itself or smoke-tested
+end-to-end (constructing the MultiGroupEnv with this filter chain and confirming it
+prunes non-neutral B-site candidates without crashing, plus checking the "never
+strand agent with zero actions" fallback triggers sanely given a large 73-element
+pool). Also haven't checked whether generate_candidates' post-episode drop
+(charge_check_enabled/charge_use_pauling in registry.py) reads per-group filters
+correctly for multi_group scenarios, since those helper functions were written
+checking cfg.get("constraint_filter")/cfg.get("filters") on a single flat cfg -- for
+multi_group the relevant config lives inside cfg["groups"][i], not top-level, so this
+may currently be a no-op (silently skip the post-episode neutral-only filter) for
+perovskite_level1.yaml even after this fix. Need to verify before calling this done.
+
+### EARS — Session Start (2026-08-25 15:51)
+<!-- concepts: perovskite-defect-doping, clc-md-pipeline-bridge -->
+- Task: Plan revisions to configs/perovskite.yaml for a new A/B-site doping + vacancy/interstitial
+  defect scenario on a 64Sr/64Fe perovskite.vasp, using perovskite_dpa4.ckpt.pt (3 fparams:
+  temperature, partial_oxygen_1, partial_oxygen_2), with per-candidate 200ps LAMMPS MD (dpa4
+  spin, 100000 steps @ 0.002ps) -> last-20ps averaged structure -> DP geometry optimization
+  (different dpa4 model) -> delta_delta property prediction as the RL reward.
+- Why: User wants to keep rl-matdesign generic (not hardcode this MD-heavy workflow into it);
+  the MD run + 20ps-averaging machinery already exists and is proven in
+  chemical_looping_beyond_combustion/code/structures/ (CLC_workflow stages 2-6: gen_md.py,
+  submit.py, collect_md.py, dp_opt.py, collect_opt.py). Currently scoping what's genuinely NEW
+  for this task (defect/vacancy doping grammar, 3-fparam delta_delta prediction) vs. what to
+  reuse unmodified from CLC_workflow, and where a thin bridge between rl-matdesign's generated
+  candidates and CLC_workflow's POSCAR+manifest.csv tree should live.
+
+### EARS — Progress (2026-08-25 16:48)
+<!-- concepts: perovskite-defect-doping, clc-md-pipeline-bridge -->
+Implemented the plan from configs/perovskite.yaml's Level-2 redesign:
+
+1. utils/structure.py: added `insert: Dict[str,int]` (+ `min_dist`/`max_attempts`) to
+   SublatticeOp, and `_insert_interstitials` in build_substituted_structure — random
+   fractional positions, minimum-image distance check via ase.geometry.get_distances,
+   resampled on collision. Generic, not perovskite-specific.
+2. New src/rl_matdesign/predictors/builders/defect_site.py (DefectSiteBuilder): pure
+   structure construction (no physics) for A/B-site independent-dopant doping + one
+   signed A-site defect (vacancy/interstitial). Key subtlety found during
+   implementation: build_substituted_structure resolves `sites=` against the
+   ORIGINAL template symbols, not the post-op symbols within the same call — so a
+   vacancy of a dopant species (e.g. "remove 2 Ca") can't be a separate SublatticeOp
+   selecting sites="Ca" (the template has zero Ca atoms before substitution runs).
+   Fixed by folding the vacancy into the SAME op as the A-site doping: reduce that
+   species' `put` count and add to `remove` on the sites="Sr" selection. Verified by
+   hand (4 cases: dope-only, vacancy-of-dopant, vacancy-overflow-clamp,
+   interstitial) against perovskite.vasp — atom counts and formula labels correct,
+   interstitial min-distance (1.53 A, above the 1.5 A floor) confirmed via
+   get_distances.
+3. Registered "defect_site" in registry.py's BUILDERS dict.
+4. Design pivot mid-session (before coding): originally planned a custom FQN
+   predictor class doing MD+opt+fparam-predict in one. Realized structure_score.py's
+   existing `share_structure: true` + the built-in `dp_property` backend (already
+   fparam-aware) make that unnecessary — moved MD+averaging+DP-relax into the
+   BUILDER instead, so exploring N temperature/pO2 combos is just N ordinary
+   `properties:` entries (dp_property, different fparam), sharing one MD run. No new
+   predictor code needed at all.
+5. New file OUTSIDE rl-matdesign: CLC_workflow/src/clc_workflow/rl_builder.py
+   (MDAveragedOptBuilder) — wraps DefectSiteBuilder, runs LAMMPS as a LOCAL
+   subprocess (no dpdispatcher/Bohrium — user confirmed RL trains on a plain GPU
+   machine), reuses lammps_io.py's write_conf_lmp/render_input_lammps/
+   read_frames_since/average_frames directly, then rl_matdesign.utils.structure.
+   relax_structure for the post-MD optimization with a second model. Added a new
+   `rl_reward` optional-deps extra to CLC_workflow's pyproject.toml (ase only —
+   deepmd-kit and rl_matdesign itself are assumed already present in the training
+   env, not PyPI deps of this package). Syntax-checked via py_compile; not runnable
+   end-to-end without a local LAMMPS+DeepMD env, which wasn't available this
+   session.
+6. Rewrote configs/perovskite.yaml for the new scenario. Left several REQUIRED USER
+   EDIT placeholders (dopant fraction upper bound, defect species pool now that
+   A-site dopant was corrected Co->Ca mid-design, md/opt model paths + local
+   lmp_bin, delta_delta head name, fparam triples, direction sign) — matching the
+   existing perovskite_level1.yaml convention for un-confirmable specifics.
+
+Not yet done: end-to-end smoke test of MDAveragedOptBuilder (needs a real local
+LAMMPS+DeepMD environment) and a full run_experiment.py dry run of the new config.

@@ -1,104 +1,190 @@
-# Perovskite B-site case study configuration
+# Perovskite Level 2 — A/B-site defect-doping scenario with REAL per-episode MD reward.
+#
+# Base structure: perovskite.vasp (64 Sr / 64 Fe / 192 O, i.e. SrFeO3-type, 2x2x2
+# supercell of the 5-atom primitive). The agent:
+#   - dopes the A-site (Sr) with Ca and/or Ba, step 1/32 = 0.03125 (2 of 64 atoms)
+#   - dopes the B-site (Fe) with Mn and/or Co, same step
+#   - picks ONE additional signed A-site defect: negative = vacancy of a chosen
+#     species (Sr/Ca/Ba), positive = interstitial of a chosen species, on the
+#     same 1/32 grid, range roughly -0.15..+0.06 (5 steps vacancy, 2 steps
+#     interstitial)
+#
+# Reward, per candidate, per one of `n_random_configs` independent realizations
+# ("n_sets"): build the doped/defected structure -> run REAL 200 ps LAMMPS NPT MD
+# (100000 steps x 0.002 ps) with a cheap MD model (dpa4c) -> average the last
+# 20 ps -> DP-optimize with a second, separate model -> score the relaxed
+# structure at one or more (temperature, pO2_1, pO2_2) fparam triples. This is
+# NOT a proxy — every RL episode pays for the real MD, because the MD model is
+# cheap enough to run for real (confirmed by the user). Runs as a LOCAL
+# subprocess on the GPU machine training RL — no Bohrium/dpdispatcher submission
+# (that machinery belongs to the offline chemical_looping_beyond_combustion/
+# code/structures/ pipeline, not to rl-matdesign).
+#
 # Usage:
 #   python scripts/run_experiment.py --config configs/perovskite.yaml --method a2c \
-#       --out runs/perovskite_a2c_seed0 --seed 0
+#       --out runs/perovskite_defect_a2c_seed0 --seed 0
+#
+# REQUIRED USER EDITS before running — search for "REQUIRED USER EDIT" below:
+#   - A/B dopant fraction upper bound (currently 31/32 = 0.96875, i.e. "no cap
+#     other than what the 64-site sublattice can physically hold")
+#   - A-site defect species pool (currently Sr/Ca/Ba — confirm this is right;
+#     the A-site dopant was corrected from Co to Ca partway through design, so
+#     the defect pool may need the same correction)
+#   - md.model / md.head / md.lmp_bin / md.pair_style / md.plugin — must match
+#     whatever LAMMPS + DeepMD build actually exists on the LOCAL machine that
+#     will run RL training (the values below mirror the proven Bohrium dpa4C
+#     build in chemical_looping_beyond_combustion/code/structures/config.yaml,
+#     but that build lives under /root/... on a Bohrium image, NOT necessarily
+#     on your training machine)
+#   - opt.model / opt.head — the "different" DP model used to relax the
+#     MD-averaged structure
+#   - properties[*].head / properties[*].fparam — perovskite_dpa4.ckpt.pt's real
+#     head name and the actual (temperature, pO2_1, pO2_2) triples to explore
+#   - properties[*].direction — min/max sign convention for delta_delta
 
+# ---- Environment: A/B-site doping (independent dopant picks) + a signed
+#      A-site vacancy/interstitial defect axis (two categorical picks) ----
+env_type: multi_group
 
-# ---- Environment ----
-# B-site candidates (transition metals compatible with La3+ A-site and O2- anion)
-species_set:
-  - Cr
-  - Mn
-  - Fe
-  - Co
-  - Ni
-  - Ti
-  - V
-  - Cu
-  - Zr
-  - Nb
-  - Mo
+groups:
+  - name: A_dopant
+    kind: independent
+    species_set: [Ca, Ba]
+    total_units: 32
+    n_components: 2
+    fraction_set:   # REQUIRED USER EDIT: upper bound — 31/32, i.e. only the
+                     # 64-site sublattice itself caps a single dopant's fraction
+      ["0.03125", "0.06250", "0.09375", "0.12500", "0.15625", "0.18750",
+       "0.21875", "0.25000", "0.28125", "0.31250", "0.34375", "0.37500",
+       "0.40625", "0.43750", "0.46875", "0.50000", "0.53125", "0.56250",
+       "0.59375", "0.62500", "0.65625", "0.68750", "0.71875", "0.75000",
+       "0.78125", "0.81250", "0.84375", "0.87500", "0.90625", "0.93750",
+       "0.96875"]
 
-fraction_set:
-  - "0.05"
-  - "0.10"
-  - "0.15"
-  - "0.20"
-  - "0.25"
-  - "0.30"
-  - "0.35"
-  - "0.40"
-  - "0.45"
-  - "0.50"
-  - "0.55"
-  - "0.60"
-  - "0.65"
-  - "0.70"
-  - "0.75"
-  - "0.80"
+  - name: A_defect_species
+    kind: categorical
+    choices:
+      - element: species
+        # REQUIRED USER EDIT: confirm this pool now that A-site dopant is Ca/Ba
+        values: [Sr, Ca, Ba]
 
-# The anion formula is part of the full material but NOT part of the
-# optimised composition (La and O are fixed by the template).
-# Set anion_formula to "" because the RL agent only selects B-site cations.
-anion_formula: ""
-n_components: 5
+  - name: A_defect_amount
+    kind: categorical
+    choices:
+      - element: amount
+        # Signed 1/32 grid: negative = vacancy, positive = interstitial.
+        # -0.15625 = 5 steps (~10 atoms) vacancy .. +0.0625 = 2 steps (4 atoms)
+        # interstitial, matching the user's approx -0.15 / +0.06 bounds.
+        values: ["-0.15625", "-0.12500", "-0.09375", "-0.06250", "-0.03125",
+                 "0.00000", "0.03125", "0.06250"]
 
-# Optional: SMACT charge neutrality on the WHOLE LaBO3 formula. La and O are NOT
-# agent-picked (they live in the template), so point the filter at the template as
-# the "scaffold" — the whole formula before B-site substitution. The filter parses
-# {La:1, O:3} + the B-site count from the POSCAR, merges the agent's B-site picks,
-# and tests amount-weighted neutrality. No `stoich` guess needed.
-# Uncomment to enable (in-episode pruning + drops non-neutral candidates from
-# generated.csv):
-# constraint_filter: smact_charge
-# scaffold_poscar: data/perovskite/LaBO3.POSCAR
-# scaffold_site_symbol: "Fe"   # same placeholder as the builder's site_symbol
-constraint_filter: null   # Default: no constraint; DPA reward handles stability
+  - name: B_dopant
+    kind: independent
+    species_set: [Mn, Co]
+    total_units: 32
+    n_components: 2
+    fraction_set:   # REQUIRED USER EDIT: same upper-bound question as A_dopant
+      ["0.03125", "0.06250", "0.09375", "0.12500", "0.15625", "0.18750",
+       "0.21875", "0.25000", "0.28125", "0.31250", "0.34375", "0.37500",
+       "0.40625", "0.43750", "0.46875", "0.50000", "0.53125", "0.56250",
+       "0.59375", "0.62500", "0.65625", "0.68750", "0.71875", "0.75000",
+       "0.78125", "0.81250", "0.84375", "0.87500", "0.90625", "0.93750",
+       "0.96875"]
 
-# ---- Reward (one structure objective -> single-objective, auto-detected) ----
-builder: substitute                    # fixed-lattice element swap onto placeholder sites
-poscar: data/perovskite/LaBO3.POSCAR   # LaBO3 template; B-site marked as site_symbol
-site_symbol: "Fe"                      # placeholder for B-site atoms in the template POSCAR
-n_random_configs: 5
-k: 1.0
+constraint_filter: null   # no constraint filter; the MD/DP reward handles stability
+
+# ---- Reward: MDAveragedOptBuilder builds ONCE per candidate (doping+defect ->
+#      real MD -> 20ps average -> DP relax), shared across every properties[]
+#      entry (share_structure: true, the engine default) so exploring more
+#      (T, pO2_1, pO2_2) combos below does NOT add more MD runs. ----
+builder: clc_workflow.rl_builder:MDAveragedOptBuilder
+base_poscar: perovskite.vasp
+a_site_symbol: Sr
+b_site_symbol: Fe
+a_dopant_group: A_dopant
+b_dopant_group: B_dopant
+a_defect_species_group: A_defect_species
+a_defect_amount_group: A_defect_amount
+interstitial_min_dist: 1.5   # Angstrom, minimum-image distance for interstitials
+
+n_random_configs: 10          # the "10 n_sets" — independent random realizations
+                               # per candidate, each gets its own MD run
+geo_opt: null                 # disabled at the engine level — MDAveragedOptBuilder
+                               # already returns MD-averaged + DP-relaxed structures
+
+md:
+  model: dpa4c.ckpt.pt          # REQUIRED USER EDIT: cheap MD model, local path
+  head: null
+  pair_style: dpa4spin/kk       # REQUIRED USER EDIT: match the LOCAL LAMMPS build
+  atom_style: atomic
+  plugin: null                 # non-null (e.g. libdeepmd_lmp.so) only for a stock
+                                # deepmd-kit build using `pair_style deepmd`
+  temperature_k: 300
+  nsteps: 100000                # 100000 steps x 0.002 ps = 200 ps
+  timestep_ps: 0.002
+  thermo_freq: 10
+  dump_freq: 100
+  pressure_bar: 0.0
+  tau_t: 0.1
+  tau_p: 0.5
+  lmp_bin: /path/to/lmp         # REQUIRED USER EDIT: LAMMPS binary on the LOCAL
+                                 # training machine (NOT the Bohrium /root path)
+  lmp_args: ["-k", "on", "g", "1", "-sf", "kk"]   # Kokkos flags; drop if not using dpa4C
+  average_last_ps: 20
+  avg_rms_max: 0.5
+
+opt:
+  model: dpa4.ckpt.pt           # REQUIRED USER EDIT: the "different" DP model
+  head: perovskite              # REQUIRED USER EDIT: confirm the real head name
+  fmax: 0.01
+  steps: 2000
+  relax_cell: true
+
 properties:
-  - name: energy
-    predictor: dp_energy               # DP potential energy (lower = more stable)
-    models:
-      - models/perovskite/model_1.pt
-      - models/perovskite/model_2.pt
-      - models/perovskite/model_3.pt
-    direction: min                     # minimize formation enthalpy
+  # One entry per (temperature, pO2_1, pO2_2) triple to explore — add or remove
+  # entries freely; all of them score the SAME MD-averaged+optimized structure,
+  # so adding more temperatures does not add more MD runs. Each shows up as its
+  # own column in generated.csv.
+  - name: delta_delta_T670
+    predictor: dp_property
+    models: [perovskite_dpa4.ckpt.pt]
+    head: PUT_HEAD_NAME_HERE     # REQUIRED USER EDIT
+    fparam: [670, 0.8, 0.00003]  # REQUIRED USER EDIT: [temperature, pO2_1, pO2_2]
+    direction: min               # REQUIRED USER EDIT: sign convention for delta_delta
+    weight: 1.0
+    objective: mean_minus_kstd
+  - name: delta_delta_T1070
+    predictor: dp_property
+    models: [perovskite_dpa4.ckpt.pt]
+    head: PUT_HEAD_NAME_HERE     # REQUIRED USER EDIT
+    fparam: [1070, 0.8, 0.00003] # REQUIRED USER EDIT
+    direction: min
+    weight: 1.0
     objective: mean_minus_kstd
 
+k: 1.0   # uncertainty coefficient for mean_minus_kstd
+
 # ---- RL hyperparameters ----
+# Every training episode pays for n_random_configs (10) REAL 200ps MD runs, so
+# budgets here start deliberately small — measure actual wall-clock per episode
+# on the target machine first, then scale up. This is nowhere near the old
+# Level-1/Level-0 budgets (pg_num_iters x pg_batch_eps in the hundreds/thousands).
 method: a2c
-pg_warmup_eps: 200
-pg_num_iters: 500
-pg_batch_eps: 15
+pg_warmup_eps: 10
+pg_num_iters: 20
+pg_batch_eps: 5
 pg_lr_actor: 0.001
 pg_lr_critic: 0.001
-pg_entropy_coef: 0.01
+pg_entropy_coef: 0.05
+pg_entropy_min: 0.3
 gen_temperature: 1.0
 gen_top_frac: 0.0
-gen_epsilon: 0.0
-gamma: 0.99
+gen_epsilon: 0.2
+gamma: 0.9
 
-pg_repeat_penalty_coef: 0.1
+pg_repeat_penalty_coef: 0.5
 pg_repeat_penalty_shape: log
 
 # ---- Generation ----
-num_gen_eps: 200
-exploration_gen_eps: 50    # High-uncertainty candidates for DFT to improve DPA model
-
-# ---- DQN-specific ----
-dqn_lr: 0.001
-dqn_batch_size: 256
-# Classical online DQN
-dqn_warmup_eps: 200
-dqn_num_train_eps: 20000
-dqn_buffer_size: 50000
-dqn_grad_steps_per_ep: 5
-dqn_target_update_freq: 100
-dqn_eps_anneal_eps: 10000
-dqn_eps_min: 0.05
+num_gen_eps: 20
+exploration_gen_eps: 0

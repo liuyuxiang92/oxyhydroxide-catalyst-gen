@@ -90,19 +90,31 @@ def resolve_region(
 
 @dataclass
 class SublatticeOp:
-    """One substitution/deletion operation on a base structure.
+    """One substitution/deletion/insertion operation on a base structure.
 
     Parameters
     ----------
     sites:
         Either a chemical symbol (``str``) — selects *all* atoms of that symbol —
         or an explicit sequence of integer site indices (an eligible region, e.g.
-        "the last 1000 S atoms").
+        "the last 1000 S atoms"). Unused (may be ``[]``) for an insert-only op.
     put:
         ``{species: count}`` — integer **atom counts** of replacement species to
         place on the selected sites (random assignment among them).
     remove:
         Number of selected sites to delete (vacancies).
+    insert:
+        ``{species: count}`` — integer atom counts of *new* atoms to add at
+        random positions **not** tied to any existing site (interstitials).
+        Independent of ``sites``/``put``/``remove`` — applied after them, against
+        the post-put/remove structure, so it never collides with a substitution
+        or vacancy from the same op list.
+    min_dist:
+        Minimum allowed distance (Å, minimum-image) between an inserted atom and
+        any existing or previously-inserted atom in the same call. Candidate
+        positions closer than this are resampled.
+    max_attempts:
+        Resample attempts per inserted atom before giving up.
 
     The remaining ``n_selected - sum(put.values()) - remove`` selected sites keep
     their original species. Requires ``sum(put.values()) + remove <= n_selected``.
@@ -111,6 +123,9 @@ class SublatticeOp:
     sites: Union[str, Sequence[int]]
     put: Dict[str, int] = field(default_factory=dict)
     remove: int = 0
+    insert: Dict[str, int] = field(default_factory=dict)
+    min_dist: float = 1.5
+    max_attempts: int = 200
 
 
 def _resolve_sites(symbols: Sequence[str], sites: Union[str, Sequence[int]]) -> List[int]:
@@ -193,9 +208,63 @@ def build_substituted_structure(
             drop = set(delete_indices)
             keep = [i for i in range(len(atoms)) if i not in drop]
             atoms = atoms[keep]
+
+        insert_specs = [
+            (species, int(count)) for op in ops for species, count in op.insert.items()
+        ]
+        if insert_specs:
+            atoms = _insert_interstitials(
+                atoms, insert_specs, rng,
+                min_dist=max((op.min_dist for op in ops if op.insert), default=1.5),
+                max_attempts=max((op.max_attempts for op in ops if op.insert), default=200),
+            )
+
         configs.append(atoms)
 
     return configs
+
+
+def _insert_interstitials(
+    atoms: "ase.Atoms",
+    specs: Sequence[Any],
+    rng: np.random.Generator,
+    *,
+    min_dist: float = 1.5,
+    max_attempts: int = 200,
+) -> "ase.Atoms":
+    """Add new atoms at random positions, not tied to any existing site.
+
+    Applied *after* any ``put``/``remove`` in the same :func:`build_substituted_structure`
+    call, so an inserted atom never collides with a substitution/deletion from the same
+    op list. Each candidate position is rejected and resampled if it lands within
+    ``min_dist`` (minimum-image convention, so a candidate near a cell boundary is checked
+    against periodic images too) of any existing atom or of an interstitial already placed
+    in this call.
+    """
+    from ase import Atom
+    from ase.geometry import get_distances
+
+    cell = atoms.get_cell()
+    for species, count in specs:
+        for _ in range(count):
+            for attempt in range(max_attempts):
+                frac = rng.random(3)
+                cart = frac @ cell
+                existing = atoms.get_positions()
+                if len(existing):
+                    _, dists = get_distances([cart], existing, cell=cell, pbc=True)
+                    if dists.min() < min_dist:
+                        continue
+                atoms.append(Atom(species, position=cart))
+                break
+            else:
+                raise ValueError(
+                    f"build_substituted_structure: could not place an interstitial "
+                    f"{species!r} atom after {max_attempts} attempts (min_dist="
+                    f"{min_dist} Å) — the cell may be too crowded, or min_dist too "
+                    "large for this cell size."
+                )
+    return atoms
 
 
 # ---------------------------------------------------------------------------

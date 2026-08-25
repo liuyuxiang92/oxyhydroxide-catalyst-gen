@@ -105,10 +105,16 @@ def _make_site_pick_builder(cfg: dict, *, seed: Optional[int] = None, **_):
     return SitePickBuilder(cfg, seed=seed)
 
 
+def _make_defect_site_builder(cfg: dict, *, seed: Optional[int] = None, **_):
+    from .predictors.builders.defect_site import DefectSiteBuilder
+    return DefectSiteBuilder(cfg, seed=seed)
+
+
 BUILDERS: Dict[str, Factory] = {
-    "substitute": _make_substitute_builder,
-    "sse":        _make_sse_builder,
-    "site_pick":  _make_site_pick_builder,
+    "substitute":  _make_substitute_builder,
+    "sse":         _make_sse_builder,
+    "site_pick":   _make_site_pick_builder,
+    "defect_site": _make_defect_site_builder,
 }
 
 
