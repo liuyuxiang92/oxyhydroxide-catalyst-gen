@@ -14,3 +14,15 @@ models/DPA-3.1-3M.pt
 
 # Note: we intentionally do NOT ignore *.npz/*.joblib globally.
 # Those may be legitimate tracked datasets/models in this clean repo.
+
+# Proprietary scenario configs — kept locally, not pushed to the public remote.
+# (formulation/design details, not secrets — history before this point still
+# has them; see trace.md if you need to recover an older version)
+configs/ti_alloy.yaml
+configs/perovskite.yaml
+configs/perovskite_level1.yaml
+configs/ooh.yaml
+configs/ooh_dqn.yaml
+configs/ooh_fine.yaml
+configs/hpo/ooh_a2c.yaml
+configs/hpo/ooh_dqn.yaml
