@@ -2117,3 +2117,88 @@ Implemented the plan from configs/perovskite.yaml's Level-2 redesign:
 
 Not yet done: end-to-end smoke test of MDAveragedOptBuilder (needs a real local
 LAMMPS+DeepMD environment) and a full run_experiment.py dry run of the new config.
+
+### EARS — Progress (2026-08-25 17:01)
+<!-- concepts: public-repo-hygiene, config-confidentiality -->
+User flagged a security concern: ti_alloy/perovskite/ooh-related YAML configs
+(formulation/design details, no credentials found on inspection) are pushed to a
+PUBLIC GitHub repo and shouldn't be. Scoped down through discussion: yaml only (not
+the related source, e.g. src/abcde_ooh/*, predictors/ooh.py/perovskite.py, which stay
+public), and only two branches need cleanup — main and feat/multi-sublattice-lips
+(not the other 5 branches: feat/classical-dqn, feat/sinter-calcine, general-framework,
+main_backup, feat/paper-aligned-loops).
+
+Recommended against a git-history rewrite/force-push (destructive to any existing
+clone, GitHub doesn't guarantee removal from forks/caches anyway, and there are no
+leaked secrets forcing urgency) in favor of untrack-going-forward: `git rm --cached`
++ .gitignore entries, so future pushes stop carrying them but old history is left
+alone. User accepted this framing implicitly by not pushing back on it.
+
+main tracks a different, smaller subset than feat/multi-sublattice-lips: only
+configs/hpo/ooh_a2c.yaml, configs/hpo/ooh_dqn.yaml, configs/perovskite.yaml (no
+ti_alloy.yaml/ooh.yaml/ooh_dqn.yaml/ooh_fine.yaml/perovskite_level1.yaml there).
+Plan: untrack the 8 relevant files on feat/multi-sublattice-lips (done: git rm
+--cached + .gitignore, not yet committed/pushed), then do the equivalent on main via
+a separate `git worktree` (to avoid disturbing this branch's substantial pre-existing
+uncommitted changes from other work) rather than switching branches in place.
+
+### EARS — Progress (2026-08-26 14:31)
+<!-- concepts: perovskite-level1-campaign, dqn-augmentation-safety -->
+User asked to add DQN-related parameters to configs/perovskite_level1.yaml (already
+had a fairly complete dqn_* block from earlier work). Diffed against
+run_experiment.py's actual argparse/config surface and found two real gaps:
+dqn_hidden_dim (driver defaults to 256 via cfg.get, was never set explicitly here)
+and dqn_loss (smoothl1/mse). Added both explicitly.
+
+Also traced dqn_augment_permutations (mentioned in CLAUDE.md as a DQN sample-
+efficiency knob) and found it would be UNSAFE to enable for this specific config:
+training.py's _augment_episode_in_buffer only no-ops for
+episode_style=="fixed_order_amount", but this scenario's MultiGroupEnv sets
+episode_style="multi_group" with two heterogeneous, fixed-order groups (A_site then
+B_site — different chemistry, not interchangeable dopant picks). The guard doesn't
+catch this case, so a nonzero K would attempt to replay episodes with A_site/B_site
+actions swapped, which the env's group-ordered action space can't decode correctly.
+Added dqn_augment_permutations: 0 explicitly with a comment explaining why, rather
+than silently omitting it, so a future edit doesn't "helpfully" turn it on. Left
+dqn_target_mode (bootstrap/mc) out of the YAML on purpose -- it's the per-run
+ablation arm already documented as a CLI-only choice in this file's own usage
+example/header, matching the DQN(bootstrap)/DQN(mc) convention used elsewhere.
+
+Not yet done: haven't run this config end-to-end to confirm dqn_hidden_dim=256
+trains sanely on the 73x73 action space, and haven't checked whether the
+episode_style=="fixed_order_amount"-only guard in _augment_episode_in_buffer should
+itself be widened to also catch heterogeneous multi_group scenarios generically
+(flagged, not fixed -- out of scope for this ask).
+
+### EARS — Progress (2026-08-26 15:36)
+<!-- concepts: perovskite-defect-doping, env-group-design -->
+User pushed back on the A_defect_species/A_defect_amount split (2 RL steps) asking
+why it's not one combined step like A_dopant/B_dopant. Traced the real reason:
+IndependentDopantsGroup (what A_dopant/B_dopant use for joint element+amount picks)
+has a terminal_comp_key() that does `if units > 0` when converting fraction->units --
+silently drops negative-fraction (vacancy) picks from the dedup key used by
+generated.csv, a real correctness bug if reused for a signed defect value.
+CategoricalGroup.terminal_comp_key() has no such filter (just str(v)), which is why
+I'd used two categorical slots instead. Proposed and now implementing the safe
+combined alternative: ONE categorical group with a single slot whose 24 values are
+flattened "<species>_<signed amount>" compound labels (3 species x 8 amount levels),
+parsed by the builder. Still CategoricalGroup under the hood (same bug-avoidance),
+just one step instead of two -- shrinks the episode from 6 to 5 total RL steps.
+Mid-edit: configs/perovskite.yaml's A_defect_species+A_defect_amount groups replaced
+with one A_defect group; defect_site.py's _decode_defect (and its
+a_defect_species_group/a_defect_amount_group config keys) still need updating to
+match, then re-verify via the same env/builder smoke tests used earlier.
+
+### EARS — Progress (2026-08-26 15:44)
+<!-- concepts: perovskite-defect-doping, env-group-design -->
+Combined-defect-step change complete and verified: configs/perovskite.yaml's
+A_defect_species+A_defect_amount (2 groups) replaced with one A_defect categorical
+group (24 flattened "<species>_<signed amount>" labels); defect_site.py's
+__init__/_decode_defect updated to match (a_defect_group config key, label.partition
+("_") parsing). Episode length confirmed 5 steps (was 6) via MultiGroupEnv. Re-ran
+the full smoke-test battery (5 random rollouts through env->builder, plus hand-built
+vacancy/interstitial/no-defect cases) -- all atom counts and formula labels correct,
+including the "Sr_0.00000" no-op case regardless of which species was nominally
+picked. StructureScorePredictor still constructs cleanly end-to-end with the new
+group shape. No changes needed in the external CLC_workflow rl_builder.py -- it
+delegates to DefectSiteBuilder via cfg passthrough with no hardcoded group names.

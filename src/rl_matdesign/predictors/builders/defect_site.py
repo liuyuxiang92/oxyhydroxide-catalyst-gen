@@ -1,18 +1,23 @@
 """DefectSiteBuilder — A/B-site substitution doping plus a signed A-site defect axis.
 
 Pure structure construction, no physics: turns the structured ``MultiGroupEnv``
-candidate produced by an ``independent``-kind A/B dopant group plus two small
-``categorical`` defect groups into a doped, optionally defected ``ase.Atoms``.
+candidate produced by an ``independent``-kind A/B dopant group plus one
+``categorical`` defect group into a doped, optionally defected ``ase.Atoms``.
 
 Candidate shape expected (group names are configurable, defaults match the
 perovskite Level-2 scenario)::
 
     {
-      "A_dopant":        {"Ca": 0.09375, "Ba": 0.03125},   # 0-2 keys (repeats merge)
-      "A_defect_species": {"species": "Sr"},                 # one of the 3 slot values
-      "A_defect_amount":  {"amount": "-0.09375"},            # signed level, as a string
-      "B_dopant":        {"Mn": 0.0625, "Co": 0.03125},
+      "A_dopant": {"Ca": 0.09375, "Ba": 0.03125},   # 0-2 keys (repeats merge)
+      "A_defect": {"defect": "Sr_-0.09375"},          # "<species>_<signed amount>"
+      "B_dopant": {"Mn": 0.0625, "Co": 0.03125},
     }
+
+The defect pick is a SINGLE step: one categorical slot whose values are
+flattened ``"<species>_<signed amount>"`` labels (e.g. ``Ca_0.03125``), so
+choosing which species AND how much/which sign happens in one action — the
+same "one pick, one step" shape ``A_dopant``/``B_dopant`` have, just via a
+different group kind (see "Why categorical, not independent" below).
 
 Decoding
 --------
@@ -34,6 +39,20 @@ Decoding
    warning) so an infeasible pick never crashes a training episode.
 3. ``build_substituted_structure`` is called once with the combined ops.
 
+Why categorical, not independent
+---------------------------------
+``A_dopant``/``B_dopant`` use ``kind: independent`` (``IndependentDopantsGroup``),
+which *also* has a built-in joint element+amount pick (its action space is the
+full ``species_set x fraction_set`` cross product). The defect axis does NOT
+reuse that mechanism, because ``IndependentDopantsGroup.terminal_comp_key()``
+computes ``units = round(fraction * total_units)`` and keeps the entry only if
+``units > 0`` — a NEGATIVE fraction (a vacancy pick) would be silently dropped
+from the dedup key used by ``generated.csv``, letting two structurally
+different vacancy candidates collapse into the same key. ``CategoricalGroup``'s
+own ``terminal_comp_key()`` has no such filter (it just stores ``str(value)``),
+so encoding the signed pick as an opaque compound label in a categorical slot
+sidesteps that bug entirely.
+
 Config keys
 -----------
     base_poscar (or legacy ``poscar`` / ``poscar_template``): template path.
@@ -41,9 +60,8 @@ Config keys
         for the A-/B-site sublattice in the template.
     a_dopant_group / b_dopant_group (default ``A_dopant`` / ``B_dopant``): the
         candidate keys holding the ``independent``-kind dopant picks.
-    a_defect_species_group / a_defect_amount_group (default ``A_defect_species`` /
-        ``A_defect_amount``): the candidate keys holding the two categorical
-        defect-axis picks.
+    a_defect_group (default ``A_defect``): the candidate key holding the single
+        combined ``"<species>_<signed amount>"`` categorical pick.
     interstitial_min_dist (default 1.5 Å): passed through to the new atoms'
         minimum allowed distance from any existing atom.
 """
@@ -67,12 +85,7 @@ class DefectSiteBuilder:
         self.b_site_symbol: str = str(cfg.get("b_site_symbol", "Fe"))
         self.a_group: str = str(cfg.get("a_dopant_group", "A_dopant"))
         self.b_group: str = str(cfg.get("b_dopant_group", "B_dopant"))
-        self.a_defect_species_group: str = str(
-            cfg.get("a_defect_species_group", "A_defect_species")
-        )
-        self.a_defect_amount_group: str = str(
-            cfg.get("a_defect_amount_group", "A_defect_amount")
-        )
+        self.a_defect_group: str = str(cfg.get("a_defect_group", "A_defect"))
         self.min_dist: float = float(cfg.get("interstitial_min_dist", 1.5))
         self._seed = seed
 
@@ -158,12 +171,13 @@ class DefectSiteBuilder:
     # ------------------------------------------------------------------
 
     def _decode_defect(self, candidate: Dict[str, Dict[str, Any]]) -> tuple:
-        species_pick = candidate.get(self.a_defect_species_group) or {}
-        amount_pick = candidate.get(self.a_defect_amount_group) or {}
-        species = next(iter(species_pick.values()), None)
-        amount_str = next(iter(amount_pick.values()), None)
-        amount = float(amount_str) if amount_str is not None else 0.0
-        return species, amount
+        """Parse the combined ``"<species>_<signed amount>"`` categorical pick."""
+        defect_pick = candidate.get(self.a_defect_group) or {}
+        label = next(iter(defect_pick.values()), None)
+        if label is None:
+            return None, 0.0
+        species, _, amount_str = str(label).partition("_")
+        return species, float(amount_str)
 
     @staticmethod
     def _dopant_counts(fractions: Dict[str, Any], n_sites: int, label: str) -> Dict[str, int]:
