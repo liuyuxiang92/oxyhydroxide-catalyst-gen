@@ -87,6 +87,12 @@ class DefectSiteBuilder:
         self.b_group: str = str(cfg.get("b_dopant_group", "B_dopant"))
         self.a_defect_group: str = str(cfg.get("a_defect_group", "A_defect"))
         self.min_dist: float = float(cfg.get("interstitial_min_dist", 1.5))
+        # Random-placement success drops sharply with distance (measured on
+        # perovskite.vasp: 0.7% of random points valid at 1.7 A vs 6.1% at
+        # 1.5 A), and up to 4 interstitials can be requested in one pick, each
+        # shrinking the remaining free volume for the next -- the SublatticeOp
+        # default of 200 attempts is NOT enough at realistic min_dist values.
+        self.max_attempts: int = int(cfg.get("interstitial_max_attempts", 2000))
         self._seed = seed
 
     # ------------------------------------------------------------------
@@ -149,7 +155,10 @@ class DefectSiteBuilder:
             SublatticeOp(sites=self.b_site_symbol, put=b_counts),
         ]
         if insert_spec:
-            ops.append(SublatticeOp(sites=[], insert=insert_spec, min_dist=self.min_dist))
+            ops.append(SublatticeOp(
+                sites=[], insert=insert_spec, min_dist=self.min_dist,
+                max_attempts=self.max_attempts,
+            ))
 
         return build_substituted_structure(template, ops, n_configs=n_configs, rng=rng)
 
