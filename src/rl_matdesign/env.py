@@ -25,11 +25,31 @@ class EpisodeStep:
     allowed_actions: List = field(default_factory=list)
 
 
-def _format_fraction(units: int, total_units: int = 20) -> str:
-    # Two-decimal format matches the canonical fraction_set strings ("0.05", "0.45",
-    # …) for any reasonable total_units (20, 50, 100). Users with a finer grid
-    # should supply fraction_set strings of matching precision.
-    return f"{units / total_units:.2f}"
+def _decimals_of(fraction_set: Sequence[str], minimum: int = 2) -> int:
+    """Decimal places this grid's codes use — at least *minimum* (2).
+
+    The precision is read off the ``fraction_set`` tokens themselves rather than
+    configured, because those tokens are exactly what ``encode_choice`` must match.
+    Returns 2 for every grid whose entries have <= 2 decimals (0.05, 0.01, …), so
+    existing scenarios keep byte-identical codes; a 0.125 grid returns 3.
+    """
+    d = minimum
+    for token in fraction_set:
+        text = str(token)
+        if "." in text:
+            d = max(d, len(text.split(".", 1)[1]))
+    return d
+
+
+def _format_fraction(units: int, total_units: int = 20, decimals: int = 2) -> str:
+    """Render ``units/total_units`` as a fraction code.
+
+    *decimals* must match the precision of the env's ``fraction_set``: the result is
+    fed straight to ``encode_choice`` against that alphabet, so a 0.125 grid rendered
+    at 2 decimals yields "0.12", which is not a member and raises. Defaults to 2, the
+    historical behaviour and the right answer for every 20/50/100-unit grid.
+    """
+    return f"{units / total_units:.{decimals}f}"
 
 
 def _fractions_to_units(fractions: Sequence[str], total_units: int = 20) -> List[int]:
@@ -162,6 +182,8 @@ class CompositionEnv:
         self.max_steps = self.n_components  # alias used in existing training code
 
         self._total_units = total_units
+        # Precision of this grid's codes; see _format_fraction.
+        self._frac_decimals = _decimals_of(self.fraction_set)
         self._allowed_units = _fractions_to_units(self.fraction_set, self._total_units)
         self._possible_sums_by_k: List[set[int]] = [
             _possible_sums(self._allowed_units, k, self._total_units)
@@ -261,7 +283,10 @@ class CompositionEnv:
 
         # Major cations first; tie-break alphabetically for determinism.
         items.sort(key=lambda t: (-t[1], t[0]))
-        state = "".join(f"{el}{_format_fraction(units, self._total_units)}" for el, units in items)
+        state = "".join(
+            f"{el}{_format_fraction(units, self._total_units, self._frac_decimals)}"
+            for el, units in items
+        )
         return f"{state}{self.anion_formula}"
 
     def current_state_features(self) -> np.ndarray:
@@ -426,7 +451,7 @@ class CompositionEnv:
         for elem, units in elem_units.items():
             elem_oh = tuple(encode_choice(elem, self.species_set).tolist())
             for u in units:
-                comp = _format_fraction(u, self._total_units)
+                comp = _format_fraction(u, self._total_units, self._frac_decimals)
                 comp_oh = tuple(encode_choice(comp, self.fraction_set).tolist())
                 actions.append((elem_oh, comp_oh))
 

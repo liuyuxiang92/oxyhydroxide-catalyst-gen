@@ -851,6 +851,17 @@ def main() -> None:
           f"overhead={timing['overhead_s']:.1f}s")
     print(f"[INFO] Results saved to {args.out}")
 
+    # Release any external resources the reward's leaves hold — e.g. one
+    # MGTransformer serve.py subprocess per property, which would otherwise linger
+    # until the GC runs the leaf's __del__. Best-effort and always last, so it can
+    # never cost us an already-written result.
+    _close = getattr(predictor, "close", None)
+    if callable(_close):
+        try:
+            _close()
+        except Exception as exc:  # noqa: BLE001 - teardown must not fail a finished run
+            print(f"[WARN] predictor.close() failed: {type(exc).__name__}: {exc}")
+
 
 def _default_fractions():
     return [

@@ -46,18 +46,26 @@ def eval_energy_ase(
     calc_list: List[Any],
     *,
     energy_per_atom: bool = True,
-) -> List[float]:
-    """Evaluate every (structure, calculator) pair → list of scalar energies."""
-    values: List[float] = []
-    for atoms in atoms_list:
-        for calc in calc_list:
+) -> np.ndarray:
+    """Evaluate every (structure, calculator) pair.
+
+    Returns a 2-D array shaped **(n_models, n_structures)** — the repo-wide
+    convention shared with :func:`eval_property_ensemble`, so callers can fold the
+    two axes separately and never have to know which loop ran outermost. Axis 1
+    (structures) is *configurational* spread and gets averaged away; axis 0
+    (models) is *epistemic uncertainty* and is what a ``mean_minus_kstd``
+    objective penalises. See ``structure_score._score``.
+    """
+    out = np.empty((len(calc_list), len(atoms_list)), dtype=float)
+    for j, atoms in enumerate(atoms_list):
+        for i, calc in enumerate(calc_list):
             atoms_copy = atoms.copy()
             atoms_copy.calc = calc
             e = atoms_copy.get_potential_energy()
             if energy_per_atom:
                 e /= len(atoms_copy)
-            values.append(float(e))
-    return values
+            out[i, j] = float(e)
+    return out
 
 
 def pick_scalar(
@@ -140,13 +148,14 @@ def eval_property_ensemble(
     output_aggregator: str = "index",
     fparam: Optional[Any] = None,
     aparam: Optional[Any] = None,
-) -> List[float]:
-    """Evaluate a ``DeepProperty`` ensemble on *structures* → flat list of scalars.
+) -> np.ndarray:
+    """Evaluate a ``DeepProperty`` ensemble on *structures*.
 
-    Returns one scalar per (structure, model) pair (so an ensemble of M models on
-    N structures yields N*M values), each collapsed from the model's output
+    Returns a 2-D array shaped **(n_models, n_structures)** — the same convention
+    as :func:`eval_energy_ase` — each entry collapsed from that model's output
     vector via :func:`pick_scalar`. Used by the ``structure_score`` predictor's
-    ``property`` backend.
+    ``property`` backend, which averages axis 1 (structures) to define the
+    property and takes mean/std over axis 0 (models) as the uncertainty.
 
     ``fparam`` / ``aparam`` supply frame / atomic parameters for models trained
     with them (``numb_fparam > 0`` / ``numb_aparam > 0``). ``fparam`` is broadcast
@@ -183,17 +192,15 @@ def eval_property_ensemble(
     if aparam_arr is not None:
         eval_kwargs["aparam"] = aparam_arr
 
-    values: List[float] = []
-    for dp in models:
+    out = np.empty((len(models), nframes), dtype=float)
+    for i, dp in enumerate(models):
         res = np.asarray(
             dp.eval(coords=coords, cells=cells, atom_types=atom_types, **eval_kwargs)
         )
         if res.ndim == 1:
             res = res.reshape(1, -1) if nframes == 1 else res.reshape(nframes, -1)
-        for frame_vec in res:
-            values.append(
-                pick_scalar(
-                    frame_vec, output_index=output_index, output_aggregator=output_aggregator
-                )
+        for j, frame_vec in enumerate(res):
+            out[i, j] = pick_scalar(
+                frame_vec, output_index=output_index, output_aggregator=output_aggregator
             )
-    return values
+    return out

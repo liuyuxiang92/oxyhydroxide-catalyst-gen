@@ -45,11 +45,31 @@ from .env import CompositionEnv, EpisodeStep, _step_one_hot
 from .featurization import featurize_formula
 
 
-def _amounts_to_strs(amount: Any) -> Tuple[List[str], Optional[float]]:
-    """Expand an ``amount`` spec into 2-decimal fraction codes + the grid step.
+def _grid_decimals(amounts: Sequence[float], minimum: int = 2, maximum: int = 6) -> int:
+    """Fewest decimals (>= *minimum*) that round-trip every amount exactly.
+
+    Returns exactly *minimum* (2) for any grid representable at 2 decimals, so every
+    existing config's fraction codes are unchanged character-for-character; a 0.125
+    grid returns 3. Rendering a grid at too few decimals is not cosmetic: the codes
+    are the one-hot alphabet, so 0.125 and 0.375 would both round into neighbours,
+    collide, and be silently deduplicated by ``_ordered_union``.
+    """
+    for d in range(minimum, maximum + 1):
+        if all(abs(float(f"{a:.{d}f}") - a) <= 1e-12 for a in amounts):
+            return d
+    raise ValueError(
+        f"amount grid {list(amounts)} is not representable at <= {maximum} decimals; "
+        "supply an explicit 'fraction_set' with the exact strings you want."
+    )
+
+
+def _amounts_to_strs(amount: Any) -> Tuple[List[str], Optional[float], int]:
+    """Expand an ``amount`` spec into fraction codes + the grid step + its precision.
 
     ``amount`` is either an explicit list of fractions, or a ``{min, max, step}``
-    range. Returns ``(["0.02", ...], step)`` (``step`` is ``None`` for a list).
+    range. Returns ``(["0.02", ...], step, decimals)`` (``step`` is ``None`` for a
+    list). Precision is derived from the values (see :func:`_grid_decimals`), so a
+    0.05 grid still yields ``"0.05"`` and a 0.125 grid yields ``"0.125"``.
     """
     if isinstance(amount, (list, tuple)):
         amounts = [float(x) for x in amount]
@@ -58,7 +78,8 @@ def _amounts_to_strs(amount: Any) -> Tuple[List[str], Optional[float]]:
         lo, hi, step = float(amount["min"]), float(amount["max"]), float(amount["step"])
         n = int(round((hi - lo) / step))
         amounts = [round(lo + i * step, 6) for i in range(n + 1)]
-    return [f"{a:.2f}" for a in amounts], step
+    d = _grid_decimals(amounts)
+    return [f"{a:.{d}f}" for a in amounts], step, d
 
 
 def normalize_group_spec(g: Dict[str, Any]) -> Dict[str, Any]:
@@ -86,8 +107,7 @@ def normalize_group_spec(g: Dict[str, Any]) -> Dict[str, Any]:
         # the un-picked remainder is a host filled in downstream by the builder.
         amount = g.pop("amount", None)
         if amount is not None:
-            g["fraction_set"] = _amounts_to_strs(amount)[0]
-            _, step = _amounts_to_strs(amount)
+            g["fraction_set"], step, _d = _amounts_to_strs(amount)
             g.setdefault("total_units", int(round(1.0 / step)) if step else 100)
         n_dopants = int(g.get("n_dopants", g.get("n_components", g.get("sites", 1))))
         g["n_components"] = n_dopants
@@ -103,12 +123,12 @@ def normalize_group_spec(g: Dict[str, Any]) -> Dict[str, Any]:
     if amount is None:
         return g
 
-    amt_strs, step = _amounts_to_strs(amount)
+    amt_strs, step, decimals = _amounts_to_strs(amount)
     amounts = [float(s) for s in amt_strs]
 
     host = g.get("host")
     if host:
-        comp_strs = [f"{round(1.0 - a, 2):.2f}" for a in amounts]
+        comp_strs = [f"{round(1.0 - a, decimals):.{decimals}f}" for a in amounts]
         dopants = [e for e in g["species_set"] if e != host]
         g["species_set"] = dopants + [host]
         g["fraction_set"] = amt_strs + comp_strs

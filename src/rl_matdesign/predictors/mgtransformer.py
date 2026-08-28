@@ -12,13 +12,19 @@ that repo's ``graph_builder.py`` / ``predict.py`` / ``serve.py`` for what's
 actually being called.
 
 Fully config-driven, no perovskite/formation-energy assumption anywhere in this
-file: point ``target``/``ckpt`` at any finetuned checkpoint under
+file: point ``model`` at any finetuned checkpoint under
 ``mgt_repo/ckpt/finetuned/`` (bandgap, bulk modulus, ehull, ...) to reuse this
 class for a completely different ``structure_score`` scenario. It opts into the
-**structure** objective protocol (see ``structure_score.py``'s dispatch) by
-exposing ``predict_structures`` rather than ``predict`` — a property that
-depends on 3D geometry, not just stoichiometry, needs the built/relaxed cells,
-not the raw candidate composition.
+**structure** objective protocol (see ``structure_score.py``'s predictor
+contract) by exposing ``score_structures`` — a property that depends on 3D
+geometry, not just stoichiometry, needs the built/relaxed cells, not the raw
+candidate composition.
+
+**One instance is one model.** ``score_structures`` returns one value per
+structure and does no folding of its own; the engine averages the structures
+axis and takes mean/std across models. To use an ensemble, give ``model:`` a
+LIST of paths in the ``properties[]`` entry — the engine then builds one instance
+(one ``serve.py`` process) per path. With a single path ``std`` is exactly 0.
 
 Config keys
 -----------
@@ -27,11 +33,12 @@ Config keys
     mgt_python (required):
         Python interpreter of MGTransformer's own conda env (its dependency set
         is incompatible with this repo's — see module docstring).
-    target (required):
-        Finetuned checkpoint name under ``mgt_repo/ckpt/finetuned/`` (e.g.
-        ``formation_energy_peratom``).
-    ckpt, config:
-        Optional overrides forwarded to ``serve.py --ckpt`` / ``--config``.
+    model (required):
+        Path to a finetuned checkpoint, forwarded as ``serve.py --ckpt``. The
+        target name — and hence which calibration constants apply — is derived
+        from the path by MGTransformer itself, so it is never named twice.
+    config:
+        Optional override forwarded to ``serve.py --config``.
     device:
         Forwarded to ``serve.py --device`` (default ``"cpu"``).
     cutoff, max_neighbors, atom_features, triplet_endpoint, triplet_pad_mode:
@@ -39,11 +46,12 @@ Config keys
         hyperparameters (see that module's docstring); forwarded as the
         matching ``serve.py`` CLI flags when present in *cfg*.
 
-Output units — see MGTransformer's own ``predict.py`` docstring: raw model
-output is an **uncalibrated, relative score** for *target*, never a physical
-unit (eV/atom etc.), because the training-split mean/std needed to un-normalize
-it aren't recoverable from a checkpoint alone. Ranking/argmin across candidates
-is unaffected by that fixed affine transform.
+Output units — MGTransformer calibrates on its side. Its ``predict.py`` recovers
+the target from the checkpoint path, looks up that target's train-split mean/std
+in ``mgt_calibration.json``, and returns ``z * std + mean``, so scores arriving
+here are already in **real units** (eV, eV/atom) and this file does no unit
+conversion at all. A target with no calibration entry falls back to the raw
+z-score and MGTransformer warns once; ranking is unaffected either way.
 """
 from __future__ import annotations
 
@@ -83,12 +91,21 @@ class MGTransformerPredictor:
                 "MGTransformer's own conda env -- its deps are incompatible with "
                 "this repo's, see module docstring)."
             )
-        target = cfg.get("target")
-        if not target:
+        model = cfg.get("model")
+        if isinstance(model, (list, tuple)):
             raise ValueError(
-                "MGTransformerPredictor needs 'target' (a finetuned checkpoint "
-                "name under mgt_repo/ckpt/finetuned/, e.g. 'formation_energy_peratom')."
+                "MGTransformerPredictor takes a single 'model' path -- one instance "
+                "is one model. Pass a LIST at the properties[] level and the reward "
+                "engine will build one instance per path (see structure_score.py's "
+                "predictor contract)."
             )
+        if not model:
+            raise ValueError(
+                "MGTransformerPredictor needs 'model': the path to a finetuned "
+                "checkpoint, e.g. "
+                "'../MGTransformer/ckpt/finetuned/mbj_bandgap/mbj_bandgap_checkpoint_best.pt'."
+            )
+        self.model_path = str(model)
 
         self.mgt_repo = os.path.abspath(str(mgt_repo))
         serve_script = os.path.join(self.mgt_repo, "serve.py")
@@ -99,9 +116,10 @@ class MGTransformerPredictor:
                 "MGTransformerPredictor."
             )
 
-        cmd: List[str] = [str(mgt_python), "-u", serve_script, "--target", str(target)]
-        if cfg.get("ckpt"):
-            cmd += ["--ckpt", str(cfg["ckpt"])]
+        # serve.py reads the target name (and hence its calibration entry) off the
+        # checkpoint path, so pointing at the model is enough -- see that repo's
+        # predict.py:target_from_ckpt_path.
+        cmd: List[str] = [str(mgt_python), "-u", serve_script, "--ckpt", self.model_path]
         if cfg.get("config"):
             cmd += ["--config", str(cfg["config"])]
         cmd += ["--device", str(cfg.get("device", "cpu"))]
@@ -184,13 +202,15 @@ class MGTransformerPredictor:
         return float(resp["score"])
 
     # ------------------------------------------------------------------
-    # Structure-objective protocol (see structure_score.py's dispatch)
+    # Predictor contract: this instance is ONE model, so it returns one score per
+    # structure and lets the engine do all folding (see structure_score.py's
+    # module docstring). Deliberately NOT predict_structures: folding here would
+    # report decoration scatter as if it were model uncertainty.
     # ------------------------------------------------------------------
 
-    def predict_structures(self, atoms_list: List["ase.Atoms"]) -> Tuple[float, float]:
-        scores = [self._score_one(atoms) for atoms in atoms_list]
-        arr = np.asarray(scores, dtype=float)
-        return float(arr.mean()), float(arr.std())
+    def score_structures(self, atoms_list: List["ase.Atoms"]) -> List[float]:
+        """One score per structure, from this instance's single checkpoint."""
+        return [self._score_one(atoms) for atoms in atoms_list]
 
     # ------------------------------------------------------------------
 

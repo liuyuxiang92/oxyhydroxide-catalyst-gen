@@ -256,3 +256,124 @@ def test_categorical_filter_sees_prior_groups():
     _drive_first_allowed(MultiGroupEnv(groups=built))
     real = [c for c in captured if c is not None]
     assert real and real[0] == [{"Mn": 0.05, "P": 0.95}]
+
+
+# --------------------------------------------------------------------------- #
+# Fraction-grid precision.
+#
+# Codes ARE the one-hot alphabet: _format_fraction renders an action's amount and
+# encode_choice looks it up in fraction_set. Rendering a 0.125 grid at the old
+# hard-coded 2 decimals produced "0.12", which is not a member -> ValueError. The
+# first test is the back-compat gate; the last is the end-to-end gate.
+# --------------------------------------------------------------------------- #
+
+def test_two_decimal_grids_are_unchanged_character_for_character():
+    from rl_matdesign.env_multigroup import _amounts_to_strs
+    from rl_matdesign.env import _decimals_of, _format_fraction
+
+    codes, step, dec = _amounts_to_strs({"min": 0.05, "max": 0.20, "step": 0.05})
+    assert codes == ["0.05", "0.10", "0.15", "0.20"] and dec == 2
+    codes, _s, dec = _amounts_to_strs({"min": 0.0, "max": 0.03, "step": 0.01})
+    assert codes == ["0.00", "0.01", "0.02", "0.03"] and dec == 2
+    assert _amounts_to_strs([0.0, 0.02, 0.08])[0] == ["0.00", "0.02", "0.08"]
+    # the historical call signature and result
+    assert _format_fraction(1, 20) == "0.05"
+    assert _format_fraction(1, 100) == "0.01"
+    assert _decimals_of(["0.05", "0.45", "1.00"]) == 2
+    assert _decimals_of(["0.0", "1.0"]) == 2          # never drops below 2
+
+
+def test_eighth_grid_keeps_full_precision():
+    from rl_matdesign.env_multigroup import _amounts_to_strs
+    from rl_matdesign.env import _decimals_of, _format_fraction
+
+    codes, step, dec = _amounts_to_strs({"min": 0.0, "max": 1.0, "step": 0.125})
+    assert dec == 3 and step == 0.125
+    assert codes == ["0.000", "0.125", "0.250", "0.375",
+                     "0.500", "0.625", "0.750", "0.875", "1.000"]
+    assert _decimals_of(codes) == 3
+    assert _format_fraction(1, 8, 3) == "0.125"       # was "0.12"
+    assert _format_fraction(3, 8, 3) == "0.375"       # was "0.38"
+
+
+def test_host_complement_pairs_sum_to_exactly_one_on_an_eighth_grid():
+    from rl_matdesign.env_multigroup import normalize_group_spec
+
+    g = normalize_group_spec({"name": "g", "kind": "composition",
+                              "species_set": ["Rb", "Cs"], "host": "Cs",
+                              "amount": {"min": 0.0, "max": 1.0, "step": 0.125}})
+    fs = g["fraction_set"]
+    half = len(fs) // 2
+    for dopant, complement in zip(fs[:half], fs[half:]):
+        assert float(dopant) + float(complement) == 1.0
+
+
+def test_full_multigroup_episode_on_an_eighth_grid():
+    """End-to-end gate for the whole precision contract.
+
+    Drives a real 4-group, 13-step episode on the 0.125 grid — the shape the
+    Cs2AgBiCl6 configs use. Before the fix this raised
+    ``ValueError: Unknown choice '0.12'`` on the very first step, so a partial fix
+    (touching _amounts_to_strs but not _format_fraction) fails right here.
+    """
+    import random
+    from rl_matdesign.env_multigroup import MultiGroupEnv, normalize_group_spec
+
+    eighths = ["0.000", "0.125", "0.250", "0.375", "0.500",
+               "0.625", "0.750", "0.875", "1.000"]
+    specs = [
+        {"name": "A_site", "kind": "composition", "sites": 16,
+         "species_set": ["Cs", "Rb", "K"], "n_components": 3},
+        {"name": "B1_site", "kind": "composition", "sites": 8,
+         "species_set": ["Ag", "Cu", "Na"], "n_components": 3},
+        {"name": "B3_site", "kind": "composition", "sites": 8,
+         "species_set": ["Bi", "Sb", "In", "Ga"], "n_components": 4},
+        {"name": "X_site", "kind": "composition", "sites": 48,
+         "species_set": ["Cl", "Br", "I"], "n_components": 3},
+    ]
+    for s in specs:
+        s.update(episode_style="fixed_order_amount", total_units=8,
+                 fraction_set=list(eighths))
+    env = MultiGroupEnv(groups=[normalize_group_spec(s) for s in specs],
+                        reward_fn=lambda groups: 0.0)
+
+    rng = random.Random(0)
+    for _ in range(5):
+        env.initialize()
+        steps = 0
+        while True:
+            actions = env.allowed_actions()
+            if not actions:
+                break
+            env.step(rng.choice(actions))
+            steps += 1
+        assert steps == 13                       # 3 + 3 + 4 + 3
+        candidate = env.terminal_cation_fractions()
+        assert set(candidate) == {"A_site", "B1_site", "B3_site", "X_site"}
+        for group, picks in candidate.items():
+            # exact, not approximate: these are the values the builder turns into
+            # integer atom counts.
+            assert sum(picks.values()) == 1.0, (group, picks)
+            assert all(round(v * 8) == v * 8 for v in picks.values())
+
+
+def test_shipped_amount_configs_still_use_two_decimal_codes():
+    import glob
+    import yaml
+    from rl_matdesign.env_multigroup import _amounts_to_strs
+
+    root = os.path.join(os.path.dirname(__file__), "..", "configs")
+    checked = 0
+    for path in sorted(glob.glob(os.path.join(root, "*.yaml"))):
+        with open(path) as f:
+            cfg = yaml.safe_load(f)
+        if not isinstance(cfg, dict):
+            continue
+        for group in cfg.get("groups") or []:
+            amount = group.get("amount")
+            if amount is None:
+                continue
+            codes, _step, dec = _amounts_to_strs(amount)
+            assert dec == 2, (path, group.get("name"), codes)
+            checked += 1
+    assert checked > 0, "no shipped config exercises the amount: shorthand"

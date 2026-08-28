@@ -25,12 +25,34 @@ Composition objectives (``rf_magpie`` and most FQN leaves) never build a
 structure; they receive the candidate composition. A config with no structure
 objective needs no builder / ``base_poscar`` at all.
 
-An FQN leaf may instead opt into being a **structure** objective by exposing a
-``predict_structures(atoms_list) -> (mean, std)`` method (in addition to, or
-instead of, ``predict(composition)``). This is detected automatically (no YAML
-flag) — see ``StructureScorePredictor.__init__``. Use this when the property
-genuinely depends on 3D geometry, not just stoichiometry (e.g. an external
-structure-based model reached over a subprocess bridge).
+Predictor contract (registry leaves and FQN leaves alike)
+--------------------------------------------------------
+**A leaf represents exactly ONE model**, and the engine owns the folding. ``model:``
+may be one path or a list of paths; each path becomes its own leaf instance.
+
+=========================================  ======================  ==========
+method a leaf may expose                   returns                 who folds
+=========================================  ======================  ==========
+``score_structures(atoms_list)``           one float per structure engine
+``score(composition)``                     one float               engine
+``predict_structures(atoms_list)``         ``(mean, std)``         leaf
+``predict(composition)``                   ``(mean, std)``         leaf
+=========================================  ======================  ==========
+
+Everything is auto-detected, with no YAML flag:
+
+* **structure vs composition** — a leaf exposing either ``*_structures`` method is
+  a structure objective and receives the built/relaxed cells; otherwise it is a
+  composition objective and receives the candidate composition.
+* **engine-folded vs self-folding** — the ``score*`` form wins when present. The
+  self-folding form stays supported for a leaf with a genuine *internal* ensemble
+  (e.g. ``rf_magpie``'s random-forest tree variance), whose ``(mean, std)`` is
+  passed through untouched.
+
+Prefer the ``score*`` form for anything wrapping a single checkpoint: the engine
+then averages the structures axis and takes mean/std across models, so a single
+``model:`` yields ``std == 0`` automatically — no flag, no special case. See
+:func:`_fold_models_structures`.
 
 Consumer contract (``training.py``): exposes ``predict`` (reward, std),
 ``predict_raw`` (Σ weight·direction·mean/scale, for the ``dp_mean`` CSV column),
@@ -71,6 +93,11 @@ import numpy as np
 
 
 _DIRECTION_ALIASES = {"min": -1.0, "minimize": -1.0, "max": +1.0, "maximize": +1.0}
+# A third direction: hit a specific value rather than push it up or down. Needs
+# `target_value`; `target_tolerance` is a deadband inside which the term is at its
+# maximum (0), so the objective stops competing once the requirement is met.
+_TARGET_DIRECTION = "target"
+_TARGET_KEYS = ("target_value", "target_tolerance")
 _OBJECTIVES = ("mean", "mean_minus_kstd", "mean_plus_kstd")
 # Per-property output transforms, applied to each ensemble member before the
 # mean/std fold (so heads that regress log(value) report the real value).
@@ -81,6 +108,27 @@ _SHARED_BUILDER_KEYS = (
     "builder", "base_poscar", "poscar", "poscar_template", "site_symbol",
     "n_random_configs",
 )
+
+
+def _fold_models_structures(arr: "np.ndarray") -> Tuple[float, float]:
+    """Fold a ``(n_models, n_structures)`` array into ``(mean, std)``.
+
+    The two axes mean different things and must not be pooled:
+
+    * **axis 1, structures** — the ``n_random_configs`` random decorations of one
+      composition. Their scatter is *configurational*: it is how the property is
+      defined for a disordered composition, so it is averaged away.
+    * **axis 0, models** — independent checkpoints of the same property. Their
+      scatter is *epistemic uncertainty*, and is what ``mean_minus_kstd`` penalises.
+
+    Pooling both (the previous behaviour) let decoration scatter masquerade as model
+    uncertainty — so a single model with ``n_random_configs > 1`` reported a nonzero
+    ``std`` and ``mean_minus_kstd`` silently penalised disorder. With this fold a
+    single model gives ``std == 0`` exactly, and ``mean`` is unchanged either way.
+    """
+    arr = np.atleast_2d(np.asarray(arr, dtype=float))
+    per_model = arr.mean(axis=1)
+    return float(per_model.mean()), float(per_model.std())
 
 
 class StructureScorePredictor:
@@ -158,11 +206,47 @@ class StructureScorePredictor:
                     "(max or min)."
                 )
             direction = str(direction_raw).lower()
-            if direction not in _DIRECTION_ALIASES:
+            is_target = direction == _TARGET_DIRECTION
+            if not is_target and direction not in _DIRECTION_ALIASES:
                 raise ValueError(
                     f"properties[{i}].direction = {direction!r}; expected one of "
-                    f"{sorted(_DIRECTION_ALIASES)}."
+                    f"{sorted(_DIRECTION_ALIASES) + [_TARGET_DIRECTION]}."
                 )
+
+            # `direction: target` -> hit a value. Kept as its own spec rather than a
+            # sign, because it is not a sign: see _property_value.
+            target_spec = None
+            if is_target:
+                if p.get("target_value") is None:
+                    raise ValueError(
+                        f"properties[{i}] ({name!r}) has direction: target but no "
+                        "'target_value' -- the value to hit, in the property's real "
+                        "units (e.g. target_value: 1.34 for a 1.34 eV bandgap). Note "
+                        "this is NOT the leaf's own 'target'/'model' key, which "
+                        "selects the checkpoint."
+                    )
+                try:
+                    target_value = float(p["target_value"])
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"properties[{i}].target_value = {p['target_value']!r} is not "
+                        "a number."
+                    ) from None
+                target_tol = float(p.get("target_tolerance", 0.0))
+                if target_tol < 0.0:
+                    raise ValueError(
+                        f"properties[{i}].target_tolerance must be >= 0 (got {target_tol})."
+                    )
+                target_spec = {"value": target_value, "tolerance": target_tol}
+            else:
+                stray = [k for k in _TARGET_KEYS if k in p]
+                if stray:
+                    raise ValueError(
+                        f"properties[{i}] ({name!r}) sets {stray} but direction="
+                        f"{direction!r}. Set 'direction: target' to hit a specific "
+                        "value, or remove those keys -- they would otherwise be "
+                        "silently ignored."
+                    )
 
             scale = float(p.get("scale", 1.0))
             if scale == 0.0:
@@ -206,16 +290,41 @@ class StructureScorePredictor:
                 instance = None
                 is_structure = True
             else:
-                # Registry leaf or FQN: resolve it once, then ask what it wants.
-                # A leaf exposing predict_structures() is a structure objective
-                # (gets the built/relaxed cells); otherwise it's a composition
-                # objective (gets the raw candidate dict, no structure built).
+                # Registry leaf or FQN. `model:` may be ONE path or a LIST of paths;
+                # each path becomes its own leaf instance, because a leaf represents
+                # exactly one model. That is what makes "one model -> std == 0" fall
+                # out of the arithmetic instead of needing a flag (see _score).
                 from ..registry import resolve_predictor
 
                 models = None
-                child_seed = None if seed is None else int(seed) + i
-                instance = resolve_predictor(predictor_name, p, seed=child_seed)
-                is_structure = hasattr(instance, "predict_structures")
+                model_spec = p.get("model", p.get("models"))
+                if isinstance(model_spec, (list, tuple)):
+                    model_paths = [str(m) for m in model_spec]
+                    if not model_paths:
+                        raise ValueError(
+                            f"properties[{i}] ({name!r}) has an empty 'model' list."
+                        )
+                elif model_spec is None:
+                    model_paths = [None]          # leaf needs no model path
+                else:
+                    model_paths = [str(model_spec)]
+
+                instance = []
+                for j, path in enumerate(model_paths):
+                    leaf_cfg = dict(p)
+                    if path is not None:
+                        leaf_cfg["model"] = path
+                    # Decorrelate seeds across properties AND across models.
+                    child_seed = None if seed is None else int(seed) + 100 * i + j
+                    instance.append(resolve_predictor(predictor_name, leaf_cfg, seed=child_seed))
+
+                # A leaf that can score structures is a structure objective (gets the
+                # built cells); otherwise it is a composition objective (gets the
+                # candidate). Auto-detected from the leaf, no YAML flag.
+                probe = instance[0]
+                is_structure = hasattr(probe, "score_structures") or hasattr(
+                    probe, "predict_structures"
+                )
                 backend = "structure_fqn" if is_structure else "composition"
 
             self.properties.append({
@@ -231,7 +340,8 @@ class StructureScorePredictor:
                 "fparam": fparam,
                 "sweep_slots": sweep_slots,
                 "aparam": p.get("aparam"),
-                "direction": _DIRECTION_ALIASES[direction],
+                "direction": None if is_target else _DIRECTION_ALIASES[direction],
+                "target": target_spec,
                 "weight": float(p.get("weight", 1.0)),
                 "scale": scale,
                 "objective": objective,
@@ -286,14 +396,30 @@ class StructureScorePredictor:
         Shared by ``predict`` and the sweep argmax so both rank temperatures by
         the identical objective.
         """
-        from ..training import objective_from_mean_std
-
         reward = 0.0
         for prop in self.properties:
             m, s = stats[prop["name"]]
-            v = objective_from_mean_std(prop["direction"] * m, s, prop["objective"], self.k)
-            reward += prop["weight"] * v / prop["scale"]
+            reward += prop["weight"] * self._property_value(prop, m, s) / prop["scale"]
         return float(reward)
+
+    def _property_value(self, prop: Dict[str, Any], mean: float, std: float) -> float:
+        """Signed 'higher is better' value for ONE objective, before weight/scale.
+
+        max/min: the existing signed objective, unchanged. target: the deadbanded
+        distance to ``target_value``, negated so closer is better, then pushed
+        through the SAME objective helper -- so uncertainty handling is identical
+        and consistent (``mean_minus_kstd`` becomes ``-e - k*std``, i.e. farther
+        from target when less certain, which is the pessimistic reading).
+        """
+        from ..training import objective_from_mean_std
+
+        tgt = prop["target"]
+        if tgt is None:
+            return objective_from_mean_std(
+                prop["direction"] * float(mean), float(std), prop["objective"], self.k
+            )
+        e = max(0.0, abs(float(mean) - tgt["value"]) - tgt["tolerance"])
+        return objective_from_mean_std(-e, float(std), prop["objective"], self.k)
 
     def predict(self, candidate: Any) -> Tuple[float, float]:
         stats = self._raw_stats(candidate)
@@ -303,12 +429,7 @@ class StructureScorePredictor:
 
     def predict_raw(self, candidate: Any) -> Tuple[float, float]:
         """Combined value from raw means (no std penalty) — for the dp_mean column."""
-        stats = self._raw_stats(candidate)
-        raw = 0.0
-        for prop in self.properties:
-            m, _s = stats[prop["name"]]
-            raw += prop["weight"] * prop["direction"] * m / prop["scale"]
-        return float(raw), 0.0
+        return float(self.raw_combine(self._raw_stats(candidate))), 0.0
 
     def per_objective_stats(self, candidate: Any) -> Dict[str, Tuple[float, float]]:
         """Return ``{name: (mean, std)}`` per objective, for CSV logging."""
@@ -316,6 +437,24 @@ class StructureScorePredictor:
 
     def batch_predict(self, candidates: List[Any]) -> List[Tuple[float, float]]:
         return [self.predict(c) for c in candidates]
+
+    def close(self) -> None:
+        """Release leaf resources — safe to call more than once.
+
+        A leaf may own an external process (e.g. one ``serve.py`` per
+        MGTransformer checkpoint, so a 3-property config holds three). Without
+        this they are only reaped in the leaf's ``__del__``, i.e. whenever the GC
+        gets around to it. Best-effort: one leaf failing to close must not stop
+        the others.
+        """
+        for prop in self.properties:
+            for leaf in prop.get("instance") or []:
+                fn = getattr(leaf, "close", None)
+                if callable(fn):
+                    try:
+                        fn()
+                    except Exception:  # noqa: BLE001 - teardown is best-effort
+                        pass
 
     def composition_formula(self, candidate: Any) -> Optional[str]:
         """Full composition label of the built structure, if the builder exposes it.
@@ -371,7 +510,9 @@ class StructureScorePredictor:
         raw = 0.0
         for prop in self.properties:
             m, _s = stats[prop["name"]]
-            raw += prop["weight"] * prop["direction"] * m / prop["scale"]
+            # std = 0 collapses every objective to the plain value, so for a
+            # max/min property this is exactly `direction * mean` as before.
+            raw += prop["weight"] * self._property_value(prop, m, 0.0) / prop["scale"]
         return float(raw)
 
     # ------------------------------------------------------------------
@@ -473,18 +614,8 @@ class StructureScorePredictor:
     def _score(
         self, prop: Dict[str, Any], structures: Any, *, fparam: Any = None,
     ) -> Tuple[float, float]:
-        if prop["backend"] == "composition":
-            # `structures` is the candidate composition; the leaf returns (mean, std)
-            # directly. Composition leaves don't use structures, sweep, or transform.
-            mean, std = prop["instance"].predict(structures)
-            return float(mean), float(std)
-        if prop["backend"] == "structure_fqn":
-            # `structures` is the built/relaxed ASE Atoms list; the leaf folds its own
-            # ensemble and returns (mean, std) directly. No sweep/transform support here
-            # (the leaf owns its own units) — a leaf needing either should fold it
-            # internally rather than relying on this engine's per-member transform.
-            mean, std = prop["instance"].predict_structures(structures)
-            return float(mean), float(std)
+        if prop["backend"] in ("composition", "structure_fqn"):
+            return self._score_leaves(prop, structures)
         if prop["backend"] == "energy":
             from ..utils.dp_eval import eval_energy_ase
             values = eval_energy_ase(
@@ -502,12 +633,61 @@ class StructureScorePredictor:
                 aparam=prop["aparam"],
             )
         arr = np.asarray(values, dtype=float)
-        # Map each ensemble member back to real units before folding, so a head
-        # that emits log(value) reports the real mean/std (and the objective's
-        # std penalty is taken on the real distribution).
+        # Map each member back to real units before folding, so a head that emits
+        # log(value) reports the real mean/std (and the std penalty is taken on the
+        # real distribution).
         if prop.get("transform") == "exp":
             arr = np.exp(arr)
-        return float(np.mean(arr)), float(np.std(arr))
+        return _fold_models_structures(arr)
+
+    def _score_leaves(self, prop: Dict[str, Any], payload: Any) -> Tuple[float, float]:
+        """Score one property through its leaf instance(s) — one instance per model.
+
+        Two leaf styles are supported, detected per instance (see the module
+        docstring's "Predictor contract"):
+
+        * ``score_structures(atoms_list) -> [float per structure]`` /
+          ``score(composition) -> float`` — the leaf is ONE model and the engine
+          does all folding. This is the preferred form: it is the one that makes
+          a single ``model:`` yield ``std == 0`` automatically.
+        * ``predict_structures(atoms_list) -> (mean, std)`` /
+          ``predict(composition) -> (mean, std)`` — the leaf owns its own fold.
+          Correct when the leaf really does hold an internal ensemble (e.g.
+          ``rf_magpie``'s random-forest tree variance); its ``(mean, std)`` is
+          passed through untouched.
+        """
+        is_struct = prop["backend"] == "structure_fqn"
+        per_model: List[float] = []
+        for leaf in prop["instance"]:
+            engine_folded = getattr(
+                leaf, "score_structures" if is_struct else "score", None
+            )
+            if callable(engine_folded):
+                if is_struct:
+                    vals = np.asarray(list(engine_folded(payload)), dtype=float)
+                    if vals.size == 0:
+                        raise ValueError(
+                            f"{type(leaf).__name__}.score_structures returned no values "
+                            f"for property {prop['name']!r}."
+                        )
+                    # Average over the structures axis: that IS the property of a
+                    # disordered composition, not an uncertainty.
+                    per_model.append(float(vals.mean()))
+                else:
+                    per_model.append(float(engine_folded(payload)))
+                continue
+            # Self-folding leaf: it reports its own (mean, std). With several such
+            # leaves we can only combine their means; a single one (the usual case)
+            # passes straight through, preserving its uncertainty exactly.
+            self_folded = getattr(leaf, "predict_structures" if is_struct else "predict")
+            mean, std = self_folded(payload)
+            if len(prop["instance"]) == 1:
+                return float(mean), float(std)
+            per_model.append(float(mean))
+
+        arr = np.asarray(per_model, dtype=float)
+        # Spread ACROSS models is the epistemic uncertainty; one model => 0.0.
+        return float(arr.mean()), float(arr.std())
 
     def _get_calculators(self, prop: Dict[str, Any]) -> List[Any]:
         name = prop["name"]

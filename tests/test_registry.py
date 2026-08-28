@@ -78,3 +78,22 @@ def test_resolve_unknown_constraint_lists_builtins():
     with pytest.raises(ValueError) as info:
         resolve_constraint("not_a_real_constraint", {})
     assert "phase_pattern" in str(info.value)
+
+
+def test_mgtransformer_is_registered_under_a_short_name():
+    # Config authors write `predictor: mgtransformer`, not the full FQN.
+    from rl_matdesign.registry import PREDICTORS
+
+    assert "mgtransformer" in PREDICTORS
+
+
+def test_mgtransformer_resolves_and_reports_the_missing_model_key():
+    # Resolution goes through the registry (not importlib), and the leaf's own
+    # required-key validation is reached.
+    import pytest
+
+    from rl_matdesign.registry import resolve_predictor
+
+    with pytest.raises(ValueError) as info:
+        resolve_predictor("mgtransformer", {"mgt_repo": ".", "mgt_python": "python"})
+    assert "model" in str(info.value)

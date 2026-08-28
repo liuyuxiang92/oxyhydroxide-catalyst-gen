@@ -152,14 +152,38 @@ particular setting of the dials below.
 | `backend` | `energy` (DP potential energy via ASE) or `property` (DP `DeepProperty` head) | `property` |
 | `models` (or legacy `dp_models`) | Ensemble checkpoint list | required |
 | `head` | DP head (energy: calculator head; property: `DeepProperty` head) | none |
-| `direction` | `max` / `min` (energy: use `min` for "lower is better") | `max` |
+| `direction` | `max` / `min` / `target` (energy: use `min` for "lower is better") | **required** |
+| `target_value` | Value to hit, in the property's real units. Required with `direction: target`. **Not** the leaf's `model:`/checkpoint key. | — |
+| `target_tolerance` | Deadband half-width; inside it the term is at its maximum (0) and stops competing with other objectives | `0.0` |
 | `weight` / `scale` | Combine weight / unit scale | `1.0` / `1.0` |
 | `objective` | `mean_minus_kstd` / `mean` / `mean_plus_kstd` | `mean_minus_kstd` |
 | `energy_per_atom` *(energy backend)* | Normalize by atom count | `true` |
 | `output_index` / `output_aggregator` *(property backend)* | Which vector component / collapse mode | `0` / `index` (`index`/`mean`/`max`) |
 | `fparam` / `aparam` *(property backend)* | Frame / atomic parameters for heads trained with them. A `null` in `fparam` marks the slot filled by the `sweep` value (requires a top-level `sweep`) | none |
 
-Reward = `sum weight * objective_from_mean_std(direction*mean, std, objective, k) / scale`
+Reward = `sum weight * value(prop) / scale`, where `value` is
+
+- `max`/`min`: `objective_from_mean_std(direction*mean, std, objective, k)`
+- `target`:    `objective_from_mean_std(-e, std, objective, k)` with
+  `e = max(0, |mean - target_value| - target_tolerance)`
+
+i.e. a target objective scores the (deadbanded) **distance** to `target_value`, negated so
+closer is better. Routing it through the same helper keeps uncertainty handling identical:
+`mean_minus_kstd` reads as "effectively farther from the target when less certain".
+
+### What `mean` and `std` actually are
+
+Two axes, folded separately and deliberately not pooled:
+
+- **structures** — the `n_random_configs` random decorations of one composition. Their
+  scatter is *configurational*: it is how the property is defined for a disordered
+  composition, so it is **averaged away**.
+- **models** — independent checkpoints of the same property. Their scatter is *epistemic
+  uncertainty*, and is what `k*std` penalises.
+
+So `mean` is the mean of the per-model averages and `std` is the spread **across models**.
+A single model therefore gives `std == 0` exactly, whatever `n_random_configs` is, and
+`mean_minus_kstd` is then identical to `mean` — no flag needed.
 over the properties (identical formula in both `share_structure` regimes).
 
 ### `sweep:` — per-composition operating-condition optimization
@@ -231,6 +255,61 @@ instead of returning values that describe a different structure.
 
 \newpage
 
+## Writing your own predictor — the leaf contract
+
+A **leaf represents exactly one model**; the reward engine owns all folding. That is what
+makes "one model => no uncertainty" automatic instead of a per-scenario flag.
+
+`model:` accepts one path **or a list of paths**. The engine builds one leaf instance per
+path (each with a decorrelated seed), so an ensemble is a config change, never a code
+change:
+
+```yaml
+model: ckpt/a.pt                    # 1 instance -> std == 0
+model: [ckpt/a.pt, ckpt/b.pt]       # 2 instances -> std = their disagreement
+```
+
+Expose whichever of these fits; everything is auto-detected, with no YAML flag:
+
+| method | returns | who folds | use when |
+|---|---|---|---|
+| `score_structures(atoms_list)` | one float **per structure** | engine | one model, geometry-dependent property |
+| `score(composition)` | one float | engine | one model, stoichiometry-only property |
+| `predict_structures(atoms_list)` | `(mean, std)` | leaf | leaf has a genuine *internal* ensemble |
+| `predict(composition)` | `(mean, std)` | leaf | same, composition-based |
+
+- **structure vs composition** — a leaf exposing either `*_structures` method receives the
+  built (and optionally relaxed) cells; otherwise it receives the candidate composition.
+- **engine-folded vs self-folding** — the `score*` form wins when both are present. The
+  self-folding form is correct only when the leaf really does hold its own ensemble (e.g.
+  `rf_magpie`'s random-forest tree variance); its `(mean, std)` is passed through untouched.
+
+Prefer `score*` for anything wrapping a single checkpoint: fold your own structures and you
+will report *configurational* scatter as if it were model uncertainty, which
+`mean_minus_kstd` will then silently penalise.
+
+Constructor is `__init__(self, cfg, *, seed=None)`, where `cfg` is the whole `properties[]`
+entry. Add an optional `close()` to release external resources (subprocesses, file handles);
+the engine calls it on every instance at the end of a run.
+
+## `mgtransformer` keys
+
+Bridge to an external MGTransformer checkout (`../MGTransformer`), one persistent
+`serve.py` subprocess per instance.
+
+| Key | Meaning | Default |
+|---|---|---|
+| `model` | Path to a finetuned checkpoint, forwarded as `serve.py --ckpt`. MGTransformer derives the target — and hence which calibration constants apply — from the path, so it is never named twice. | **required** |
+| `mgt_repo` | Path to the MGTransformer checkout | **required** |
+| `mgt_python` | Interpreter of MGTransformer's own env (its deps conflict with this repo's) | **required** |
+| `device` | Forwarded to `serve.py --device` | `cpu` |
+| `max_neighbors`, `cutoff`, `atom_features`, `triplet_endpoint`, `triplet_pad_mode` | Featurizer overrides forwarded to `serve.py` | see that repo |
+
+Scores arrive in **real units** (eV, eV/atom): MGTransformer un-normalizes with the
+train-split constants in its `mgt_calibration.json`. A target with no entry there falls back
+to a raw z-score and warns once — ranking is unaffected either way, but a `direction: target`
+objective would then be meaningless.
+
 # 5. Builders (`builder:`)
 
 A builder turns the agent's pick (a flat `{element: fraction}` or a structured
@@ -238,7 +317,9 @@ A builder turns the agent's pick (a flat `{element: fraction}` or a structured
 
 | `builder:` | What it does |
 |---|---|
-| `substitute` | Fixed-lattice element swap onto `site_symbol` placeholder sites (no vacancies). Keys: `base_poscar` (or `poscar`), `site_symbol` (default `X`). |
+| `substitute` | Fixed-lattice element swap (no vacancies). **Single-sublattice**: fills `site_symbol` placeholder sites from a flat `{element: fraction}`. **Multi-sublattice**: add `site_map: {group: symbol}` and it fills each sublattice from a structured `{group: {element: fraction}}` candidate, one op per group. Keys: `base_poscar` (or `poscar`), `site_symbol` (default `X`), `site_map`. |
+| `site_pick` | One element per site across N sublattices via `site_map` — the *categorical* counterpart of `substitute`'s multi-sublattice mode (no fractions). |
+| `defect_site` | A/B-site doping plus a signed vacancy/interstitial defect axis. |
 | `sse` | Doped-supercell recipe (P->metal, S->O/Cl/Br, charge-neutral Li vacancies). Keys below. |
 | `"pkg.mod:Class"` | Your own builder (FQN) with `build(candidate, *, n_configs, rng)`. |
 

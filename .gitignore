@@ -21,6 +21,9 @@ models/DPA-3.1-3M.pt
 configs/ti_alloy.yaml
 configs/perovskite.yaml
 configs/perovskite_level1.yaml
+configs/cs2agbicl6_level1.yaml
+configs/cs2agbicl6_level2.yaml
+configs/cs2agbicl6_level3.yaml
 configs/ooh.yaml
 configs/ooh_dqn.yaml
 configs/ooh_fine.yaml

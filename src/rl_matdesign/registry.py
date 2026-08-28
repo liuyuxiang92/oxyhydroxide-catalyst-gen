@@ -78,10 +78,16 @@ def _make_dummy(cfg: dict, **_):
 # inside the reward engine. `dp_energy`/`dp_property` are NOT here — they are
 # structure-scoring branches handled internally by the engine (they need its
 # build/relax machinery), not standalone composition leaves.
+def _make_mgtransformer(cfg: dict, *, seed: Optional[int] = None, **_):
+    from .predictors.mgtransformer import MGTransformerPredictor
+    return MGTransformerPredictor(cfg, seed=seed)
+
+
 PREDICTORS: Dict[str, Factory] = {
     "structure_score":    _make_structure_score,   # the multi-objective reward engine
     "rf_magpie":          _make_rf_magpie,
     "ooh":                _make_ooh,
+    "mgtransformer":      _make_mgtransformer,     # bridge to ../MGTransformer
     "dummy":              _make_dummy,
 }
 
@@ -196,7 +202,7 @@ def _make_pauling_en(cfg: dict, **_):
 
 
 def _cfg_names_constraint(cfg: dict, name: str) -> bool:
-    """True if *cfg* itself (flat or chained) configures constraint name."""
+    """True if *cfg* itself (flat or chained) configures constraint ``name``."""
     if cfg.get("constraint_filter") == name:
         return True
     return any(

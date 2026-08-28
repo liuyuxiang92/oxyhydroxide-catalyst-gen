@@ -8,6 +8,7 @@ per_objective_stats). DeepMD eval + geo-opt are GPU-gated and stubbed here.
 import os
 import sys
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -121,9 +122,11 @@ def test_transform_exp_maps_log_outputs_to_real_units(monkeypatch):
          "direction": "max", "transform": "exp", "objective": "mean"}]})
     # Avoid loading real DeepProperty models; ensemble emits *log* values.
     p._get_prop_models = lambda prop: ([object(), object()], {})
+    # Shape is (n_models, n_structures) -- here 2 models x 1 structure, so the
+    # spread below is genuine model disagreement, not decoration scatter.
     monkeypatch.setattr(
         dp_eval, "eval_property_ensemble",
-        lambda *a, **k: [float(np.log(12.0)), float(np.log(8.0))],
+        lambda *a, **k: np.array([[float(np.log(12.0))], [float(np.log(8.0))]]),
     )
     mean, std = p._score(p.properties[0], [object()])
     # exp applied per ensemble member, then mean/std on the real distribution.
@@ -477,3 +480,288 @@ def test_shared_structure_routes_built_cells_to_predict_structures(tmp_path, mon
 
     stats = p.per_objective_stats({"Fe": 1.0})
     assert stats["p"] == (3.0, 0.0)          # len(sentinel_structures) == 3
+
+
+# --------------------------------------------------------------------------- #
+# direction: target — hit a value rather than push it up or down
+# --------------------------------------------------------------------------- #
+
+def _target_cfg(**over):
+    prop = {"name": "bandgap", "predictor": "dp_property", "models": ["m"],
+            "direction": "target", "target_value": 1.34, "objective": "mean"}
+    prop.update(over.pop("prop", {}))
+    cfg = {"base_poscar": "x", "properties": [prop]}
+    cfg.update(over)
+    return cfg
+
+
+def test_target_direction_requires_target_value():
+    with pytest.raises(ValueError) as info:
+        StructureScorePredictor(_target_cfg(prop={"target_value": None}))
+    msg = str(info.value)
+    assert "target_value" in msg
+    # Must disambiguate from the leaf's own checkpoint key, the whole reason for
+    # the name: a user reading this should not reach for `model`/`target`.
+    assert "checkpoint" in msg
+
+
+def test_target_keys_without_target_direction_raise():
+    with pytest.raises(ValueError) as info:
+        StructureScorePredictor({"base_poscar": "x", "properties": [
+            {"name": "p", "predictor": "dp_property", "models": ["m"],
+             "direction": "min", "target_value": 1.0}]})
+    assert "target_value" in str(info.value)
+    assert "silently ignored" in str(info.value)
+
+
+def test_negative_target_tolerance_raises():
+    with pytest.raises(ValueError) as info:
+        StructureScorePredictor(_target_cfg(prop={"target_tolerance": -0.1}))
+    assert "target_tolerance" in str(info.value)
+
+
+def test_unknown_direction_lists_target():
+    with pytest.raises(ValueError) as info:
+        StructureScorePredictor(_target_cfg(prop={"direction": "sideways"}))
+    assert "target" in str(info.value)
+
+
+def test_target_reward_is_negated_distance_and_symmetric():
+    p = StructureScorePredictor(_target_cfg())
+    prop = p.properties[0]
+    assert p._property_value(prop, 1.34, 0.0) == pytest.approx(0.0)
+    assert p._property_value(prop, 2.34, 0.0) == pytest.approx(-1.0)
+    assert p._property_value(prop, 0.34, 0.0) == pytest.approx(-1.0)   # symmetric
+    # strictly worse the farther away
+    assert p._property_value(prop, 3.34, 0.0) < p._property_value(prop, 2.34, 0.0)
+
+
+def test_target_tolerance_is_a_flat_deadband():
+    p = StructureScorePredictor(_target_cfg(prop={"target_tolerance": 0.10}))
+    prop = p.properties[0]
+    for v in (1.34, 1.40, 1.44, 1.24):
+        assert p._property_value(prop, v, 0.0) == pytest.approx(0.0)
+    assert p._property_value(prop, 1.54, 0.0) == pytest.approx(-0.10)
+
+
+def test_target_with_mean_minus_kstd_penalises_uncertainty():
+    # Dead on target but uncertain must still be penalised: the objective applies
+    # to the DISTANCE, so mean_minus_kstd reads as "effectively farther away".
+    p = StructureScorePredictor(_target_cfg(
+        prop={"objective": "mean_minus_kstd"}, k=1.0))
+    prop = p.properties[0]
+    assert p._property_value(prop, 1.34, 0.2) == pytest.approx(-0.2)
+    assert p._property_value(prop, 1.84, 0.2) == pytest.approx(-0.7)
+
+
+def test_target_and_min_objectives_combine():
+    p = StructureScorePredictor({"base_poscar": "x", "k": 1.0, "properties": [
+        {"name": "bandgap", "predictor": "dp_property", "models": ["m"],
+         "direction": "target", "target_value": 1.34, "target_tolerance": 0.10,
+         "objective": "mean", "weight": 1.0, "scale": 1.0},
+        {"name": "ehull", "predictor": "dp_property", "models": ["m"],
+         "direction": "min", "objective": "mean", "weight": 1.0, "scale": 2.0},
+    ]})
+    stats = {"bandgap": (1.54, 0.0), "ehull": (0.8, 0.0)}
+    # bandgap: -(0.20 - 0.10) = -0.10 ; ehull: -0.8 / 2.0 = -0.40
+    assert p._combine(stats) == pytest.approx(-0.5)
+    assert p.raw_combine(stats) == pytest.approx(-0.5)   # std=0 => same
+
+
+# --------------------------------------------------------------------------- #
+# direction: target — hit a value rather than push it up or down
+# --------------------------------------------------------------------------- #
+
+def _target_cfg(**over):
+    prop = {"name": "bandgap", "predictor": "dp_property", "models": ["m"],
+            "direction": "target", "target_value": 1.34, "objective": "mean"}
+    prop.update(over.pop("prop", {}))
+    cfg = {"base_poscar": "x", "properties": [prop]}
+    cfg.update(over)
+    return cfg
+
+
+def test_target_direction_requires_target_value():
+    with pytest.raises(ValueError) as info:
+        StructureScorePredictor(_target_cfg(prop={"target_value": None}))
+    msg = str(info.value)
+    assert "target_value" in msg
+    # Must disambiguate from the leaf's own checkpoint key — the whole reason for
+    # the name: a reader should not reach for `model:` here.
+    assert "checkpoint" in msg
+
+
+def test_target_keys_without_target_direction_raise():
+    with pytest.raises(ValueError) as info:
+        StructureScorePredictor({"base_poscar": "x", "properties": [
+            {"name": "p", "predictor": "dp_property", "models": ["m"],
+             "direction": "min", "target_value": 1.0}]})
+    assert "target_value" in str(info.value)
+    assert "silently ignored" in str(info.value)
+
+
+def test_negative_target_tolerance_raises():
+    with pytest.raises(ValueError) as info:
+        StructureScorePredictor(_target_cfg(prop={"target_tolerance": -0.1}))
+    assert "target_tolerance" in str(info.value)
+
+
+def test_unknown_direction_lists_target():
+    with pytest.raises(ValueError) as info:
+        StructureScorePredictor(_target_cfg(prop={"direction": "sideways"}))
+    assert "target" in str(info.value)
+
+
+def test_target_reward_is_negated_distance_and_symmetric():
+    p = StructureScorePredictor(_target_cfg())
+    prop = p.properties[0]
+    assert p._property_value(prop, 1.34, 0.0) == pytest.approx(0.0)
+    assert p._property_value(prop, 2.34, 0.0) == pytest.approx(-1.0)
+    assert p._property_value(prop, 0.34, 0.0) == pytest.approx(-1.0)   # symmetric
+    assert p._property_value(prop, 3.34, 0.0) < p._property_value(prop, 2.34, 0.0)
+
+
+def test_target_tolerance_is_a_flat_deadband():
+    p = StructureScorePredictor(_target_cfg(prop={"target_tolerance": 0.10}))
+    prop = p.properties[0]
+    for v in (1.34, 1.40, 1.44, 1.24):
+        assert p._property_value(prop, v, 0.0) == pytest.approx(0.0)
+    assert p._property_value(prop, 1.54, 0.0) == pytest.approx(-0.10)
+
+
+def test_target_with_mean_minus_kstd_penalises_uncertainty():
+    # Dead on target but uncertain is still penalised: the objective applies to the
+    # DISTANCE, so mean_minus_kstd reads as "effectively farther away".
+    p = StructureScorePredictor(_target_cfg(prop={"objective": "mean_minus_kstd"}, k=1.0))
+    prop = p.properties[0]
+    assert p._property_value(prop, 1.34, 0.2) == pytest.approx(-0.2)
+    assert p._property_value(prop, 1.84, 0.2) == pytest.approx(-0.7)
+
+
+def test_target_and_min_objectives_combine():
+    p = StructureScorePredictor({"base_poscar": "x", "k": 1.0, "properties": [
+        {"name": "bandgap", "predictor": "dp_property", "models": ["m"],
+         "direction": "target", "target_value": 1.34, "target_tolerance": 0.10,
+         "objective": "mean", "weight": 1.0, "scale": 1.0},
+        {"name": "ehull", "predictor": "dp_property", "models": ["m"],
+         "direction": "min", "objective": "mean", "weight": 1.0, "scale": 2.0},
+    ]})
+    stats = {"bandgap": (1.54, 0.0), "ehull": (0.8, 0.0)}
+    # bandgap: -(0.20 - 0.10) = -0.10 ; ehull: -0.8 / 2.0 = -0.40
+    assert p._combine(stats) == pytest.approx(-0.5)
+    assert p.raw_combine(stats) == pytest.approx(-0.5)   # std = 0 => identical
+
+
+# --------------------------------------------------------------------------- #
+# The predictor contract — general, not MGTransformer-specific.
+#
+# These use TOY leaves defined right here, on purpose: the guarantee under test is
+# "any leaf wrapping one model gets std == 0 automatically", so exercising it
+# through a real predictor would prove much less.
+# --------------------------------------------------------------------------- #
+
+class _ToyStructureLeaf:
+    """One model. Scores each structure as offset + its `value` attribute."""
+
+    def __init__(self, cfg, *, seed=None):
+        self.offset = float(cfg.get("model", 0.0))
+
+    def score_structures(self, atoms_list):
+        return [self.offset + float(getattr(a, "value", 0.0)) for a in atoms_list]
+
+
+class _ToyCompositionLeaf:
+    def __init__(self, cfg, *, seed=None):
+        self.offset = float(cfg.get("model", 0.0))
+
+    def score(self, composition):
+        return self.offset + float(sum(composition.values()))
+
+
+class _ToySelfFoldingLeaf:
+    """Owns a genuine internal ensemble, so it reports its own (mean, std)."""
+
+    def __init__(self, cfg, *, seed=None):
+        pass
+
+    def predict_structures(self, atoms_list):
+        return 7.0, 3.0
+
+
+class _Struct:
+    def __init__(self, value):
+        self.value = value
+
+
+_TOY_STRUCT = f"{__name__}:_ToyStructureLeaf"
+_TOY_COMP = f"{__name__}:_ToyCompositionLeaf"
+_TOY_SELF = f"{__name__}:_ToySelfFoldingLeaf"
+
+
+def _leaf_cfg(predictor, model, **over):
+    prop = {"name": "p", "predictor": predictor, "model": model,
+            "direction": "max", "objective": "mean"}
+    prop.update(over)
+    return {"base_poscar": "x", "properties": [prop]}
+
+
+def test_single_model_leaf_has_exactly_zero_std():
+    # THE guarantee: one model => no uncertainty, whatever the structure scatter.
+    p = StructureScorePredictor(_leaf_cfg(_TOY_STRUCT, 10.0))
+    structures = [_Struct(0.0), _Struct(2.0), _Struct(10.0)]   # wildly scattered
+    mean, std = p._score(p.properties[0], structures)
+    assert mean == pytest.approx(14.0)        # 10 + mean(0, 2, 10)
+    assert std == 0.0                          # exactly zero, not merely small
+
+
+def test_model_list_builds_one_leaf_per_model_and_std_is_their_spread():
+    p = StructureScorePredictor(_leaf_cfg(_TOY_STRUCT, [1.0, 3.0, 5.0]))
+    prop = p.properties[0]
+    assert len(prop["instance"]) == 3          # one instance per model path
+    structures = [_Struct(0.0), _Struct(4.0)]  # per-model mean adds +2.0
+    mean, std = p._score(prop, structures)
+    assert mean == pytest.approx(5.0)          # mean(3, 5, 7)
+    assert std == pytest.approx(float(np.std([3.0, 5.0, 7.0])))
+
+
+def test_structure_scatter_does_not_leak_into_std():
+    # Same models, very different within-model scatter => identical std. This is the
+    # bug the nested fold fixes: pooling would have inflated std here.
+    p = StructureScorePredictor(_leaf_cfg(_TOY_STRUCT, [1.0, 3.0]))
+    prop = p.properties[0]
+    _m1, s1 = p._score(prop, [_Struct(0.0), _Struct(0.0)])
+    _m2, s2 = p._score(prop, [_Struct(-50.0), _Struct(50.0)])
+    assert s1 == pytest.approx(s2)
+
+
+def test_score_leaf_is_routed_as_a_composition_objective():
+    p = StructureScorePredictor(_leaf_cfg(_TOY_COMP, 1.0))
+    assert p.properties[0]["backend"] == "composition"
+    assert p._score(p.properties[0], {"Fe": 0.25, "Ni": 0.75}) == (pytest.approx(2.0), 0.0)
+
+
+def test_score_structures_leaf_is_routed_as_a_structure_objective():
+    p = StructureScorePredictor(_leaf_cfg(_TOY_STRUCT, 0.0))
+    assert p.properties[0]["backend"] == "structure_fqn"
+
+
+def test_self_folding_leaf_passes_its_own_mean_and_std_through():
+    # rf_magpie's guarantee: a leaf with real internal uncertainty keeps it.
+    p = StructureScorePredictor(_leaf_cfg(_TOY_SELF, None))
+    mean, std = p._score(p.properties[0], [_Struct(0.0)])
+    assert (mean, std) == (pytest.approx(7.0), pytest.approx(3.0))
+
+
+def test_close_is_forwarded_to_leaves_and_is_safe_without_one():
+    closed = []
+
+    class _Closable(_ToyStructureLeaf):
+        def close(self):
+            closed.append(True)
+
+    import sys as _sys
+    setattr(_sys.modules[__name__], "_Closable", _Closable)
+    p = StructureScorePredictor(_leaf_cfg(f"{__name__}:_Closable", [1.0, 2.0]))
+    p.close()
+    assert len(closed) == 2                    # one per model instance
+    StructureScorePredictor(_leaf_cfg(_TOY_STRUCT, 1.0)).close()   # no close() -> no error
