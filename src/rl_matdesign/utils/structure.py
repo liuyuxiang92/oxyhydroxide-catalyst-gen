@@ -392,9 +392,19 @@ def relax_structure(
     target = UnitCellFilter(work, scalar_pressure=0.0) if relax_cell else work
     opt = LBFGS(target)
     try:
-        opt.run(fmax=fmax, steps=steps)
+        # LBFGS.run() returns a bool (converged or not) -- running out of `steps`
+        # without reaching fmax is NOT an exception, so the except branch alone
+        # was silently swallowing that case (the caller got an unconverged
+        # structure back with no signal at all that it hadn't converged).
+        converged = bool(opt.run(fmax=fmax, steps=steps))
+        if not converged:
+            final_fmax = float((work.get_forces() ** 2).sum(axis=1).max() ** 0.5)
+            print(
+                f"relax_structure: did NOT converge to fmax={fmax} within {steps} "
+                f"steps (reached fmax={final_fmax:.4f})."
+            )
     except Exception as exc:  # noqa: BLE001 - relaxation failures shouldn't crash the run
-        print(f"relax_structure: optimization did not converge: {exc}")
+        print(f"relax_structure: optimization raised and did not complete: {exc}")
 
     if keep_indices is None:
         return work
