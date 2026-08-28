@@ -195,13 +195,28 @@ def _make_pauling_en(cfg: dict, **_):
     )
 
 
-def _has_constraint(cfg: dict, name: str) -> bool:
+def _cfg_names_constraint(cfg: dict, name: str) -> bool:
+    """True if *cfg* itself (flat or chained) configures constraint name."""
     if cfg.get("constraint_filter") == name:
         return True
     return any(
         isinstance(f, dict) and f.get("constraint_filter") == name
         for f in cfg.get("filters") or []
     )
+
+
+def _has_constraint(cfg: dict, name: str) -> bool:
+    if _cfg_names_constraint(cfg, name):
+        return True
+    # multi_group configs attach constraints per-group (cfg["groups"][i]), not
+    # top-level — build_env resolves each group's own constraint_filter/filters
+    # independently (see build_env's multi_group branch). Scan those too, so
+    # e.g. a smact_charge attached only to a perovskite's B_site group is still
+    # detected by the post-episode generate_candidates drop below.
+    for g in cfg.get("groups") or []:
+        if isinstance(g, dict) and _cfg_names_constraint(g, name):
+            return True
+    return False
 
 
 def smact_charge_enabled(cfg: dict) -> bool:

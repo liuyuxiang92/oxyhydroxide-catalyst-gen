@@ -209,6 +209,12 @@ class CategoricalGroup:
                 steps_left=self.n_components - self.counter - 1,
                 allowed_units=[], possible_sums_by_k=[],
                 species_set=self.species_set, fraction_set=self.fraction_set,
+                # CategoricalGroup encodes the picked *value* in comp_oh's code,
+                # not in the elem one-hot (species_set is just the slot name) —
+                # a filter needs this map to recover the real element/label a
+                # candidate action represents (see SMACTChargeFilter's
+                # categorical-mode branch).
+                code_to_value=self._code_to_value[self.counter],
             )
             if prior_groups is not None:
                 kw["prior_groups"] = prior_groups

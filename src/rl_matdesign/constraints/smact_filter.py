@@ -58,6 +58,34 @@ The ``stoich`` value is the number of anion atoms **per formula unit** (i.e.
 per one cation site sum = 1).  For a compound ABX₃ where A+B=1 cation site,
 stoich for X is 3.
 
+Categorical sites (e.g. perovskite ABO3 A/B-site picks)
+---------------------------------------------------------
+:class:`~rl_matdesign.env_multigroup.CategoricalGroup` (one discrete element
+pick per site, no running amount) is auto-detected via the ``code_to_value``
+context kwarg it passes and doesn't need ``smact_anions`` — use
+``scaffold_formula`` for the fixed, non-agent-picked part instead:
+
+.. code-block:: yaml
+
+    groups:
+      - name: A_site
+        kind: categorical
+        choices: [{element: A, values: [Li, Be, ...]}]
+      - name: B_site
+        kind: categorical
+        choices: [{element: B, values: [Li, Be, ...]}]
+        # Attach on the LAST group only — it needs the A-site pick, which is
+        # only available via prior_groups once A_site has completed.
+        filters:
+          - constraint_filter: smact_charge
+            scaffold_formula: O3        # fixed anion, not agent-picked
+          - constraint_filter: pauling_en
+            scaffold_formula: O3
+
+Each categorical pick (this group's candidate and any completed prior
+group's, via ``prior_groups``) contributes one atom of its picked element;
+``scaffold_formula`` supplies the rest of the formula unit (here, O3).
+
 Requirements
 ------------
     pip install smact
@@ -160,16 +188,24 @@ class SMACTChargeFilter(ConstraintFilter):
         possible_sums_by_k: List[Any],
         species_set: List[str],
         fraction_set: List[str],
+        code_to_value: Optional[Dict[str, Any]] = None,
+        prior_groups: Optional[List[Dict[str, Any]]] = None,
         **_: Any,
     ) -> List[Tuple[Tuple[float, ...], Tuple[float, ...]]]:
         # Only enforce at the final step (the composition is complete only then).
         if steps_left > 0:
             return actions
 
+        from .charge import charge_neutral
+
+        if code_to_value is not None:
+            return self._filter_categorical(
+                actions, fraction_set, code_to_value, prior_groups, charge_neutral,
+            )
+
         import numpy as np
 
         from ..encoding import decode_one_hot
-        from .charge import charge_neutral
 
         # External anions (not agent-picked) contribute to the scaffold; anions the
         # agent picks itself (in species_set, e.g. O for oxides) come from the pick.
@@ -193,6 +229,52 @@ class SMACTChargeFilter(ConstraintFilter):
                 filtered.append((elem_oh, comp_oh))
 
         # Safety: never strand the agent with zero legal actions.
+        return filtered if filtered else actions
+
+    def _filter_categorical(
+        self,
+        actions: List[Tuple[Tuple[float, ...], Tuple[float, ...]]],
+        fraction_set: List[str],
+        code_to_value: Dict[str, Any],
+        prior_groups: Optional[List[Dict[str, Any]]],
+        charge_neutral,
+    ) -> List[Tuple[Tuple[float, ...], Tuple[float, ...]]]:
+        """Categorical-group path (e.g. perovskite ABO3's A_site/B_site picks).
+
+        A :class:`~rl_matdesign.env_multigroup.CategoricalGroup` slot picks one
+        discrete *value* per step (no running amount) and encodes it via
+        ``code_to_value`` rather than a fractional ``allowed_units`` index. Each
+        string-valued prior-group pick (e.g. ``{"A": "Li"}``) is folded in as one
+        atom of that element — matching how :meth:`MultiGroupEnv.
+        assembled_composition` already treats categorical values as per-formula-
+        unit atom counts. Non-string prior values (a categorical amount/label
+        slot, not an element identity) aren't cation identities here and are
+        skipped, matching this filter's "unknown -> lenient" default elsewhere.
+        """
+        from ..encoding import decode_one_hot
+
+        scaffold = dict(self.scaffold_per_fu)
+        for grp in (prior_groups or []):
+            for v in grp.values():
+                if isinstance(v, str) and v:
+                    scaffold[v] = scaffold.get(v, 0.0) + 1.0
+
+        filtered = []
+        for elem_oh, comp_oh in actions:
+            code = decode_one_hot(comp_oh, fraction_set)
+            val = code_to_value.get(code)
+            if not isinstance(val, str) or not val:
+                # Not an element identity (e.g. a numeric amount/label slot) —
+                # nothing to charge-check; let it through.
+                filtered.append((elem_oh, comp_oh))
+                continue
+            full = dict(scaffold)
+            full[val] = full.get(val, 0.0) + 1.0
+            if charge_neutral(
+                full, tol=self.tol, allow_alloys=self.allow_alloys, use_pauling=self.use_pauling,
+            ):
+                filtered.append((elem_oh, comp_oh))
+
         return filtered if filtered else actions
 
     # ------------------------------------------------------------------
