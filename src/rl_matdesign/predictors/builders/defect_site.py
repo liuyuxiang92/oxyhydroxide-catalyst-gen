@@ -123,6 +123,61 @@ class DefectSiteBuilder:
                 f"No sites with symbol {self.b_site_symbol!r} found in {self.base_poscar}."
             )
 
+        a_counts, b_counts, a_remove, insert_spec = self._resolve_ops(candidate, n_a, n_b)
+
+        ops = [
+            SublatticeOp(sites=self.a_site_symbol, put=a_counts, remove=a_remove),
+            SublatticeOp(sites=self.b_site_symbol, put=b_counts),
+        ]
+        if insert_spec:
+            ops.append(SublatticeOp(
+                sites=[], insert=insert_spec, min_dist=self.min_dist,
+                max_attempts=self.max_attempts,
+            ))
+
+        return build_substituted_structure(template, ops, n_configs=n_configs, rng=rng)
+
+    def composition_formula(self, candidate: Dict[str, Dict[str, Any]]) -> str:
+        """Display-only label reflecting what was ACTUALLY built, not the raw
+        candidate picks. Two independent dopant picks landing on the same element
+        can sum past 1.0 (e.g. Ca=0.65625 + Ca=0.65625 = 1.3125) -- physically
+        impossible as a site fraction, so `_resolve_ops` (the same call `build()`
+        makes) clamps it before this ever gets here. Showing the raw candidate
+        value instead would print e.g. "Ca1.31" while the structure that was
+        actually built, MD'd and scored was fully-substituted (Ca1.00) -- a real
+        bug this repo hit in practice, not a hypothetical.
+        """
+        from ase.io import read as ase_read
+
+        template = ase_read(self.base_poscar)
+        symbols = template.get_chemical_symbols()
+        n_a = sum(1 for s in symbols if s == self.a_site_symbol)
+        n_b = sum(1 for s in symbols if s == self.b_site_symbol)
+        a_counts, b_counts, a_remove, insert_spec = self._resolve_ops(candidate, n_a, n_b)
+        defect_species, _defect_amount = self._decode_defect(candidate)
+
+        parts = []
+        for el, c in sorted(a_counts.items()):
+            parts.append(f"{el}{c / n_a:.3g}")
+        for el, c in sorted(b_counts.items()):
+            parts.append(f"{el}{c / n_b:.3g}")
+        if a_remove:
+            parts.append(f"{defect_species}_vac{a_remove / n_a:.3g}")
+        for el, c in insert_spec.items():
+            parts.append(f"{el}_int{c / n_a:.3g}")
+        return "".join(parts)
+
+    # ------------------------------------------------------------------
+
+    def _resolve_ops(
+        self, candidate: Dict[str, Dict[str, Any]], n_a: int, n_b: int,
+    ) -> tuple:
+        """Decode *candidate* into ``(a_counts, b_counts, a_remove, insert_spec)``
+        — the single source of truth for what gets built, shared by ``build()``
+        and ``composition_formula()`` so the displayed label can never drift from
+        the real structure (see ``composition_formula``'s docstring for why that
+        matters: it already happened once).
+        """
         a_counts = self._dopant_counts(candidate.get(self.a_group) or {}, n_a, "A-site")
         b_counts = self._dopant_counts(candidate.get(self.b_group) or {}, n_b, "B-site")
 
@@ -150,34 +205,7 @@ class DefectSiteBuilder:
             else:
                 insert_spec = {defect_species: n_defect}
 
-        ops = [
-            SublatticeOp(sites=self.a_site_symbol, put=a_counts, remove=a_remove),
-            SublatticeOp(sites=self.b_site_symbol, put=b_counts),
-        ]
-        if insert_spec:
-            ops.append(SublatticeOp(
-                sites=[], insert=insert_spec, min_dist=self.min_dist,
-                max_attempts=self.max_attempts,
-            ))
-
-        return build_substituted_structure(template, ops, n_configs=n_configs, rng=rng)
-
-    def composition_formula(self, candidate: Dict[str, Dict[str, Any]]) -> str:
-        """Display-only label: A/B dopant picks + the signed defect pick, if any."""
-        parts = []
-        for group in (self.a_group, self.b_group):
-            for el, frac in (candidate.get(group) or {}).items():
-                try:
-                    parts.append(f"{el}{float(frac):.3g}")
-                except (TypeError, ValueError):
-                    parts.append(f"{el}{frac}")
-        species, amount = self._decode_defect(candidate)
-        if species and amount:
-            tag = "vac" if amount < 0 else "int"
-            parts.append(f"{species}_{tag}{abs(amount):.3g}")
-        return "".join(parts)
-
-    # ------------------------------------------------------------------
+        return a_counts, b_counts, a_remove, insert_spec
 
     def _decode_defect(self, candidate: Dict[str, Dict[str, Any]]) -> tuple:
         """Parse the combined ``"<species>_<signed amount>"`` categorical pick."""
