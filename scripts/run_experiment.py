@@ -42,6 +42,7 @@ from rl_matdesign.env import CompositionEnv
 from rl_matdesign.env_integer import IntegerRatioEnv
 from rl_matdesign.model import PolicyNet, QRegressor, ValueNet
 from rl_matdesign.training import (
+    CandidateEvaluationFailed,
     _fit_scaler_from_warmup,
     _precompute_elem_features,
     generate_candidates,
@@ -195,14 +196,15 @@ def build_constraint_filter(cfg: dict, env=None):
     return build_constraints(cfg, env=env)
 
 
-# A predictor/builder call can fail for reasons that have nothing to do with
-# whether the *composition* is valid (e.g. MDAveragedOptBuilder: every random
-# realization's MD/relax failed for this candidate — see reward_fn/mg_reward_fn
-# below). Such a failure must not crash a run that may be hours into training;
-# treat it as a very bad episode instead, matching the existing malformed-
-# formula sentinel below. Large enough to be unambiguous against any of this
-# repo's real reward scales (Kelvin-scale sintering temps, eV-scale energies)
-# without risking overflow in downstream mean/std or CSV arithmetic.
+# Fallback reward for a terminal formula that fails to even PARSE as a valid
+# composition (env_type == "integer_ratio" only) -- this indicates a bug in
+# the env, not a legitimate build/predictor failure, so unlike a
+# CandidateEvaluationFailed (see reward_fn/mg_reward_fn below, which retries
+# with a fresh candidate instead) there is no obviously-better candidate to
+# retry with; score it as a very bad episode and move on. Large enough to be
+# unambiguous against any of this repo's real reward scales (Kelvin-scale
+# sintering temps, eV-scale energies) without risking overflow in downstream
+# mean/std or CSV arithmetic.
 _FAILED_CANDIDATE_REWARD = -2000.0
 
 
@@ -272,27 +274,32 @@ def build_env(cfg: dict, predictor):
                     comp.pop(el, None)
         # A valid, well-formed composition can still fail downstream (a
         # structure builder's random realizations all failing MD/relax, a
-        # flaky external subprocess, ...) -- one bad candidate must not crash
-        # a run that may be hours into training. See _FAILED_CANDIDATE_REWARD.
+        # flaky external subprocess, ...) -- that must not crash a run that
+        # may be hours into training, NOR silently consume a real
+        # episode-budget slot on a candidate that was never actually scored.
+        # Raise so the rollout call site (training.py) discards this attempt
+        # and retries with a fresh candidate instead.
         try:
             mean, _ = predictor.predict(comp)
         except Exception as exc:  # noqa: BLE001 - any predictor/builder failure
-            print(f"[WARN] predictor.predict failed for formula {formula!r}: "
-                  f"{type(exc).__name__}: {exc}. Scoring this candidate as "
-                  f"{_FAILED_CANDIDATE_REWARD} instead of crashing the run.")
-            return _FAILED_CANDIDATE_REWARD
+            raise CandidateEvaluationFailed(
+                f"predictor.predict failed for formula {formula!r}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
         return mean
 
     def mg_reward_fn(groups: dict) -> float:
         # MultiGroupEnv hands the predictor the structured {group: {el: frac}}
         # mapping; the (recipe) predictor assembles the full structure from it.
+        # See reward_fn's matching try/except for why this raises rather than
+        # returning a fallback reward.
         try:
             mean, _ = predictor.predict(groups)
-        except Exception as exc:  # noqa: BLE001 - see reward_fn's matching catch
-            print(f"[WARN] predictor.predict failed for candidate {groups!r}: "
-                  f"{type(exc).__name__}: {exc}. Scoring this candidate as "
-                  f"{_FAILED_CANDIDATE_REWARD} instead of crashing the run.")
-            return _FAILED_CANDIDATE_REWARD
+        except Exception as exc:  # noqa: BLE001 - any predictor/builder failure
+            raise CandidateEvaluationFailed(
+                f"predictor.predict failed for candidate {groups!r}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
         return mean
 
     # Build env first (without filter), then build the filter using env's

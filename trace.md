@@ -2505,3 +2505,61 @@ returning a new _FAILED_CANDIDATE_REWARD=-2000.0 sentinel (reusing the
 existing malformed-formula convention) instead of crashing. Also recommend
 the user bump interstitial_min_dist to 1.7+ in the actual remote config
 separately (config fix, not code).
+
+### EARS — Progress (2026-09-01 19:05)
+<!-- concepts: reward-fn, fault-tolerance, dqn-training, pg-training -->
+Extending the skip-and-continue fix: user wants a failed candidate build
+(MD/relax, any kind of md/opt failure) to not consume a real episode-budget
+slot -- i.e. retry with a genuinely NEW candidate rather than accepting a
+fake -2000 reward that eats one of the limited dqn_warmup_eps/
+dqn_num_train_eps/pg_num_iters*pg_batch_eps slots. This supersedes the
+previous sentinel-return approach with an exception-based retry: added
+CandidateEvaluationFailed exception + _rollout_with_retry helper
+(_MAX_CANDIDATE_RETRIES=10) to training.py. Surveyed every rollout call
+site: _rollout_random_episode (DQN warmup + PG scaler-fit, the latter never
+hits the real predictor so is unaffected), DQN online training's inline
+step loop, _rollout_pg_episode (PG/A2C online training),
+_rollout_policy_episode + _pg_single_episode_generate (both only used
+inside generate_candidates, which already has its own attempted/accepted
+attempts-budget bookkeeping distinct from training episode budget - decided
+generation failures should just count as one more "attempted" like an
+existing duplicate/infeasible rejection, no special retry-without-counting
+needed there, just don't let it crash). Next: change run_experiment.py's
+reward_fn/mg_reward_fn to raise CandidateEvaluationFailed instead of
+returning the _FAILED_CANDIDATE_REWARD sentinel, then wrap the training
+call sites in _rollout_with_retry and the generation call sites in a plain
+try/except-continue.
+
+### EARS — Progress (2026-09-01 19:20)
+<!-- concepts: reward-fn, fault-tolerance, dqn-training, pg-training -->
+Finished implementing retry-without-counting-against-budget. Summary of
+the final design: reward_fn/mg_reward_fn (run_experiment.py) now RAISE
+CandidateEvaluationFailed on any predictor.predict() failure instead of
+returning the old -2000 sentinel. training.py's _rollout_with_retry
+(new helper, max 10 retries) wraps every TRAINING rollout call site (DQN
+warmup's _rollout_random_episode, DQN online training's inline eps-greedy
+loop -- refactored into a closure to make it wrappable, PG/A2C's
+_rollout_pg_episode) so a failed candidate is discarded and replaced with a
+genuinely fresh one, never consuming a real episode-budget slot; exhausting
+10 consecutive failures raises loudly (systemic-failure signal) rather than
+hanging or silently burning the whole budget. generate_candidates instead
+treats a failure as an ordinary "attempted" (like a duplicate/infeasible
+rejection) since it already has its own generous attempts budget separate
+from n_target -- caught this needed to cover TWO call sites there, not one:
+the rollout itself, and a second, separate predictor.predict() call further
+down used to fetch raw stats for CSV columns (usually a cache hit reusing
+the reward-computation's cached result, but not guaranteed for a
+non-caching predictor).
+
+Verified: BO/GA baseline scripts (scripts/baselines/_common.py) replace
+env.reward_fn with a no-op immediately after build_env(), so they never
+call the modified reward_fn/mg_reward_fn at all -- confirmed zero regression
+risk there. plot_design_space.py uses a _DummyPredictor whose predict()
+never raises -- same, zero risk. Smoke-tested all three real scenarios
+directly: (1) transient failure (2 fails then succeeds) -> retries silently,
+returns the real reward, no budget consumed; (2) persistent/systemic
+failure -> raises loudly after 11 consecutive attempts rather than hanging;
+(3) generation with an intermittently-failing predictor -> still reaches
+its exact target count, failures just inflate the attempts counter. Full
+test suite green except the 2 known pre-existing test_site_pick_builder.py
+failures. All 23 configs still build via build_env.

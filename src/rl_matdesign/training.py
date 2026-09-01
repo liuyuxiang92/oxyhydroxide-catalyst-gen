@@ -42,6 +42,55 @@ from .predictors.base import PropertyPredictor
 
 
 # ---------------------------------------------------------------------------
+# Candidate-evaluation failures (build/predictor errors unrelated to whether
+# the composition itself is valid — e.g. every random MD/relax realization
+# failing for a structure builder). Raised by ``reward_fn``/``mg_reward_fn``
+# (scripts/run_experiment.py); rollout call sites below catch it and retry
+# with a fresh candidate instead of either crashing the run or burning a
+# real episode-budget slot on a candidate that was never actually scored.
+# ---------------------------------------------------------------------------
+
+class CandidateEvaluationFailed(Exception):
+    """A well-formed candidate's predictor/builder call failed; retry, don't
+    count it against the episode budget."""
+
+
+# How many consecutive candidates may fail evaluation before a rollout call
+# site gives up and lets the failure surface as a hard error. A handful of
+# retries absorbs occasional transient/geometric failures (e.g. a random
+# interstitial placement, or a random solid-solution decoration, that happens
+# to destabilize an MD run); exhausting this many in a row means something
+# systemic is wrong (a broken binary path, a missing model file, ...) that no
+# amount of retrying will fix — better to fail loudly than spend the rest of
+# the training budget on candidates that never get scored.
+_MAX_CANDIDATE_RETRIES = 10
+
+
+def _rollout_with_retry(rollout_fn: Callable[[], None]) -> None:
+    """Call ``rollout_fn()`` (which must drive one full episode via
+    ``env.initialize()`` + ``env.step()`` to a terminal reward); on
+    :class:`CandidateEvaluationFailed`, discard the attempt and retry with a
+    fresh candidate — up to :data:`_MAX_CANDIDATE_RETRIES` times — so the
+    caller's episode-budget counter never advances for a candidate that
+    failed evaluation.
+    """
+    for attempt in range(_MAX_CANDIDATE_RETRIES + 1):
+        try:
+            rollout_fn()
+            return
+        except CandidateEvaluationFailed as exc:
+            if attempt == _MAX_CANDIDATE_RETRIES:
+                raise RuntimeError(
+                    f"{_MAX_CANDIDATE_RETRIES + 1} consecutive candidates all "
+                    "failed evaluation -- giving up rather than spending the "
+                    f"rest of the run on unscored candidates. Last failure: {exc}"
+                ) from exc
+            print(f"[WARN] candidate evaluation failed (retry "
+                  f"{attempt + 1}/{_MAX_CANDIDATE_RETRIES}), discarding and "
+                  f"trying a new candidate: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Loss function factory
 # ---------------------------------------------------------------------------
 
@@ -584,7 +633,7 @@ def train_dqn_online(
             print(f"[INFO] DQN warmup: {n_warmup_eps} random episodes with real rewards...")
         pbar = tqdm(total=n_warmup_eps, desc="DQN warmup")
         for _w in range(n_warmup_eps):
-            _rollout_random_episode(env)
+            _rollout_with_retry(lambda: _rollout_random_episode(env))
             if env.path:
                 warmup_rows.append({
                     "phase": "dqn_warmup",
@@ -647,9 +696,8 @@ def train_dqn_online(
 
     pbar = tqdm(range(start_ep, dqn_num_train_eps), desc="DQN train")
 
-    for ep in pbar:
-        # 1. Collect one episode with epsilon-greedy policy.
-        qnet.eval()
+    def _rollout_eps_greedy_episode() -> None:
+        # Collect one episode with epsilon-greedy policy.
         env.initialize()
         for _t in range(env.n_components):
             _allowed = env.allowed_actions()
@@ -668,6 +716,10 @@ def train_dqn_online(
                     fraction_set=fraction_set,
                 )
             env.step(_a)
+
+    for ep in pbar:
+        qnet.eval()
+        _rollout_with_retry(_rollout_eps_greedy_episode)
 
         episode_reward = float(env.path[-1].reward)
         if augment_permutations > 0:
@@ -1155,11 +1207,11 @@ def train_pg(
             attempted += 1
             if max_train_attempts is not None and attempted > max_train_attempts:
                 break
-            _rollout_pg_episode(
+            _rollout_with_retry(lambda: _rollout_pg_episode(
                 env=env, policy=policy, scaler=scaler,
                 elem_feats_scaled=elem_feats_scaled, fraction_set=fraction_set,
                 device=device,
-            )
+            ))
             path = env.path
             if not path:
                 continue
@@ -1496,23 +1548,33 @@ def generate_candidates(
         while accepted < n_target and attempted < max_att:
             attempted += 1
 
-            if use_pg:
-                _pg_single_episode_generate(
-                    env=env, policy=policy, scaler=scaler,
-                    elem_feats_scaled=elem_feats_scaled, fraction_set=fraction_set,
-                    device=device,
-                    gen_epsilon=gen_epsilon,
-                    gen_top_frac=gen_top_frac,
-                    gen_temperature=gen_temperature,
-                )
-            else:
-                _rollout_policy_episode(
-                    env=env, qnet=qnet, scaler=scaler, device=device,
-                    elem_feats_scaled=elem_feats_scaled, fraction_set=fraction_set,
-                    gen_epsilon=gen_epsilon,
-                    gen_top_frac=gen_top_frac,
-                    gen_temperature=gen_temperature,
-                )
+            try:
+                if use_pg:
+                    _pg_single_episode_generate(
+                        env=env, policy=policy, scaler=scaler,
+                        elem_feats_scaled=elem_feats_scaled, fraction_set=fraction_set,
+                        device=device,
+                        gen_epsilon=gen_epsilon,
+                        gen_top_frac=gen_top_frac,
+                        gen_temperature=gen_temperature,
+                    )
+                else:
+                    _rollout_policy_episode(
+                        env=env, qnet=qnet, scaler=scaler, device=device,
+                        elem_feats_scaled=elem_feats_scaled, fraction_set=fraction_set,
+                        gen_epsilon=gen_epsilon,
+                        gen_top_frac=gen_top_frac,
+                        gen_temperature=gen_temperature,
+                    )
+            except CandidateEvaluationFailed as exc:
+                # Unlike training, generation already has a generous, separate
+                # attempts budget (max_att) distinct from `n_target` -- treat
+                # this exactly like a rejected duplicate/infeasible candidate
+                # (already counted via `attempted += 1` above) rather than
+                # retrying without counting.
+                print(f"[WARN] generation candidate failed evaluation, "
+                      f"skipping: {exc}")
+                continue
 
             comp     = env.terminal_cation_fractions()
             comp_key = env.terminal_comp_key()
@@ -1553,21 +1615,32 @@ def generate_candidates(
                     charge_rejected += 1
                     continue
 
-            seen_comp_keys.add(comp_key)
-
             # Reward from the episode (env.reward_fn already called in env.step).
             reward = float(env.path[-1].reward) if env.path else 0.0
 
             # Raw predictor values for CSV columns. OOHCatalystPredictor caches
-            # internally so this is a cache hit when env.reward_fn already ran.
-            if comp_key in predictor_raw_cache:
-                raw_mean, std = predictor_raw_cache[comp_key]
-            elif use_predict_raw:
-                raw_mean, std = predictor.predict_raw(comp)
-                predictor_raw_cache[comp_key] = (raw_mean, std)
-            else:
-                raw_mean, std = predictor.predict(comp)
-                predictor_raw_cache[comp_key] = (raw_mean, std)
+            # internally so this is usually a cache hit when env.reward_fn
+            # already ran -- but for a non-caching predictor, or a builder
+            # whose cache doesn't cover this call shape, it is a genuinely
+            # separate call and can independently fail (e.g. a re-run MD
+            # realization). Skip the candidate rather than crash generation;
+            # don't mark comp_key as seen, so a later attempt on the same
+            # composition can still succeed and be reported.
+            try:
+                if comp_key in predictor_raw_cache:
+                    raw_mean, std = predictor_raw_cache[comp_key]
+                elif use_predict_raw:
+                    raw_mean, std = predictor.predict_raw(comp)
+                    predictor_raw_cache[comp_key] = (raw_mean, std)
+                else:
+                    raw_mean, std = predictor.predict(comp)
+                    predictor_raw_cache[comp_key] = (raw_mean, std)
+            except Exception as exc:  # noqa: BLE001 - any predictor/builder failure
+                print(f"[WARN] generation candidate failed fetching raw stats, "
+                      f"skipping: {type(exc).__name__}: {exc}")
+                continue
+
+            seen_comp_keys.add(comp_key)
 
             # Prefer the builder's full composition label (includes host/derived
             # elements the env never sees — e.g. SSE's surviving S, derived Br,
