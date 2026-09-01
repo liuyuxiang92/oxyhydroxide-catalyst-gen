@@ -195,6 +195,17 @@ def build_constraint_filter(cfg: dict, env=None):
     return build_constraints(cfg, env=env)
 
 
+# A predictor/builder call can fail for reasons that have nothing to do with
+# whether the *composition* is valid (e.g. MDAveragedOptBuilder: every random
+# realization's MD/relax failed for this candidate — see reward_fn/mg_reward_fn
+# below). Such a failure must not crash a run that may be hours into training;
+# treat it as a very bad episode instead, matching the existing malformed-
+# formula sentinel below. Large enough to be unambiguous against any of this
+# repo's real reward scales (Kelvin-scale sintering temps, eV-scale energies)
+# without risking overflow in downstream mean/std or CSV arithmetic.
+_FAILED_CANDIDATE_REWARD = -2000.0
+
+
 def build_env(cfg: dict, predictor):
     """Build the env + reward_fn + constraint filter used by an experiment run.
 
@@ -250,7 +261,7 @@ def build_env(cfg: dict, predictor):
                 comp = dict(Composition(formula).fractional_composition.as_dict())
                 comp = {str(k): float(v) for k, v in comp.items()}
             except Exception:
-                return -2000.0
+                return _FAILED_CANDIDATE_REWARD
         else:
             import re
             parts = re.findall(r"([A-Z][a-z]?)([0-9]*\.?[0-9]+)", formula)
@@ -259,13 +270,29 @@ def build_env(cfg: dict, predictor):
             if anion_formula:
                 for el, _ in re.findall(r"([A-Z][a-z]?)([0-9]*\.?[0-9]+)", anion_formula):
                     comp.pop(el, None)
-        mean, _ = predictor.predict(comp)
+        # A valid, well-formed composition can still fail downstream (a
+        # structure builder's random realizations all failing MD/relax, a
+        # flaky external subprocess, ...) -- one bad candidate must not crash
+        # a run that may be hours into training. See _FAILED_CANDIDATE_REWARD.
+        try:
+            mean, _ = predictor.predict(comp)
+        except Exception as exc:  # noqa: BLE001 - any predictor/builder failure
+            print(f"[WARN] predictor.predict failed for formula {formula!r}: "
+                  f"{type(exc).__name__}: {exc}. Scoring this candidate as "
+                  f"{_FAILED_CANDIDATE_REWARD} instead of crashing the run.")
+            return _FAILED_CANDIDATE_REWARD
         return mean
 
     def mg_reward_fn(groups: dict) -> float:
         # MultiGroupEnv hands the predictor the structured {group: {el: frac}}
         # mapping; the (recipe) predictor assembles the full structure from it.
-        mean, _ = predictor.predict(groups)
+        try:
+            mean, _ = predictor.predict(groups)
+        except Exception as exc:  # noqa: BLE001 - see reward_fn's matching catch
+            print(f"[WARN] predictor.predict failed for candidate {groups!r}: "
+                  f"{type(exc).__name__}: {exc}. Scoring this candidate as "
+                  f"{_FAILED_CANDIDATE_REWARD} instead of crashing the run.")
+            return _FAILED_CANDIDATE_REWARD
         return mean
 
     # Build env first (without filter), then build the filter using env's

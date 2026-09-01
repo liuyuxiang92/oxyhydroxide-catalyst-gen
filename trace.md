@@ -2480,3 +2480,28 @@ passing), 2 pre-existing/unrelated (test_site_pick_builder.py's perovskite
 tests fail against an untracked local perovskite.vasp fixture that doesn't
 match that older test's small-POSCAR assumption; site_pick.py untouched by
 this work). Full suite is green except those 2 known-unrelated failures.
+
+### EARS — Progress (2026-09-01 18:32)
+<!-- concepts: reward-fn, fault-tolerance, clc-workflow-integration -->
+User hit a real training crash on Bohrium: perovskite.yaml's
+MDAveragedOptBuilder (external CLC_workflow repo) raised RuntimeError when
+all 5 random realizations for one candidate failed MD/relax (atom overlap
+below md.min_dist=1.7). Traced it to CLC_workflow's actual source
+(../../../chemical_looping_beyond_combustion/code/structures/CLC_workflow):
+_check_structure's own docstring reveals interstitial_min_dist=1.5 (rl-
+matdesign's DefectSiteBuilder default) produces exactly the 1.5-1.58 A
+contacts seen in the error - almost certainly the remote perovskite.yaml
+(gitignored, local-only, separate deployment) is missing/outdated on
+interstitial_min_dist, not a code bug. Also found MDAveragedOptBuilder
+already skips bad REALIZATIONS gracefully (per-realization try/except) but
+has no handler when ALL realizations fail for one candidate - that
+RuntimeError propagates uncaught through env.step() to train_dqn_online
+and kills the whole run since rl-matdesign's reward_fn/mg_reward_fn never
+catches predictor.predict() failures at all.
+
+Implementing the fix now: wrap predictor.predict() in both reward_fn and
+mg_reward_fn (scripts/run_experiment.py's build_env) in try/except,
+returning a new _FAILED_CANDIDATE_REWARD=-2000.0 sentinel (reusing the
+existing malformed-formula convention) instead of crashing. Also recommend
+the user bump interstitial_min_dist to 1.7+ in the actual remote config
+separately (config fix, not code).
