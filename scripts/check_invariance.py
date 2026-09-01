@@ -279,45 +279,22 @@ def _max_delta_scalar(values: Sequence[float]) -> Tuple[float, float]:
 def main() -> None:
     args = parse_args()
 
-    # Reuse load_config + the env / predictor / constraint factories from
-    # run_experiment.py so user FQN plug-ins resolve identically.
-    from run_experiment import (
-        load_config, build_predictor, build_constraint_filter,
-        _default_digits, _default_fractions,
-    )
-    from rl_matdesign.env import CompositionEnv
-    from rl_matdesign.env_integer import IntegerRatioEnv
+    # Reuse load_config + build_env + build_predictor from run_experiment.py so
+    # user FQN plug-ins, the groups: schema, and single-group flat-env collapse
+    # all resolve identically to a real training/generation run.
+    from run_experiment import load_config, build_env, build_predictor
     from rl_matdesign.training import _precompute_elem_features, _detect_last_position_pin
 
     cfg = load_config(args.config)
     rng = random.Random(args.seed)
 
     predictor = build_predictor(cfg, seed=args.seed)
-    env_type = cfg.get("env_type", "fraction")
 
     def _build_env():
-        if env_type == "integer_ratio":
-            env = IntegerRatioEnv(
-                species_set=cfg["species_set"],
-                ratio_set=cfg.get("ratio_set", None) or _default_digits(),
-                n_components=int(cfg.get("n_components", 5)),
-                phase_filter=None,
-            )
-        else:
-            env = CompositionEnv(
-                species_set=cfg["species_set"],
-                fraction_set=cfg.get("fraction_set", None) or _default_fractions(),
-                anion_formula=cfg.get("anion_formula", ""),
-                n_components=int(cfg.get("n_components", 5)),
-                phase_filter=None,
-                total_units=int(cfg.get("total_units", 20)),
-                element_bounds=cfg.get("element_bounds"),
-                episode_style=cfg.get("episode_style", "element_then_amount"),
-            )
-        env.phase_filter = build_constraint_filter(cfg, env=env)
+        env, _env_type, _flat_cfg = build_env(cfg, predictor)
         return env
 
-    probe_env = _build_env()
+    probe_env, env_type, _ = build_env(cfg, predictor)
     pinned_last = _detect_last_position_pin(probe_env) is not None
 
     # Sample multisets

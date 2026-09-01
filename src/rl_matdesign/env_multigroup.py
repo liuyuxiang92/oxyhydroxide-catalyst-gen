@@ -42,105 +42,53 @@ import numpy as np
 
 from .encoding import decode_one_hot, encode_choice
 from .env import CompositionEnv, EpisodeStep, _step_one_hot
+from .env_integer import IntegerRatioEnv
 from .featurization import featurize_formula
 
 
-def _grid_decimals(amounts: Sequence[float], minimum: int = 2, maximum: int = 6) -> int:
-    """Fewest decimals (>= *minimum*) that round-trip every amount exactly.
-
-    Returns exactly *minimum* (2) for any grid representable at 2 decimals, so every
-    existing config's fraction codes are unchanged character-for-character; a 0.125
-    grid returns 3. Rendering a grid at too few decimals is not cosmetic: the codes
-    are the one-hot alphabet, so 0.125 and 0.375 would both round into neighbours,
-    collide, and be silently deduplicated by ``_ordered_union``.
-    """
-    for d in range(minimum, maximum + 1):
-        if all(abs(float(f"{a:.{d}f}") - a) <= 1e-12 for a in amounts):
-            return d
-    raise ValueError(
-        f"amount grid {list(amounts)} is not representable at <= {maximum} decimals; "
-        "supply an explicit 'fraction_set' with the exact strings you want."
-    )
-
-
-def _amounts_to_strs(amount: Any) -> Tuple[List[str], Optional[float], int]:
-    """Expand an ``amount`` spec into fraction codes + the grid step + its precision.
-
-    ``amount`` is either an explicit list of fractions, or a ``{min, max, step}``
-    range. Returns ``(["0.02", ...], step, decimals)`` (``step`` is ``None`` for a
-    list). Precision is derived from the values (see :func:`_grid_decimals`), so a
-    0.05 grid still yields ``"0.05"`` and a 0.125 grid yields ``"0.125"``.
-    """
-    if isinstance(amount, (list, tuple)):
-        amounts = [float(x) for x in amount]
-        step: Optional[float] = None
-    else:
-        lo, hi, step = float(amount["min"]), float(amount["max"]), float(amount["step"])
-        n = int(round((hi - lo) / step))
-        amounts = [round(lo + i * step, 6) for i in range(n + 1)]
-    d = _grid_decimals(amounts)
-    return [f"{a:.{d}f}" for a in amounts], step, d
-
-
 def normalize_group_spec(g: Dict[str, Any]) -> Dict[str, Any]:
-    """Expand a *friendly* composition-group spec into full CompositionEnv params.
+    """Expand a composition group's ``fraction_set`` into its canonical explicit-list
+    form and derive ``total_units`` from it.
 
-    Friendly knobs handled here so the env config stays terse:
+    ``fraction_set`` accepts two public forms (see
+    :func:`~rl_matdesign.env.expand_fraction_set`):
 
-    * ``amount: {min, max, step}`` (or a list) -> generates ``fraction_set``.
-    * ``host: <el>`` -> lists only the dopants in ``species_set``; the host is added
-      and auto-takes the complement via a ``host_complement`` filter (so no
-      hand-written complements and no per-scenario "host-takes-rest" constraint).
-    * ``sites: N`` -> kept (the sublattice size; used for formula assembly and by
-      the builder to place real atom counts).
+    * a regular grid ``{min, max, step}``;
+    * an explicit list ``[v1, v2, ...]``.
 
-    Returns the spec unchanged if it has no ``amount`` (an explicit ``fraction_set``
-    is left as-is). The ``constraint_filter`` it may set is a *name* (built later by
-    the caller via the registry), matching how groups are otherwise resolved.
+    ``total_units`` is never read from the config — it is always derived from
+    the (expanded) ``fraction_set`` (see
+    :func:`~rl_matdesign.env.derive_total_units`), so there is exactly one
+    public knob for grid resolution, not two that could silently disagree.
+
+    A mandatory-presence / "host absorbs the rest" requirement is expressed via
+    ``element_bounds`` on the relevant species (e.g. ``{P: [0.92, 0.98]}``), not
+    a dedicated ``host:`` knob — the host is just another entry in
+    ``species_set`` like any other.
+
+    Returns the spec unchanged for ``kind != "composition"`` — ``categorical``
+    and ``integer`` groups have their own, unrelated value-grid conventions
+    (``choices``/``values`` and ``ratio_set`` respectively) and are not touched
+    here.
     """
     g = dict(g)
     g.setdefault("sites", 1)
     kind = g.get("kind", "composition")
 
-    if kind == "independent":
-        # K independent (element, amount) picks; repeats allowed; no host pick —
-        # the un-picked remainder is a host filled in downstream by the builder.
-        amount = g.pop("amount", None)
-        if amount is not None:
-            g["fraction_set"], step, _d = _amounts_to_strs(amount)
-            g.setdefault("total_units", int(round(1.0 / step)) if step else 100)
-        n_dopants = int(g.get("n_dopants", g.get("n_components", g.get("sites", 1))))
-        g["n_components"] = n_dopants
-        host = g.get("host")
-        if host:
-            g["species_set"] = [e for e in g["species_set"] if e != host]
-        return g
-
     if kind != "composition":
         return g
 
-    amount = g.pop("amount", None)
-    if amount is None:
-        return g
+    fraction_set = g.get("fraction_set")
+    if fraction_set is None:
+        raise ValueError(
+            f"group {g.get('name', '?')!r} (kind=composition) needs 'fraction_set' "
+            "— either an explicit list or a {min, max, step} regular grid."
+        )
+    from .env import derive_total_units, expand_fraction_set
 
-    amt_strs, step, decimals = _amounts_to_strs(amount)
-    amounts = [float(s) for s in amt_strs]
-
-    host = g.get("host")
-    if host:
-        comp_strs = [f"{round(1.0 - a, decimals):.{decimals}f}" for a in amounts]
-        dopants = [e for e in g["species_set"] if e != host]
-        g["species_set"] = dopants + [host]
-        g["fraction_set"] = amt_strs + comp_strs
-        g.setdefault("n_components", 2)
-        if not g.get("constraint_filter"):
-            g["constraint_filter"] = "host_complement"
-            g["host_element"] = host
-            g["levels"] = amt_strs
-    else:
-        g["fraction_set"] = amt_strs
-
-    g.setdefault("total_units", int(round(1.0 / step)) if step else 100)
+    expanded = expand_fraction_set(fraction_set)
+    g["fraction_set"] = expanded
+    g["total_units"] = derive_total_units(expanded)
     return g
 
 
@@ -260,104 +208,6 @@ class CategoricalGroup:
         return tuple(sorted((k, str(v)) for k, v in self._picked.items()))
 
 
-class IndependentDopantsGroup:
-    """``K`` independent ``(element, amount)`` picks on one sublattice; repeats allowed.
-
-    Unlike a composition group, the picks need **not** be distinct and do **not**
-    sum to 1 — the un-picked remainder is a *host* that the downstream builder
-    fills in (e.g. the doped-Li₆PS₆ P-site: pick two dopant metals from the same
-    menu at the same amount range; host P takes the rest). Two picks of the *same*
-    element **merge** (their amounts add), so ``cation_fractions`` returns a
-    ``{element: summed_fraction}`` map with at most ``K`` distinct keys.
-
-    This is deliberately a separate, isolated inner-group type rather than a knob
-    on :class:`~rl_matdesign.env.CompositionEnv`, which hard-enforces *distinct*
-    cations and a sum-to-1 budget; bending those would risk every composition
-    scenario and the order-invariance guarantees. Presents the same minimal
-    inner-group interface ``MultiGroupEnv`` drives.
-    """
-
-    def __init__(
-        self,
-        *,
-        species_set: Sequence[str],
-        fraction_set: Sequence[str],
-        n_components: int,
-        total_units: int = 100,
-        state_featurizer: Callable[[str], np.ndarray] = featurize_formula,
-        phase_filter=None,
-    ) -> None:
-        self.species_set: List[str] = list(species_set)
-        self.fraction_set: List[str] = list(fraction_set)
-        self.n_components: int = int(n_components)
-        self._total_units = int(total_units)
-        self.state_featurizer = state_featurizer
-        self.phase_filter = phase_filter
-        self.constraints_enabled = True  # see IntegerRatioEnv (constrain_training)
-        if not self.species_set:
-            raise ValueError("independent group needs a non-empty 'species_set'.")
-        if not self.fraction_set:
-            raise ValueError("independent group needs a non-empty 'fraction_set'.")
-        self.initialize()
-
-    def initialize(self) -> None:
-        self.counter = 0
-        self.state = ""                          # merged partial formula (for featurizer)
-        self._picks: List[Tuple[str, str]] = []  # ordered (element, comp_str) picks
-
-    def allowed_actions(self, *, prior_groups=None):
-        if self.counter >= self.n_components:
-            return []
-        actions = [
-            (
-                tuple(encode_choice(el, self.species_set).tolist()),
-                tuple(encode_choice(comp, self.fraction_set).tolist()),
-            )
-            for el in self.species_set
-            for comp in self.fraction_set
-        ]
-        if self.phase_filter is not None and self.constraints_enabled:
-            kw = dict(
-                actions=actions, units_map={},
-                steps_left=self.n_components - self.counter - 1,
-                allowed_units=[], possible_sums_by_k=[],
-                species_set=self.species_set, fraction_set=self.fraction_set,
-                running_amount=sum(float(c) for _el, c in self._picks),
-            )
-            if prior_groups is not None:
-                kw["prior_groups"] = prior_groups
-            actions = self.phase_filter.filter_actions(**kw)
-        return actions
-
-    def step(self, action) -> None:
-        elem_oh, comp_oh = action
-        el = decode_one_hot(elem_oh, self.species_set)
-        comp = decode_one_hot(comp_oh, self.fraction_set)
-        self._picks.append((el, comp))
-        self.state = self._formula(self._picks)
-        self.counter += 1
-
-    def _formula(self, picks: List[Tuple[str, str]]) -> str:
-        merged: Dict[str, float] = {}
-        for el, comp in picks:
-            merged[el] = merged.get(el, 0.0) + float(comp)
-        return "".join(f"{el}{v:.2f}" for el, v in sorted(merged.items()))
-
-    def cation_fractions(self) -> Dict[str, float]:
-        merged: Dict[str, float] = {}
-        for el, comp in self._picks:
-            merged[el] = merged.get(el, 0.0) + float(comp)
-        return merged
-
-    def terminal_comp_key(self) -> tuple:
-        items = []
-        for el, frac in self.cation_fractions().items():
-            units = int(round(frac * self._total_units))
-            if units > 0:
-                items.append((str(el), units))
-        return tuple(sorted(items))
-
-
 class MultiGroupEnv:
     """Fixed-order sequence of groups (composition: sum-to-1, or categorical: pick-list)."""
 
@@ -392,12 +242,11 @@ class MultiGroupEnv:
                 inner = CategoricalGroup(
                     g["choices"], phase_filter=g.get("constraint_filter"),
                 )
-            elif kind == "independent":
-                inner = IndependentDopantsGroup(
+            elif kind == "integer":
+                inner = IntegerRatioEnv(
                     species_set=g["species_set"],
-                    fraction_set=g["fraction_set"],
-                    n_components=int(g.get("n_components", g.get("n_dopants", 1))),
-                    total_units=int(g.get("total_units", 100)),
+                    ratio_set=g["ratio_set"],
+                    n_components=int(g.get("n_components", 5)),
                     state_featurizer=state_featurizer,
                     phase_filter=g.get("constraint_filter"),
                 )

@@ -1,16 +1,13 @@
 # Smoke test for the multi_group env wiring (no ASE/DeepMD; dummy predictor).
 # Two sublattice groups, each sums to 1 (P-site and S-site shaped).
-env_type: multi_group
 groups:
   - name: P_site
     species_set: [Mn, Ni, P]
     fraction_set: ["0.05", "0.10", "0.90", "0.95"]
-    total_units: 20
     n_components: 2
   - name: S_site
     species_set: [S, O, Cl]
     fraction_set: ["0.20", "0.30", "0.70", "0.80"]
-    total_units: 10
     n_components: 2
 
 predictor: dummy

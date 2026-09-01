@@ -202,33 +202,46 @@ def build_env(cfg: dict, predictor):
     ``main()`` and the baseline optimizers (``scripts/baselines/*``) so that
     "valid candidate" means exactly the same thing for RL, BO, and GA.
 
-    Returns ``(env, env_type, flat_cfg)`` where ``flat_cfg`` is ``cfg`` except
-    when a lone sum-to-1 group is collapsed to the flat ``CompositionEnv`` (then
-    the group's params are merged in). The returned env already has its
-    ``phase_filter`` attached (per-group for ``multi_group``).
+    Every config uses ``groups:`` — there is no separate ``env_type`` public
+    knob. Returns ``(env, env_type, flat_cfg)`` where ``env_type`` is
+    ``"fraction"`` / ``"integer_ratio"`` / ``"multi_group"`` (an *internal*
+    label describing which class ``env`` ended up being, derived from the
+    groups rather than read from the config) and ``flat_cfg`` is ``cfg``
+    except when a lone group is collapsed to a flat env (then the group's
+    params are merged in). The returned env already has its ``phase_filter``
+    attached (per-group for ``multi_group``).
     """
-    # Env routing. `env_type` is honored if set explicitly; otherwise a config
-    # with `groups:` is `multi_group` and a flat config is `fraction`.
-    #
-    # Single-group auto-switch: a lone sum-to-1 group (`kind: composition`) is
-    # transparently collapsed to the flat CompositionEnv — same chemistry, but a
-    # flat `{el: frac}` candidate instead of `{group: {el: frac}}` — so a
-    # single-sublattice scenario can be written in the groups syntax without
-    # breaking flat predictors/builders (substitute, rf_magpie). `independent` /
-    # `categorical` single groups keep group semantics and stay on MultiGroupEnv.
-    env_type = cfg.get("env_type") or ("multi_group" if cfg.get("groups") else "fraction")
+    if not cfg.get("groups"):
+        raise ValueError(
+            "Config has no 'groups:' — every scenario is expressed as one or "
+            "more sublattice groups now (kind: composition / categorical / "
+            "integer). See CLAUDE.md's proposed schema / any configs/*.yaml "
+            "for examples."
+        )
+
+    from rl_matdesign.env_multigroup import normalize_group_spec
+
+    groups = cfg["groups"]
+    env_type = "multi_group"
     flat_cfg = cfg
-    if env_type == "multi_group":
-        from rl_matdesign.env_multigroup import normalize_group_spec
-        groups = cfg["groups"]
-        if len(groups) == 1 and str(groups[0].get("kind", "composition")) == "composition":
-            gspec = normalize_group_spec(groups[0])
-            # Group params (species_set/fraction_set/bounds/...) override; top-level
-            # keys (anion_formula, episode_style, builder/reward, ...) are kept.
-            flat_cfg = {**cfg, **gspec}
-            env_type = "fraction"
-            print(f"[INFO] single composition group "
-                  f"{groups[0].get('name', '?')!r} -> collapsed to flat CompositionEnv")
+
+    # Single-group auto-collapse: a lone `composition` or `integer` group is
+    # transparently built as the flat CompositionEnv/IntegerRatioEnv — same
+    # chemistry, but a flat `{el: frac}` candidate instead of
+    # `{group: {el: frac}}` — so a single-sublattice scenario can be written in
+    # the groups syntax without breaking flat predictors/builders (substitute,
+    # rf_magpie). `categorical` single groups keep group semantics and stay on
+    # MultiGroupEnv (no flat equivalent).
+    collapse_kind = str(groups[0].get("kind", "composition")) if len(groups) == 1 else None
+    if collapse_kind in ("composition", "integer"):
+        gspec = normalize_group_spec(groups[0])
+        # Group params (species_set/fraction_set/ratio_set/bounds/...) override;
+        # top-level keys (anion_formula, episode_style, builder/reward, ...) are kept.
+        flat_cfg = {**cfg, **gspec}
+        env_type = "integer_ratio" if collapse_kind == "integer" else "fraction"
+        print(f"[INFO] single {collapse_kind} group "
+              f"{groups[0].get('name', '?')!r} -> collapsed to flat "
+              f"{'IntegerRatioEnv' if collapse_kind == 'integer' else 'CompositionEnv'}")
 
     def reward_fn(formula: str) -> float:
         if env_type == "integer_ratio":
@@ -261,35 +274,33 @@ def build_env(cfg: dict, predictor):
     # episode that burned RNG state before warmup (Bug 3).
     if env_type == "integer_ratio":
         env = IntegerRatioEnv(
-            species_set=cfg["species_set"],
-            ratio_set=cfg.get("ratio_set", None) or _default_digits(),
-            n_components=int(cfg.get("n_components", 5)),
+            species_set=flat_cfg["species_set"],
+            ratio_set=flat_cfg["ratio_set"],
+            n_components=int(flat_cfg.get("n_components", 5)),
             reward_fn=reward_fn,
             phase_filter=None,
         )
     elif env_type == "multi_group":
-        from rl_matdesign.env_multigroup import MultiGroupEnv, normalize_group_spec
+        from rl_matdesign.env_multigroup import MultiGroupEnv
 
-        # Normalize each group's friendly knobs (amount/host/sites) into full
-        # CompositionEnv params, then build the per-group constraint instance
-        # (env=None — multi-group filters mask by element/level/prior-group).
+        # Normalize each group's fraction_set/total_units, then build the
+        # per-group constraint instance (env=None — multi-group filters mask
+        # by element/level/prior-group).
         built_groups = []
-        for g in cfg["groups"]:
+        for g in groups:
             gspec = normalize_group_spec(g)
             gspec["constraint_filter"] = build_constraint_filter(gspec, env=None)
             built_groups.append(gspec)
         env = MultiGroupEnv(groups=built_groups, reward_fn=mg_reward_fn)
     else:
-        n_comp = int(flat_cfg.get("n_components", 5))
-        fraction_set, total_units = _resolve_fraction_grid(flat_cfg, n_comp)
         env = CompositionEnv(
             species_set=flat_cfg["species_set"],
-            fraction_set=fraction_set,
+            fraction_set=flat_cfg["fraction_set"],
             anion_formula=flat_cfg.get("anion_formula", ""),
-            n_components=n_comp,
+            n_components=int(flat_cfg.get("n_components", 5)),
             reward_fn=reward_fn,
             phase_filter=None,
-            total_units=total_units,
+            total_units=int(flat_cfg["total_units"]),
             element_bounds=flat_cfg.get("element_bounds"),
             episode_style=flat_cfg.get("episode_style", "element_then_amount"),
         )
@@ -297,7 +308,7 @@ def build_env(cfg: dict, predictor):
     # Single-group envs attach a top-level filter post-construction (some filters
     # need the env's feasibility tables). multi_group filters live per-group.
     # For a collapsed single group, the filter is built from the merged flat_cfg
-    # (so the group's own constraint, e.g. host_complement, is preserved).
+    # (so the group's own filters: entries are preserved).
     if env_type != "multi_group":
         env.phase_filter = build_constraint_filter(flat_cfg, env=env)
 
@@ -861,57 +872,6 @@ def main() -> None:
             _close()
         except Exception as exc:  # noqa: BLE001 - teardown must not fail a finished run
             print(f"[WARN] predictor.close() failed: {type(exc).__name__}: {exc}")
-
-
-def _default_fractions():
-    return [
-        "0.05", "0.10", "0.15", "0.20", "0.25", "0.30", "0.35",
-        "0.40", "0.45", "0.50", "0.55", "0.60", "0.65", "0.70", "0.75", "0.80",
-    ]
-
-
-def _fractions_from_step(step, total_units, n_components):
-    """Build a full fraction grid from a single step size.
-
-    Values run from one unit (``step``) up to the largest fraction a single
-    cation can take while still leaving ≥1 unit for each of the other
-    ``n_components - 1`` cations. Returned as strings matching the YAML style.
-    """
-    max_units = total_units - (n_components - 1)
-    max_units = max(1, min(max_units, total_units - 1))
-    ndec = max(2, len(f"{step}".split(".")[-1]))
-    return [f"{k * step:.{ndec}f}" for k in range(1, max_units + 1)]
-
-
-def _resolve_fraction_grid(cfg, n_components):
-    """Resolve ``(fraction_set, total_units)`` from config, precedence:
-
-    1. explicit ``fraction_set``  -> use as-is (``total_units`` from cfg / 20).
-    2. ``fraction_step``          -> derive ``total_units = round(1/step)`` and
-       auto-build the grid. This is the single knob for changing resolution.
-    3. neither                    -> today's default 0.05 grid, ``total_units`` 20.
-
-    Existing configs (no ``fraction_step``) are byte-identical to before.
-    """
-    explicit = cfg.get("fraction_set", None)
-    if explicit:
-        return list(explicit), int(cfg.get("total_units", 20))
-    step = cfg.get("fraction_step", None)
-    if step is not None:
-        step = float(step)
-        total_units = int(round(1.0 / step))
-        if "total_units" in cfg and int(cfg["total_units"]) != total_units:
-            raise ValueError(
-                f"Inconsistent config: fraction_step={step} implies "
-                f"total_units={total_units}, but total_units={cfg['total_units']} "
-                f"was also set. Drop total_units and keep fraction_step only."
-            )
-        return _fractions_from_step(step, total_units, n_components), total_units
-    return _default_fractions(), int(cfg.get("total_units", 20))
-
-
-def _default_digits():
-    return ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
 
 
 if __name__ == "__main__":

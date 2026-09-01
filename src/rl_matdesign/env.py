@@ -60,6 +60,64 @@ def _fractions_to_units(fractions: Sequence[str], total_units: int = 20) -> List
     return out
 
 
+def expand_fraction_set(spec) -> List[str]:
+    """Normalize a group's ``fraction_set`` into an explicit list of fraction
+    strings. Accepts either public form:
+
+    * a regular grid ``{min, max, step}`` -> expanded to every value on that grid;
+    * an explicit list ``[v1, v2, ...]`` (numbers or strings) -> re-rendered at
+      one shared decimal precision (see below).
+
+    This is the single normalization point for the "one physical concept, one
+    parameter" cleanup: ``fraction_set`` is now the only public key for the
+    per-pick value grid (the old separate ``amount:`` friendly-knob is gone).
+
+    Every returned string uses the *same* number of decimals (at least 2,
+    matching :func:`~rl_matdesign.env._decimals_of`'s "max decimals seen, min
+    2" rule) -- required because ``CompositionEnv`` re-derives that same
+    decimal count from ``fraction_set`` later and formats candidate actions
+    with it (:func:`_format_fraction`), then looks the result up in
+    ``fraction_set`` by exact string match. A naive ``str(v)`` per element
+    would leave e.g. ``0.00`` as ``"0.0"`` while a sibling ``0.02`` renders as
+    ``"0.02"`` -- an internally-inconsistent grid where ``"0.00"`` (what
+    ``CompositionEnv`` looks for) is never actually in the list.
+    """
+    if isinstance(spec, dict):
+        lo, hi, step = float(spec["min"]), float(spec["max"]), float(spec["step"])
+        n = int(round((hi - lo) / step))
+        step_text = f"{step}"
+        ndec = max(2, len(step_text.split(".", 1)[1]) if "." in step_text else 2)
+        return [f"{lo + i * step:.{ndec}f}" for i in range(n + 1)]
+    raw = [str(v) for v in spec]
+    ndec = max([2] + [len(v.split(".", 1)[1]) for v in raw if "." in v])
+    return [f"{float(v):.{ndec}f}" for v in raw]
+
+
+def derive_total_units(fraction_set: Sequence[str]) -> int:
+    """The exact-integer grid resolution implied by an already-expanded
+    ``fraction_set`` (see :func:`expand_fraction_set`).
+
+    Every value is parsed as an exact ``fractions.Fraction`` off its own decimal
+    *string* (never a plain float -- 0.1 has no exact binary representation, but
+    ``Fraction("0.1") == Fraction(1, 10)`` exactly), and the result is the LCM of
+    all denominators -- the smallest ``total_units`` for which every grid value
+    is a whole number of units. For a regular grid this reduces to
+    ``round(1/step)`` automatically (e.g. step=0.03125 -> LCM of denominators
+    32,16,...,1 -> 32); for an irregular explicit list (e.g. the lips_sse.yaml
+    P_site union grid, denominators 50/100/25/20 -> LCM 100) it is the only
+    correct answer, and there is no separate "regular vs irregular" branch to
+    get wrong -- one code path handles both.
+    """
+    from fractions import Fraction
+    from functools import reduce
+    from math import gcd
+
+    denoms = [Fraction(str(f)).denominator for f in fraction_set if float(f) != 0]
+    if not denoms:
+        return 1
+    return reduce(lambda a, b: a * b // gcd(a, b), denoms, 1)
+
+
 def _possible_sums(units: Sequence[int], k: int, max_total: int) -> set[int]:
     sums = {0}
     for _ in range(k):
@@ -324,14 +382,14 @@ class CompositionEnv:
                 items.append((str(el), units))
         return tuple(sorted(items))
 
-    @staticmethod
-    def _completable(target: int, k_slots: int, pool: Sequence[Tuple[int, int]]) -> bool:
+    def _completable(self, target: int, k_slots: int, pool: Sequence[Tuple[int, int]]) -> bool:
         """Can exactly ``k_slots`` distinct elements from ``pool`` sum to ``target``?
 
         ``pool`` is the list of selectable elements' ``(lo_u, hi_u)`` unit bounds.
-        On a step-1 unit grid the achievable sums of any chosen k-subset form the
-        full integer interval ``[Σlo, Σhi]`` (each element varies independently by
-        1), so the subset-sum-with-bounds feasibility reduces to a window check:
+        On a step-1 (regular, dense) unit grid the achievable sums of any chosen
+        k-subset form the full integer interval ``[Σlo, Σhi]`` (each element
+        varies independently by 1), so the subset-sum-with-bounds feasibility
+        reduces to a window check:
 
         * Every element with ``lo_u > 0`` is **mandatory** (it cannot be left out
           without violating its own lower bound), so all of them must be among the
@@ -341,6 +399,18 @@ class CompositionEnv:
           elements (``lo_u == 0``). They never raise the floor (their ``lo`` is 0);
           to maximise the reachable ceiling we take the optionals with the largest
           ``hi``. ``target`` is reachable iff ``Σlo <= target <= Σhi_max``.
+
+        That window check alone is only valid on a dense grid. For an irregular
+        ``fraction_set`` (e.g. a union grid with gaps — see
+        ``expand_fraction_set``), ``target`` can fall inside the window yet be
+        unreachable because no ``k_slots`` values actually on the grid sum to it
+        (e.g. window ``[0, 100]`` contains ``1``, but a grid of ``{0,2..8,92..98}``
+        has no ``k``-subset summing to exactly ``1``). ``self._possible_sums_by_k``
+        is the exact set of sums reachable by ``k_slots`` picks from the *shared*
+        grid ``self._allowed_units`` (bound-agnostic), so it is always a superset
+        of what is reachable under any per-element bound restriction — ANDing it
+        in as an extra necessary condition can only reject additional
+        already-infeasible targets, never a genuinely reachable one.
         """
         mandatory = [(lo, hi) for lo, hi in pool if lo > 0]
         optional_his = sorted((hi for lo, hi in pool if lo == 0), reverse=True)
@@ -351,7 +421,9 @@ class CompositionEnv:
         k_opt = k_slots - len(mandatory)
         lo_total = sum(lo for lo, _ in mandatory)
         hi_total = sum(hi for _, hi in mandatory) + sum(optional_his[:k_opt])
-        return lo_total <= target <= hi_total
+        if not (lo_total <= target <= hi_total):
+            return False
+        return target in self._possible_sums_by_k[k_slots]
 
     def _allowed_units_for_symbol(self, elem: str) -> List[int]:
         """Allowed fraction-units for picking *elem* now under element_then_amount.

@@ -2202,3 +2202,281 @@ including the "Sr_0.00000" no-op case regardless of which species was nominally
 picked. StructureScorePredictor still constructs cleanly end-to-end with the new
 group shape. No changes needed in the external CLC_workflow rl_builder.py -- it
 delegates to DefectSiteBuilder via cfg passthrough with no hardcoded group names.
+
+### EARS — Progress (2026-08-28 13:11)
+<!-- concepts: perovskite-defect-doping, deepmd-lammps-deployment -->
+User debugging their real GPU-machine training run of configs/perovskite.yaml,
+across several sessions/turns (separate from the design work). Chain so far:
+lmp_bin placeholder -> unfrozen .ckpt.pt md.model -> wrong pair_style/plugin
+convention guessed twice before asking for `lmp -h` ground truth -> deepmd-kit
+missing libdeepmd_backend_ptexpt.so (added md.env passthrough) -> NPT pressure/
+temp runaway ("Non-numeric pressure") traced via a differential test (their
+manually-run conf.lmp/input.lammps was stable, pipeline run wasn't) to a
+sm_90-compiled+recompressed model being numerically unstable specifically under
+the Kokkos pair style (deepmd/kk) -- stable with the same model under plain
+deepmd, and stable with a different (non-sm_90) model under deepmd/kk. Root
+caused to a GPU compute-capability mismatch, not an rl-matdesign/CLC_workflow
+bug -- pointed at `nvidia-smi --query-gpu=name,compute_cap` and recompressing
+for the actual GPU as the real fix, unblocking via plain `deepmd` (no Kokkos)
+or falling back to their working non-sm_90 model in the meantime.
+
+Since then, hardened rl_builder.py against exactly this class of problem
+recurring: (1) per-realization try/except in build() so one bad MD/relax no
+longer kills the whole training run (skips and continues, only raises if ALL
+n_configs realizations fail) -- verified with a mocked _md_average_and_optimize
+(2/5 partial failure returns 3 successes; 3/3 total failure raises cleanly).
+(2) os.path.abspath() on md.model/md.lmp_bin/opt.model at construction time,
+since md.model/md.lmp_bin are read by a LAMMPS subprocess run with
+cwd=<scratch dir> -- a relative path there was silently resolving against the
+wrong directory (base_poscar/opt.model/properties[*].models were already fine,
+loaded in-process with no cwd switch).
+
+Currently mid-task: user reports post-MD DP geometry optimization isn't
+converging and wants to save both the MD-averaged (pre-relax) and post-relax
+structures as POSCARs to inspect visually. Found relax_structure() (rl-matdesign
+utils/structure.py) had a real gap: LBFGS.run() returns a bool (converged or
+not) that was never checked -- running out of `steps` without reaching fmax is
+NOT an exception, so the existing try/except was silently swallowing
+non-convergence with zero signal to the caller. Fixed to check the return value
+and print the actual final fmax reached when it doesn't converge. Next: add an
+optional md_debug_dir (or similar) config knob to rl_builder.py so both
+structures get written to disk per MD run, named/tagged so they can be
+correlated with the new convergence message.
+
+### EARS — Session Start (2026-08-31 11:24)
+<!-- concepts: perovskite-defect-doping, formula-label-drift -->
+- Task: Explain a confusing generated.csv formula "Ca1.31Mn1.75" from a real
+  training run of configs/perovskite.yaml, then fix the underlying bug once found.
+- Why: User is actively running/debugging the perovskite Level-2 MD-in-the-loop
+  scenario on their GPU machine and needs to trust generated.csv's labels to
+  interpret results.
+
+### EARS — Progress (2026-08-31 12:45)
+<!-- concepts: perovskite-defect-doping, action-space-constraints -->
+Follow-up to the Ca1.31Mn1.75 formula-label bug fix: user correctly pushed back
+that the underlying issue isn't just display -- the RL agent can still WASTE a
+full real-MD episode on an action sequence (e.g. two Ca picks summing past 1.0)
+that clamps to a structure a different, single valid pick could reach directly.
+Found the fix needs zero new code: src/rl_matdesign/constraints/sum_bound.py
+(IndependentSumBoundFilter) already exists and does exactly this -- caps an
+IndependentDopantsGroup's running+final pick sum via constraint_filter: sum_bound
++ sum_amount: {min,max}, reading the SAME `running_amount` context
+MultiGroupEnv already threads into every group's phase_filter. Traced the
+resolution path (run_experiment.py's build_env -> per-group
+build_constraint_filter -> registry.build_constraints -> resolve_constraint)
+to confirm `constraint_filter: sum_bound` on a group dict is the right, already-
+wired-up way to attach it -- no new filter class needed, no env changes needed.
+Editing configs/perovskite.yaml (gitignored, local-only) to add
+constraint_filter: sum_bound + sum_amount: {min: 0.0, max: 1.0} to both
+A_dopant and B_dopant groups. In progress: A_dopant done, B_dopant next, then
+verify via allowed_actions() that a second Ca pick landing above 1.0 combined
+is actually excluded post-first-pick.
+
+### EARS — Progress (2026-09-01 14:57)
+<!-- concepts: env-config-api, multi-group-env, refactoring -->
+Implementing the approved "one physical concept -> one public parameter"
+cleanup plan for env/group config (see
+.claude/plans/abstract-roaming-sedgewick.md), in auto mode per user request.
+Completed so far: env.py gained expand_fraction_set/derive_total_units
+(Fraction-exact LCM, handles both regular {min,max,step} grids and irregular
+explicit lists, verified against ti_alloy/perovskite/cs2agbicl6/lips_sse
+grids). env_multigroup.py: normalize_group_spec rewritten to drop the old
+amount:/host:/n_dopants:/independent: handling, now composition-only and
+derives total_units via the new env.py helpers; deleted _grid_decimals/
+_amounts_to_strs (dead code) and the entire IndependentDopantsGroup class.
+env_integer.py: IntegerRatioEnv.allowed_actions gained a prior_groups=None
+kwarg (mirroring CompositionEnv's signature) so kind: integer can wrap it
+directly inside MultiGroupEnv the same way kind: composition already wraps
+CompositionEnv directly. Next: update MultiGroupEnv.__init__'s group dispatch
+loop to remove the kind=="independent" branch and add a kind=="integer"
+branch instantiating IntegerRatioEnv, then registry.py/chain.py's
+constraint_filter -> type rename, then config migrations.
+
+### EARS — Progress (2026-09-01 15:10)
+<!-- concepts: env-config-api, constraint-filters, scope-decision -->
+Continuing the env/group config cleanup. Finished Task 3/4: deleted
+IndependentDopantsGroup, host_complement.py, sum_bound.py, their registry.py
+CONSTRAINTS entries; wired kind: integer to IntegerRatioEnv directly inside
+MultiGroupEnv (added prior_groups=None kwarg + cation_fractions() alias to
+IntegerRatioEnv so it matches the uniform inner-group interface). Smoke
+tested a MultiGroupEnv mixing kind: integer + kind: composition groups
+end-to-end - works.
+
+Scope discovery: the plan's "remove env_type, always route through groups:"
+task only audited 9 configs, but configs/*.yaml actually has ~14 more files
+on the old flat/env_type schema (oxides_calcine*, oxides_sinter_calcine*,
+oxides_smoke, hea.yaml, test_dummy.yaml, ooh_dqn.yaml, ooh_fine.yaml).
+Asked the user whether to migrate all of them or keep build_env
+backward-compatible; user chose migrate all (one schema, no permanent
+dual-path). Added task #11 to track the expanded list.
+
+Now mid-Task 6: renaming filters: entries' constraint_filter: sub-key to
+type: in chain.py (done, plus bare-string shorthand for parameter-free
+filters) and registry.py's _cfg_names_constraint/_has_constraint helpers
+(done - now only scan filters:, no longer the removed group-level singular
+constraint_filter: key). Next: build_constraints' fallback to
+cfg.get("constraint_filter"), then build_env's env_type removal, then the
+~23 config file migrations.
+
+### EARS — Progress (2026-09-01 15:22)
+<!-- concepts: env-config-api, fraction-grid-formatting, bug-fix -->
+Bug found and fixed while verifying the lips_sse.yaml migration end-to-end:
+expand_fraction_set()'s explicit-list branch (env.py) used naive str(v) per
+element, so a grid like [0.00, 0.02, ..., 0.98] rendered "0.00" as "0.0" (1
+decimal) while siblings like 0.02 rendered "0.02" (2 decimals) - internally
+inconsistent. CompositionEnv separately re-derives its decimal count from
+fraction_set via _decimals_of (max decimals seen across tokens, min 2), then
+formats candidate actions at that count and looks the string up by exact
+match - so it looked for "0.00" but the list only had "0.0", crashing
+encode_choice. Fixed by having expand_fraction_set compute the same
+max-decimals-min-2 count up front and re-render every list entry at that
+one shared precision, so the list is self-consistent by construction and
+matches what CompositionEnv independently re-derives. Caught by actually
+DFS-enumerating the migrated lips_sse.yaml P_site group's reachable
+terminal_comp_key() set (not just unit-testing the two helper functions in
+isolation) - exhaustive-enumeration verification is doing its job.
+
+### EARS — Progress (2026-09-01 15:35)
+<!-- concepts: env-config-api, feasibility-checking, bug-fix -->
+Second bug found+fixed verifying lips_sse.yaml's P_site migration:
+CompositionEnv._completable() (env.py, used by _allowed_units_for_symbol for
+element_then_amount + per-element-bounds) only did a range check
+(sum(lo)<=target<=sum(hi)), which assumes a DENSE/regular grid where every
+integer in range is reachable. On the new irregular union grid
+({0,2..8,92..98} out of 100), targets inside the range but not actually
+summable from real grid points (e.g. target=1) were wrongly marked
+reachable, so allowed_actions() offered an action that step() then
+correctly rejected -- "Action makes valid terminal composition impossible."
+Fixed by ANDing in an exact check against self._possible_sums_by_k[k_slots]
+(the same exact-reachability table already used elsewhere in the file) --
+provably safe since that table is a superset of what's reachable under any
+narrower per-element bound. Converted _completable from @staticmethod to a
+regular method to access self._possible_sums_by_k.
+
+After both fixes, exhaustively DFS-verified P_site's new composition-kind
+config reaches exactly 7192 candidates (217 single-dopant + 6975
+two-dopant), matching the plan's closed-form derivation exactly. Used
+in-place mutate/undo instead of deepcopy + a stub state_featurizer to make
+the ~7k-leaf enumeration fast (deepcopy of CompositionEnv + real Magpie
+featurization per node was too slow to finish).
+
+### EARS — Progress (2026-09-01 15:33)
+<!-- concepts: env-config-api, perovskite-builder, config-migration -->
+Migrated configs/perovskite.yaml to the new schema: A_dopant/B_dopant went
+from kind: independent + constraint_filter: sum_bound to kind: composition
+with the host species (Sr/Fe) now explicit in species_set, fraction_set:
+{min:0,max:1,step:0.03125}, no filter needed (sum-to-1 is structural).
+Smoke-tested MultiGroupEnv construction+rollout on the migrated config -
+works, terminal_cation_fractions/assembled_composition look correct.
+
+Now updating defect_site.py's DefectSiteBuilder docstring + _dopant_counts
+logic for Task 8: the candidate dict's A_dopant/B_dopant keys now include
+the host species explicitly (composition group includes ALL picked species,
+not just dopants), whereas the old independent-kind group's
+cation_fractions() never included the host at all. _dopant_counts needs to
+exclude the host symbol (a_site_symbol/b_site_symbol) from the "put" counts
+it computes, otherwise the host gets double-counted against the vacancy math
+in _resolve_ops (n_a - sum(a_counts.values()) assumes a_counts excludes the
+host). Docstring rewritten first; _dopant_counts code fix in progress next.
+
+### EARS — Progress (2026-09-01 15:50)
+<!-- concepts: env-config-api, test-suite, config-migration -->
+Migrated all 23 config files in configs/ to the new groups:/kind:/filters:
+schema (the originally-planned 9 plus 14 more discovered mid-implementation:
+oxides_calcine*, oxides_sinter_calcine*, oxides_smoke, hea, test_dummy,
+ooh_dqn, ooh_fine). All build via build_env() and complete 3 random rollouts
+each with zero failures. Audited the sse builder (predictors/builders/sse.py)
+against lips_sse.yaml's new explicit-P candidate shape: _decode() already
+excludes host_P via `el != self.host_P`, so it handles both old (implicit
+host) and new (explicit host key) candidate dicts with no code changes
+needed - confirmed via direct unit test.
+
+Discovered CLAUDE.md's "no test suite" claim is stale: tests/ has real
+pytest files. tests/test_multigroup_env.py directly tested the deleted
+amount:/host:/kind:independent/_amounts_to_strs machinery and would have
+failed outright. Rewrote it in full to exercise the new schema
+(fraction_set: {min,max,step} or explicit list, explicit host species +
+element_bounds for the "host absorbs remainder" pattern, filters: list with
+type: keys) while preserving the same test intent/coverage. Two tests
+(kind:independent-specific merge/repeat behavior, host_complement precision)
+were deleted outright since the behavior they tested no longer exists by
+design. tests/test_sse_builder.py did NOT need changes - its candidates
+already mix explicit-P and implicit-P dicts and both work through the same
+_decode() guard. Next: run pytest on both files to confirm, then check
+tests/test_order_invariance.py and any other test files for schema
+dependencies.
+
+### EARS — Progress (2026-09-01 16:00)
+<!-- concepts: env-config-api, test-suite, constraint-filters -->
+CLAUDE.md's "no test suite" claim is confirmed stale - ran the full tests/
+directory (24 files) and found a real, substantial pytest suite. Full run:
+15 failures. 2 are pre-existing/unrelated (test_site_pick_builder.py's two
+perovskite tests fail against the untracked local perovskite.vasp 64-atom
+supercell fixture, expects a 1-formula-unit POSCAR instead - site_pick.py
+untouched by this refactor, not my bug). The other 13 are real fallout from
+the schema cleanup: test_chain.py (8), test_charge_neutrality.py (2),
+test_dqn_augmentation.py (1), test_lips_integration.py (2) - all use the old
+constraint_filter: sub-key spelling in filters: entries, the removed flat
+top-level constraint_filter: fallback in build_constraints, or old
+env_type/group-level metal_only/oxide_only placement. Fixing each file now.
+Also worth noting: test_chain_non_dict_child_raises tested that a bare
+string entry raises "must be a dict" - now invalid premise since I added
+bare-string shorthand support; needs a different invalid-type example (e.g.
+an int) to still exercise that branch.
+
+## 2026-09-01 — env/group config API cleanup: full implementation complete
+
+### EARS — Session End (2026-09-01 16:15)
+<!-- concepts: env-config-api, refactoring, test-suite -->
+Implemented the full approved plan (.claude/plans/abstract-roaming-sedgewick.md)
+in auto mode: removed kind: independent/IndependentDopantsGroup/sum_bound/
+host_complement/n_dopants/amount:/host:/env_type from the public schema;
+generalized everything to kind: composition (now zero-fraction-slot aware)
+plus new kind: integer (wraps IntegerRatioEnv directly, same pattern as
+composition wraps CompositionEnv); fraction_set now takes {min,max,step} or
+an explicit list and total_units is always derived (env.expand_fraction_set/
+derive_total_units); filters: entries use type: (+ bare-string shorthand)
+instead of constraint_filter:; build_env always routes through groups:,
+collapsing a single composition OR integer group to its flat env. Migrated
+all 23 config files in configs/ (9 originally planned + 14 more discovered
+mid-work: oxides_calcine*, oxides_sinter_calcine*, oxides_smoke, hea,
+test_dummy, ooh_dqn, ooh_fine — user chose to migrate all rather than keep
+build_env permanently bilingual).
+
+Two real bugs found only by actually exercising the new schema (not just
+unit-testing helpers in isolation):
+1. expand_fraction_set's explicit-list branch used naive str(v), producing
+   inconsistent decimal counts across a list (0.00 -> "0.0" vs sibling 0.02
+   -> "0.02") that later failed to round-trip through CompositionEnv's own
+   decimal inference.
+2. CompositionEnv._completable (bounds feasibility check) only did a
+   Sigma-lo/hi range check, correct only for dense/regular grids; on the new
+   irregular union grids (lips_sse.yaml's P_site) it accepted an
+   arithmetically-in-range target that no real grid point could reach. Fixed
+   by ANDing in an exact possible_sums_by_k membership check.
+3. (found via test rewrite, not exploratory testing) ChainConstraintFilter
+   isolated each filters: entry to its own dict, silently dropping the
+   parent group's shared context (e.g. a categorical group's choices) that
+   sse_doping's slot auto-discovery depends on -- worked under the old
+   singular constraint_filter: spelling (which passed the whole group spec)
+   but broke silently under filters:. This affected the ACTUAL migrated
+   lips_sse.yaml, not just a test fixture. Fixed by merging parent context
+   into each child's cfg (child's own keys still win).
+
+Verified end-to-end: exhaustive DFS enumeration of lips_sse.yaml's P_site
+matches the plan's closed-form proof exactly (7192 = 217 single-dopant +
+6975 two-dopant candidates); all 23 configs build + roll out 3 random
+episodes each with zero failures; defect_site.py and sse.py builders
+checked against the new explicit-host candidate shape (defect_site.py
+needed a real fix -- _dopant_counts now excludes the host symbol from "put"
+counts since composition groups include the host explicitly; sse.py's
+_decode already handled it defensively, no change needed).
+
+Discovered CLAUDE.md's "no test suite" claim is stale -- tests/ has 24 real
+pytest files. Ran the full suite: 15 failures, 13 caused by this refactor
+(test_chain.py, test_charge_neutrality.py, test_dqn_augmentation.py,
+test_multigroup_env.py, test_lips_integration.py -- all fixed and now
+passing), 2 pre-existing/unrelated (test_site_pick_builder.py's perovskite
+tests fail against an untracked local perovskite.vasp fixture that doesn't
+match that older test's small-POSCAR assumption; site_pick.py untouched by
+this work). Full suite is green except those 2 known-unrelated failures.

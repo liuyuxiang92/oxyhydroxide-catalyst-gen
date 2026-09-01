@@ -174,13 +174,18 @@ def test_smact_charge_enabled_detection():
     from rl_matdesign.registry import smact_charge_enabled
 
     assert smact_charge_enabled({}) is False                       # not configured
-    assert smact_charge_enabled({"constraint_filter": "last_step_element"}) is False
-    assert smact_charge_enabled({"constraint_filter": "smact_charge"}) is True
+    assert smact_charge_enabled({"filters": [{"type": "last_step_element"}]}) is False
+    assert smact_charge_enabled({"filters": [{"type": "smact_charge"}]}) is True
+    assert smact_charge_enabled({"filters": ["smact_charge"]}) is True   # bare-string shorthand
     assert smact_charge_enabled(
         {"filters": [
-            {"constraint_filter": "last_step_element", "required_elements": ["O"]},
-            {"constraint_filter": "smact_charge"},
+            {"type": "last_step_element", "required_elements": ["O"]},
+            {"type": "smact_charge"},
         ]}
+    ) is True
+    # per-group placement (multi_group configs attach filters inside groups:)
+    assert smact_charge_enabled(
+        {"groups": [{"name": "g", "filters": [{"type": "smact_charge"}]}]}
     ) is True
 
 
@@ -190,22 +195,22 @@ def test_pauling_en_detection_and_combined_switches():
     )
 
     chain = {"filters": [
-        {"constraint_filter": "last_step_element", "required_elements": ["O"]},
-        {"constraint_filter": "smact_charge"},
-        {"constraint_filter": "pauling_en"},
+        {"type": "last_step_element", "required_elements": ["O"]},
+        {"type": "smact_charge"},
+        {"type": "pauling_en"},
     ]}
     assert pauling_en_enabled({}) is False
-    assert pauling_en_enabled({"constraint_filter": "pauling_en"}) is True
+    assert pauling_en_enabled({"filters": [{"type": "pauling_en"}]}) is True
     assert pauling_en_enabled(chain) is True
 
     # charge_check_enabled = smact_charge OR pauling_en; pauling alone still gates.
     assert charge_check_enabled({}) is False
-    assert charge_check_enabled({"constraint_filter": "smact_charge"}) is True
-    assert charge_check_enabled({"constraint_filter": "pauling_en"}) is True
+    assert charge_check_enabled({"filters": [{"type": "smact_charge"}]}) is True
+    assert charge_check_enabled({"filters": [{"type": "pauling_en"}]}) is True
     assert charge_check_enabled(chain) is True
 
     # charge_use_pauling tracks pauling_en specifically.
-    assert charge_use_pauling({"constraint_filter": "smact_charge"}) is False
+    assert charge_use_pauling({"filters": [{"type": "smact_charge"}]}) is False
     assert charge_use_pauling(chain) is True
 
 

@@ -5,45 +5,46 @@
 
 
 # ---- Environment ----
-species_set:
-  - Co
-  - Cr
-  - Fe
-  - Mn
-  - Ni
-  - Al
-  - Ti
-  - Cu
-  - V
-  - Mo
-  - W
-  - Nb
-  - Ta
-  - Hf
-  - Zr
-
-fraction_set:
-  - "0.05"
-  - "0.10"
-  - "0.15"
-  - "0.20"
-  - "0.25"
-  - "0.30"
-  - "0.35"
-  - "0.40"
-  - "0.45"
-  - "0.50"
-  - "0.55"
-  - "0.60"
-  - "0.65"
-  - "0.70"
-  - "0.75"
-  - "0.80"
+groups:
+  - name: hea
+    kind: composition
+    species_set:
+      - Co
+      - Cr
+      - Fe
+      - Mn
+      - Ni
+      - Al
+      - Ti
+      - Cu
+      - V
+      - Mo
+      - W
+      - Nb
+      - Ta
+      - Hf
+      - Zr
+    fraction_set:
+      - "0.05"
+      - "0.10"
+      - "0.15"
+      - "0.20"
+      - "0.25"
+      - "0.30"
+      - "0.35"
+      - "0.40"
+      - "0.45"
+      - "0.50"
+      - "0.55"
+      - "0.60"
+      - "0.65"
+      - "0.70"
+      - "0.75"
+      - "0.80"
+    n_components: 5           # Classic 5-component HEA
+    # No chemical constraint (no filters:); DPA reward handles stability.
 
 anion_formula: ""         # No anion for metallic alloys
-n_components: 5           # Classic 5-component HEA
-
-constraint_filter: null   # No chemical constraint; DPA reward handles stability
 
 # ---- Reward (one structure objective -> single-objective, auto-detected) ----
 builder: substitute               # fixed-lattice element swap onto placeholder sites

@@ -18,11 +18,12 @@ Specify a list of anion entries, each with ``symbol``, ``charge``, and
 
 .. code-block:: yaml
 
-    constraint_filter: smact_charge
-    smact_anions:
-      - symbol: "O"
-        charge: -2
-        stoich: 3.0          # ABO3 perovskite
+    filters:
+      - type: smact_charge
+        smact_anions:
+          - symbol: "O"
+            charge: -2
+            stoich: 3.0          # ABO3 perovskite
 
     # Multi-anion example (oxynitride):
     smact_anions:
@@ -77,9 +78,9 @@ context kwarg it passes and doesn't need ``smact_anions`` — use
         # Attach on the LAST group only — it needs the A-site pick, which is
         # only available via prior_groups once A_site has completed.
         filters:
-          - constraint_filter: smact_charge
+          - type: smact_charge
             scaffold_formula: O3        # fixed anion, not agent-picked
-          - constraint_filter: pauling_en
+          - type: pauling_en
             scaffold_formula: O3
 
 Each categorical pick (this group's candidate and any completed prior

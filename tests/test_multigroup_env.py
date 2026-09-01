@@ -4,6 +4,10 @@ Covers:
 * N=1 reproduces CompositionEnv exactly (backward-compat keystone).
 * N=2 episodes walk groups in order, each group sums to 1, terminal is structured.
 * prior_groups delivers earlier groups' compositions to a later group's filter.
+* fraction_set expansion ({min,max,step} regular grid / explicit list) and the
+  total_units it derives.
+* The "host absorbs the rest" pattern is now plain composition + element_bounds,
+  not a dedicated host: knob / host_complement filter.
 """
 import os
 import sys
@@ -15,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from rl_matdesign.env import CompositionEnv  # noqa: E402
 from rl_matdesign.env_multigroup import MultiGroupEnv, normalize_group_spec  # noqa: E402
 from rl_matdesign.constraints.base import ConstraintFilter  # noqa: E402
-from rl_matdesign.registry import resolve_constraint  # noqa: E402
+from rl_matdesign.registry import build_constraints, resolve_constraint  # noqa: E402
 from rl_matdesign.encoding import decode_one_hot  # noqa: E402
 
 
@@ -47,10 +51,11 @@ def _drive_first_allowed(env):
 
 
 def _build(group_specs):
+    """Normalize + resolve each group's filters:, exactly like build_env does."""
     built = []
     for g in group_specs:
         gs = normalize_group_spec(g)
-        gs["constraint_filter"] = resolve_constraint(gs.get("constraint_filter"), gs, env=None)
+        gs["constraint_filter"] = build_constraints(gs, env=None)
         built.append(gs)
     return MultiGroupEnv(groups=built)
 
@@ -115,9 +120,9 @@ def test_prior_groups_delivers_earlier_group_to_later_filter():
     assert all(p == [p_site_comp] for p in real)
 
 
-def test_amount_range_expands_fraction_set():
+def test_fraction_set_regular_grid_expands_and_derives_total_units():
     g = normalize_group_spec(
-        {"species_set": ["Ti", "Al"], "amount": {"min": 0.0, "max": 0.04, "step": 0.01},
+        {"species_set": ["Ti", "Al"], "fraction_set": {"min": 0.0, "max": 0.04, "step": 0.01},
          "n_components": 2}
     )
     assert g["fraction_set"] == ["0.00", "0.01", "0.02", "0.03", "0.04"]
@@ -125,32 +130,37 @@ def test_amount_range_expands_fraction_set():
     assert g["sites"] == 1
 
 
-def test_host_knob_dopant_at_level_host_takes_rest():
-    g = {"name": "P_site", "species_set": ["Mn", "Ni", "Ru"], "host": "P",
-         "amount": {"min": 0.02, "max": 0.08, "step": 0.01}, "sites": 1}
-    # normalization wires the host_complement filter + complements automatically
-    n = normalize_group_spec(g)
-    assert n["species_set"][-1] == "P" and n["constraint_filter"] == "host_complement"
-    assert "0.95" in n["fraction_set"] and "0.05" in n["fraction_set"]
-
+def test_explicit_host_species_with_element_bounds_absorbs_remainder():
+    # New equivalent of the old `host:` friendly-knob + host_complement filter:
+    # list the host explicitly in species_set and pin its range via
+    # element_bounds. The remaining budget is whatever's left, exactly as
+    # before, but derived from composition's native sum-to-1 mechanics rather
+    # than a dedicated filter (see configs/lips_sse.yaml's migration).
+    g = {"name": "P_site", "kind": "composition", "species_set": ["Mn", "Ni", "Ru", "P"],
+         "n_components": 2,
+         "fraction_set": ["0.02", "0.03", "0.04", "0.05", "0.06", "0.07", "0.08",
+                           "0.92", "0.93", "0.94", "0.95", "0.96", "0.97", "0.98"],
+         "element_bounds": {"P": [0.92, 0.98]}}
     env = _build([g])
     levels = {f"{x/100:.2f}" for x in range(2, 9)}
     for _ in range(50):
         env.initialize()
         while env.counter < env.n_components:
-            env.step(env.allowed_actions()[int(np.random.randint(len(env.allowed_actions())))])
+            actions = env.allowed_actions()
+            env.step(actions[int(np.random.randint(len(actions)))])
         comp = env.terminal_cation_fractions()["P_site"]
+        assert "P" in comp
         metals = [k for k in comp if k != "P"]
-        assert len(metals) == 1
-        assert f"{comp[metals[0]]:.2f}" in levels            # dopant at a level
-        assert abs(comp["P"] - (1 - comp[metals[0]])) < 1e-9  # host took the rest
+        assert len(metals) == 1                               # one dopant + host
+        assert f"{comp[metals[0]]:.2f}" in levels               # dopant at a level
+        assert abs(comp["P"] - (1 - comp[metals[0]])) < 1e-9    # host took the rest
 
 
 def test_sites_assembles_real_counts_and_formula():
-    g1 = {"name": "P", "species_set": ["Mn"], "host": "P",
-          "amount": {"min": 0.05, "max": 0.05, "step": 0.01}, "sites": 1}
+    g1 = {"name": "P", "kind": "composition", "species_set": ["Mn", "P"],
+          "n_components": 2, "fraction_set": ["0.05", "0.95"], "sites": 1}
     g2 = {"name": "X", "species_set": ["A", "B"], "fraction_set": ["0.10", "0.20", "0.80", "0.90"],
-          "total_units": 10, "n_components": 2, "sites": 6}
+          "n_components": 2, "sites": 6}
     env = _drive_first_allowed(_build([g1, g2]))
     asm = env.assembled_composition()
     # P-site sites=1 -> fractions; X-site sites=6 -> counts summing to 6
@@ -160,8 +170,8 @@ def test_sites_assembles_real_counts_and_formula():
 
 
 def test_categorical_group_returns_real_values():
-    p = {"name": "P_site", "species_set": ["Mn", "Ni"], "host": "P",
-         "amount": {"min": 0.05, "max": 0.05, "step": 0.01}, "sites": 1}
+    p = {"name": "P_site", "kind": "composition", "species_set": ["Mn", "Ni", "P"],
+         "n_components": 2, "fraction_set": ["0.05", "0.95"]}
     s = {"name": "S_site", "kind": "categorical", "sites": 6,
          "choices": [{"element": "O", "values": ["none", "oxide"]},
                      {"element": "Cl", "values": [0.6, 0.8, 1.0, 1.2, 1.4]}]}
@@ -180,54 +190,26 @@ def test_categorical_group_returns_real_values():
     assert "none" not in asm and "oxide" not in asm
 
 
-def test_independent_group_two_picks_merge_and_repeat():
-    # kind: independent -> two (metal, amount) picks; repeats allowed; host dropped.
-    g = {"name": "P_site", "kind": "independent", "species_set": ["Mn", "Ni", "P"],
-         "host": "P", "n_dopants": 2, "amount": {"min": 0.02, "max": 0.08, "step": 0.01}}
-    n = normalize_group_spec(g)
-    assert n["n_components"] == 2
-    assert "P" not in n["species_set"]                       # host dropped (builder fills it)
-    assert n["fraction_set"] == [f"{x/100:.2f}" for x in range(2, 9)]
-
-    env = _build([g])
-    levels = {f"{x/100:.2f}" for x in range(2, 9)}
-    for _ in range(40):
-        env.initialize()
-        while env.counter < env.n_components:
-            env.step(env.allowed_actions()[int(np.random.randint(len(env.allowed_actions())))])
-        comp = env.terminal_cation_fractions()["P_site"]
-        assert 1 <= len(comp) <= 2                          # may merge to one metal
-        assert "P" not in comp                              # host not in the dopant map
-        total = sum(comp.values())
-        assert total <= 0.16 + 1e-9                         # two picks, each <= 0.08
-
-
-def test_independent_group_allows_same_element_merges():
-    g = {"name": "P_site", "kind": "independent", "species_set": ["Mn", "Ni"],
-         "n_dopants": 2, "amount": {"min": 0.02, "max": 0.08, "step": 0.01}}
-    env = _build([g])
-    env.initialize()
-    _pick(env, "Mn", "0.06")
-    _pick(env, "Mn", "0.04")                                # same element twice
-    comp = env.terminal_cation_fractions()["P_site"]
-    assert comp == {"Mn": 0.10}                             # merged to combined fraction
-
-
 def test_sse_doping_two_metals_per_metal_masking():
-    # Two dopants Ru (metal_only) + Al (oxide_only); S-site has per-metal O slots.
-    p = {"name": "P_site", "kind": "independent", "species_set": ["Ru", "Al", "Mn"],
-         "n_dopants": 2, "amount": {"min": 0.05, "max": 0.06, "step": 0.01}}
+    # Two dopants Ru (metal_only) + Al (oxide_only), plus the host "P" so the
+    # group has somewhere for the un-doped remainder to go (SSEDopingFilter's
+    # host_P defaults to "P", matching configs/lips_sse.yaml); S-site has
+    # per-metal O slots.
+    p = {"name": "P_site", "kind": "composition",
+         "species_set": ["P", "Ru", "Al", "Mn"],
+         "n_components": 3, "fraction_set": {"min": 0.0, "max": 1.0, "step": 0.01}}
     s = {"name": "S_site", "kind": "categorical", "sites": 6,
          "choices": [{"name": "O_a", "element": "O", "values": [0, 1]},
                      {"name": "O_b", "element": "O", "values": [0, 1]},
                      {"element": "Cl", "values": [0.6, 1.0]}],
-         "constraint_filter": "sse_doping", "o_element": "O",
-         "metal_only": ["Ru"], "oxide_only": ["Al"]}
+         "filters": [{"type": "sse_doping", "o_element": "O",
+                      "metal_only": ["Ru"], "oxide_only": ["Al"]}]}
     env = _build([p, s])
 
     env.initialize()
     _pick(env, "Ru", "0.05")
     _pick(env, "Al", "0.06")
+    _pick(env, "P", "0.89")
     # Sorted metals = [Al, Ru] -> O_a ↔ Al (oxide_only: only 1), O_b ↔ Ru (metal_only: only 0).
     assert _allowed_values(env, "O_a") == {"1.00"}
     _pick(env, "O_a", "1.00")
@@ -245,8 +227,8 @@ def test_categorical_filter_sees_prior_groups():
             captured.append(prior_groups)
             return actions
 
-    p = {"name": "P_site", "species_set": ["Mn"], "host": "P",
-         "amount": {"min": 0.05, "max": 0.05, "step": 0.01}, "sites": 1}
+    p = {"name": "P_site", "kind": "composition", "species_set": ["Mn", "P"],
+         "n_components": 2, "fraction_set": ["0.05", "0.95"]}
     s = {"name": "S_site", "kind": "categorical", "sites": 6,
          "choices": [{"element": "Cl", "values": [0.6, 1.0]}],
          "constraint_filter": Rec()}
@@ -268,14 +250,14 @@ def test_categorical_filter_sees_prior_groups():
 # --------------------------------------------------------------------------- #
 
 def test_two_decimal_grids_are_unchanged_character_for_character():
-    from rl_matdesign.env_multigroup import _amounts_to_strs
-    from rl_matdesign.env import _decimals_of, _format_fraction
+    from rl_matdesign.env import expand_fraction_set, derive_total_units, _decimals_of, _format_fraction
 
-    codes, step, dec = _amounts_to_strs({"min": 0.05, "max": 0.20, "step": 0.05})
-    assert codes == ["0.05", "0.10", "0.15", "0.20"] and dec == 2
-    codes, _s, dec = _amounts_to_strs({"min": 0.0, "max": 0.03, "step": 0.01})
-    assert codes == ["0.00", "0.01", "0.02", "0.03"] and dec == 2
-    assert _amounts_to_strs([0.0, 0.02, 0.08])[0] == ["0.00", "0.02", "0.08"]
+    codes = expand_fraction_set({"min": 0.05, "max": 0.20, "step": 0.05})
+    assert codes == ["0.05", "0.10", "0.15", "0.20"]
+    assert derive_total_units(codes) == 20
+    codes = expand_fraction_set({"min": 0.0, "max": 0.03, "step": 0.01})
+    assert codes == ["0.00", "0.01", "0.02", "0.03"]
+    assert expand_fraction_set([0.0, 0.02, 0.08]) == ["0.00", "0.02", "0.08"]
     # the historical call signature and result
     assert _format_fraction(1, 20) == "0.05"
     assert _format_fraction(1, 100) == "0.01"
@@ -284,28 +266,15 @@ def test_two_decimal_grids_are_unchanged_character_for_character():
 
 
 def test_eighth_grid_keeps_full_precision():
-    from rl_matdesign.env_multigroup import _amounts_to_strs
-    from rl_matdesign.env import _decimals_of, _format_fraction
+    from rl_matdesign.env import expand_fraction_set, derive_total_units, _decimals_of, _format_fraction
 
-    codes, step, dec = _amounts_to_strs({"min": 0.0, "max": 1.0, "step": 0.125})
-    assert dec == 3 and step == 0.125
+    codes = expand_fraction_set({"min": 0.0, "max": 1.0, "step": 0.125})
     assert codes == ["0.000", "0.125", "0.250", "0.375",
                      "0.500", "0.625", "0.750", "0.875", "1.000"]
+    assert derive_total_units(codes) == 8
     assert _decimals_of(codes) == 3
     assert _format_fraction(1, 8, 3) == "0.125"       # was "0.12"
     assert _format_fraction(3, 8, 3) == "0.375"       # was "0.38"
-
-
-def test_host_complement_pairs_sum_to_exactly_one_on_an_eighth_grid():
-    from rl_matdesign.env_multigroup import normalize_group_spec
-
-    g = normalize_group_spec({"name": "g", "kind": "composition",
-                              "species_set": ["Rb", "Cs"], "host": "Cs",
-                              "amount": {"min": 0.0, "max": 1.0, "step": 0.125}})
-    fs = g["fraction_set"]
-    half = len(fs) // 2
-    for dopant, complement in zip(fs[:half], fs[half:]):
-        assert float(dopant) + float(complement) == 1.0
 
 
 def test_full_multigroup_episode_on_an_eighth_grid():
@@ -314,7 +283,7 @@ def test_full_multigroup_episode_on_an_eighth_grid():
     Drives a real 4-group, 13-step episode on the 0.125 grid — the shape the
     Cs2AgBiCl6 configs use. Before the fix this raised
     ``ValueError: Unknown choice '0.12'`` on the very first step, so a partial fix
-    (touching _amounts_to_strs but not _format_fraction) fails right here.
+    (touching expand_fraction_set but not _format_fraction) fails right here.
     """
     import random
     from rl_matdesign.env_multigroup import MultiGroupEnv, normalize_group_spec
@@ -332,8 +301,7 @@ def test_full_multigroup_episode_on_an_eighth_grid():
          "species_set": ["Cl", "Br", "I"], "n_components": 3},
     ]
     for s in specs:
-        s.update(episode_style="fixed_order_amount", total_units=8,
-                 fraction_set=list(eighths))
+        s.update(episode_style="fixed_order_amount", fraction_set=list(eighths))
     env = MultiGroupEnv(groups=[normalize_group_spec(s) for s in specs],
                         reward_fn=lambda groups: 0.0)
 
@@ -355,25 +323,3 @@ def test_full_multigroup_episode_on_an_eighth_grid():
             # integer atom counts.
             assert sum(picks.values()) == 1.0, (group, picks)
             assert all(round(v * 8) == v * 8 for v in picks.values())
-
-
-def test_shipped_amount_configs_still_use_two_decimal_codes():
-    import glob
-    import yaml
-    from rl_matdesign.env_multigroup import _amounts_to_strs
-
-    root = os.path.join(os.path.dirname(__file__), "..", "configs")
-    checked = 0
-    for path in sorted(glob.glob(os.path.join(root, "*.yaml"))):
-        with open(path) as f:
-            cfg = yaml.safe_load(f)
-        if not isinstance(cfg, dict):
-            continue
-        for group in cfg.get("groups") or []:
-            amount = group.get("amount")
-            if amount is None:
-                continue
-            codes, _step, dec = _amounts_to_strs(amount)
-            assert dec == 2, (path, group.get("name"), codes)
-            checked += 1
-    assert checked > 0, "no shipped config exercises the amount: shorthand"

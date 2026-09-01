@@ -238,10 +238,10 @@ def test_last_position_pin_detected_inside_chain_filter():
 
     chain = resolve_constraint("chain", {
         "filters": [
-            {"constraint_filter": "last_step_element",
+            {"type": "last_step_element",
              "required_elements": ["O"],
              "reserve_for_last": True},
-            {"constraint_filter": "smact_charge",
+            {"type": "smact_charge",
              "smact_anions": [{"symbol": "O", "charge": -2, "stoich": 1.5}]},
         ],
     }, env=None)

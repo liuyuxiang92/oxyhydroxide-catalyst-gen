@@ -16,93 +16,95 @@
 
 
 # ---- Environment ----
-env_type: integer_ratio
+groups:
+  - name: oxide
+    kind: integer
 
 # 80-element set from RL_materials_generation/one_hot.py:18
 # (intersection of OQMD-formation-energy and RF-sintering-T training sets).
-species_set:
-  - O
-  - Te
-  - N
-  - B
-  - Tm
-  - Ga
-  - Hf
-  - Ca
-  - Al
-  - P
-  - Li
-  - S
-  - Cr
-  - Zr
-  - Ta
-  - Sn
-  - Au
-  - Hg
-  - Cd
-  - Mn
-  - Cs
-  - Pd
-  - Th
-  - K
-  - Ti
-  - Ag
-  - Zn
-  - W
-  - Ce
-  - Nd
-  - Sr
-  - Tl
-  - Cl
-  - Mg
-  - Pr
-  - Rb
-  - Pb
-  - Ru
-  - Ho
-  - Nb
-  - Mo
-  - C
-  - V
-  - Er
-  - Pt
-  - Fe
-  - Ir
-  - Sb
-  - Y
-  - Na
-  - Co
-  - Be
-  - In
-  - La
-  - U
-  - Pu
-  - As
-  - Sm
-  - Br
-  - Ni
-  - Eu
-  - Ba
-  - F
-  - Rh
-  - Yb
-  - Gd
-  - Os
-  - Lu
-  - Ge
-  - Cu
-  - H
-  - Sc
-  - Si
-  - Re
-  - Dy
-  - Bi
-  - Tb
-  - Se
+    species_set:
+    - O
+    - Te
+    - N
+    - B
+    - Tm
+    - Ga
+    - Hf
+    - Ca
+    - Al
+    - P
+    - Li
+    - S
+    - Cr
+    - Zr
+    - Ta
+    - Sn
+    - Au
+    - Hg
+    - Cd
+    - Mn
+    - Cs
+    - Pd
+    - Th
+    - K
+    - Ti
+    - Ag
+    - Zn
+    - W
+    - Ce
+    - Nd
+    - Sr
+    - Tl
+    - Cl
+    - Mg
+    - Pr
+    - Rb
+    - Pb
+    - Ru
+    - Ho
+    - Nb
+    - Mo
+    - C
+    - V
+    - Er
+    - Pt
+    - Fe
+    - Ir
+    - Sb
+    - Y
+    - Na
+    - Co
+    - Be
+    - In
+    - La
+    - U
+    - Pu
+    - As
+    - Sm
+    - Br
+    - Ni
+    - Eu
+    - Ba
+    - F
+    - Rh
+    - Yb
+    - Gd
+    - Os
+    - Lu
+    - Ge
+    - Cu
+    - H
+    - Sc
+    - Si
+    - Re
+    - Dy
+    - Bi
+    - Tb
+    - Se
 
-ratio_set: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
-anion_formula: ""
-n_components: 5
+    ratio_set: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+    anion_formula: ""
+    n_components: 5
 
 # Two stacked constraints (applied in list order at every step):
 #   1. last_step_element — force step 5 = O with a nonzero digit; reserve O
@@ -119,16 +121,16 @@ n_components: 5
 #
 # Two filters in a list -> auto-chained in list order; no need to write
 # `constraint_filter: chain` (single-vs-chain is detected from `filters:`).
-filters:
-  - constraint_filter: last_step_element
-    required_elements: ["O"]
-    nonzero_ratio_at_last: true
-    reserve_for_last: true
-  - constraint_filter: smact_charge
+    filters:
+      - type: last_step_element
+        required_elements: ["O"]
+        nonzero_ratio_at_last: true
+        reserve_for_last: true
+      - type: smact_charge
   # 3. pauling_en — charge neutrality AND Pauling electronegativity (smact).
   #    Separate on/off flag: delete this line to drop the EN check (neutrality
   #    via smact_charge stays). pauling_en is strictly stronger than smact_charge.
-  - constraint_filter: pauling_en
+      - type: pauling_en
 
 # Apply in-episode constraint filters during TRAINING (default true = current
 # behavior). Set false (or use --no-constrain-training) to skip them while

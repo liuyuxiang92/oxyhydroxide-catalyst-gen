@@ -9,20 +9,23 @@ YAML configuration
 ------------------
 .. code-block:: yaml
 
-    constraint_filter: chain
     filters:
-      - constraint_filter: last_step_element        # cheap rule first
+      - type: last_step_element        # cheap rule first
         required_elements: ["O"]
         nonzero_ratio_at_last: true
         reserve_for_last: true
-      - constraint_filter: smact_charge             # expensive rule second
+      - type: smact_charge             # expensive rule second
         smact_anions:
           - {symbol: O, charge: -2, stoich: 3.0}
+      - pauling_en                     # bare string == {type: pauling_en}
 
 Each entry under ``filters:`` is a self-contained sub-config carrying its
-own ``constraint_filter:`` key plus whatever kwargs that child filter
-needs. The chain runs filters in list order; each filter's output feeds the
-next filter's input.
+own ``type:`` key plus whatever kwargs that child filter needs, or a bare
+string as shorthand for a parameter-free filter (``{type: <string>}``). The
+chain runs filters in list order; each filter's output feeds the next
+filter's input. You never write ``type: chain`` yourself — a non-empty
+``filters:`` list is auto-detected and auto-chained (see
+:func:`~rl_matdesign.registry.build_constraints`).
 
 Children are resolved through the same :func:`resolve_constraint` used at
 the top level, so any combination of built-in short names and user FQN
@@ -59,32 +62,45 @@ class ChainConstraintFilter(ConstraintFilter):
         if not children_cfgs:
             raise ValueError(
                 "ChainConstraintFilter requires a non-empty 'filters' list. "
-                "Example: filters: [{constraint_filter: smact_charge, ...}, "
-                "{constraint_filter: last_step_element, ...}]"
+                "Example: filters: [{type: smact_charge, ...}, "
+                "{type: last_step_element, ...}]"
             )
         if not isinstance(children_cfgs, list):
             raise ValueError(
-                f"'filters' must be a list of dicts, got "
+                f"'filters' must be a list of dicts (or bare strings), got "
                 f"{type(children_cfgs).__name__}."
             )
 
+        # Context shared with every child: the enclosing group/config's own
+        # keys (e.g. a categorical group's `choices`), minus `filters` itself.
+        # A handful of filters (e.g. sse_doping) auto-discover their setup from
+        # the *enclosing group*, not from params repeated on every entry — under
+        # the old singular `constraint_filter: <name>` spelling they received
+        # the group spec directly, so chaining must not silently take that
+        # context away. Each child's own keys still win on conflict.
+        parent_context = {k: v for k, v in cfg.items() if k != "filters"}
+
         self.children: List[ConstraintFilter] = []
         for i, sub in enumerate(children_cfgs):
-            if not isinstance(sub, dict):
+            if isinstance(sub, str):
+                sub_kind, sub_cfg = sub, dict(parent_context)
+            elif isinstance(sub, dict):
+                sub_cfg = {**parent_context, **sub}
+                sub_kind = sub_cfg.pop("type", None)
+                if not sub_kind:
+                    raise ValueError(
+                        f"filters[{i}] is missing 'type' "
+                        "(short name or 'pkg.module:ClassName' FQN)."
+                    )
+            else:
                 raise ValueError(
-                    f"filters[{i}] must be a dict, got {type(sub).__name__}."
-                )
-            sub_cfg = dict(sub)
-            sub_kind = sub_cfg.pop("constraint_filter", None)
-            if not sub_kind:
-                raise ValueError(
-                    f"filters[{i}] is missing 'constraint_filter' "
-                    "(short name or 'pkg.module:ClassName' FQN)."
+                    f"filters[{i}] must be a dict or a bare string, got "
+                    f"{type(sub).__name__}."
                 )
             child = resolve_constraint(sub_kind, sub_cfg, env=env)
             if child is None:
                 raise ValueError(
-                    f"filters[{i}].constraint_filter={sub_kind!r} resolved "
+                    f"filters[{i}].type={sub_kind!r} resolved "
                     "to None — expected a ConstraintFilter instance."
                 )
             self.children.append(child)

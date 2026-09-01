@@ -1,9 +1,12 @@
 # Doped Li6PS6 solid-state electrolyte — a plain, friendly multi_group config.
 #
 # Two sublattice groups:
-#   P_site (independent) — pick TWO dopant metals from the same menu (repeats
-#                          allowed; the same element merges into one fraction);
-#                          host P takes the rest.
+#   P_site (composition) — P plus up to two dopant metals from the same menu,
+#                          on a fraction_set that is the explicit UNION of the
+#                          dopant grid and the P-complement grid; element_bounds
+#                          pins P into [0.92, 0.98], which is algebraically
+#                          equivalent to the old "combined dopant fraction in
+#                          [0.02, 0.08]" sum-budget (0.02 <= 1-x_P <= 0.08).
 #   S_site (categorical) — a per-metal oxygen FORM (0 = metal/sulfide, 1 = oxide,
 #                          each masked by its metal's category) + the Cl count.
 # Br = halide_total - Cl and the charge-neutral Li vacancy are derived by the
@@ -12,23 +15,23 @@
 #   python scripts/run_experiment.py --config configs/lips_sse.yaml \
 #       --method a2c --out runs/lips_a2c_s0 --train-seed 0 --dp-seed 0 --gen-seed 0
 
-env_type: multi_group
-
 groups:
-  - name: P_site                      # independent: TWO dopant metals + host P
-    kind: independent                 # K independent (metal, amount) picks; repeats allowed
+  - name: P_site
+    kind: composition
     species_set:
-      [Mn, Ni, Cu, Zn, Mo, In, Sn, Sb, W, Ru, Tm, Yb,
+      [P, Mn, Ni, Cu, Zn, Mo, In, Sn, Sb, W, Ru, Tm, Yb,
        Mg, Al, Si, Sc, Ti, V, Cr, Fe, Co, Ga, Ge, Y, Zr, Nb, Hf, Ta, Ho, Er, Lu]
-    host: P
     sites: 1
-    n_dopants: 2                      # pick the metal twice; same element merges (sums)
-    # Per-pick grid: a dopant is either ABSENT (0.0) or present at >=0.02; the
-    # 0.01 rung is deliberately omitted (no "trace" single-percent dopant). With
-    # 0.0 available, picking it on one slot collapses to a single real dopant.
-    amount: [0.0, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08]   # fraction of P replaced, per pick
-    constraint_filter: sum_bound      # cap the COMBINED two-metal doping (next line)
-    sum_amount: {min: 0.02, max: 0.08}   # both dopants together: 0.02–0.08 of P replaced
+    n_components: 3                   # 2 dopant slots + 1 mandatory P slot
+    # Explicit UNION grid (not a densified 0.00-1.00 grid): the dopant range
+    # 0.02-0.08 (0.01 rung deliberately omitted -- no "trace" single-percent
+    # dopant) union the P-complement range 0.92-0.98, plus 0.00 so an unused
+    # dopant slot can be absent.
+    fraction_set:
+      [0.00, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08,
+       0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98]
+    element_bounds:
+      P: [0.92, 0.98]                 # mandatory (lo > 0) + caps P's range
 
   - name: S_site                      # categorical: per-metal O form + Cl count (real values)
     kind: categorical
@@ -37,11 +40,12 @@ groups:
       - {name: O_a, element: O, values: [0, 1]}       # O-form for dopant metal #1 (sorted)
       - {name: O_b, element: O, values: [0, 1]}       # O-form for dopant metal #2 (sorted)
       - {element: Cl, values: [0.6, 0.8, 1.0, 1.2, 1.4]}   # Cl atoms per formula unit
-    constraint_filter: sse_doping
-    o_element: O
-    metal_only: [Ru]                                  # never take oxygen
-    oxide_only: [Mg, Al, Si, Sc, Ti, V, Cr, Fe, Co, Ga, Ge, Y, Zr, Nb, Hf, Ta, Ho, Er, Lu]
-    # "both" (decide O or not) = every other metal: Mn Ni Cu Zn Mo In Sn Sb W Tm Yb
+    filters:
+      - type: sse_doping
+        o_element: O
+        metal_only: [Ru]                                  # never take oxygen
+        oxide_only: [Mg, Al, Si, Sc, Ti, V, Cr, Fe, Co, Ga, Ge, Y, Zr, Nb, Hf, Ta, Ho, Er, Lu]
+        # "both" (decide O or not) = every other metal: Mn Ni Cu Zn Mo In Sn Sb W Tm Yb
 
 # ---- Reward: build once -> relax once -> conductivity + stability (two objectives) ----
 # share_structure: true (default) = one relaxed cell, scored by both property heads.

@@ -1,9 +1,12 @@
 # Test config using dummy predictor (no ASE/DeepMD required)
-species_set: [Co, Cr, Fe, Mn, Ni, Al, Ti, Cu, V, Mo]
+groups:
+  - name: alloy
+    kind: composition
+    species_set: [Co, Cr, Fe, Mn, Ni, Al, Ti, Cu, V, Mo]
+    fraction_set: {min: 0.05, max: 0.80, step: 0.05}   # was the env's implicit default grid
+    n_components: 5
 anion_formula: ""
-n_components: 5
 predictor: dummy
-constraint_filter: null
 pg_warmup_eps: 20
 pg_num_iters: 10
 pg_batch_eps: 5

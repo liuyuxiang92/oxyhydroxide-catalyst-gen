@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import random
 import re
-from typing import Callable, Dict, List, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -144,6 +144,16 @@ class IntegerRatioEnv:
             out[el] = out.get(el, 0) + int(d)
         return out
 
+    def cation_fractions(self) -> Dict[str, int]:
+        """Raw per-element digit sums (atom counts, not normalised fractions).
+
+        Named to match the uniform inner-group interface :class:`MultiGroupEnv`
+        drives (see :meth:`~rl_matdesign.env.CompositionEnv.cation_fractions`);
+        unlike that sibling, integer digits already *are* atom counts, so there
+        is nothing to normalise.
+        """
+        return self.cation_digits()
+
     def terminal_cation_fractions(self) -> Dict[str, float]:
         """Normalised fractional composition at the terminal step.
 
@@ -189,7 +199,16 @@ class IntegerRatioEnv:
     # Action space
     # ------------------------------------------------------------------
 
-    def allowed_actions(self) -> List[Tuple[Tuple[float, ...], Tuple[float, ...]]]:
+    def allowed_actions(
+        self, *, prior_groups: Optional[List[Dict[str, float]]] = None
+    ) -> List[Tuple[Tuple[float, ...], Tuple[float, ...]]]:
+        """Return all (elem_onehot, digit_onehot) action pairs.
+
+        ``prior_groups`` is forwarded to the constraint filter for cross-group
+        coupling under :class:`MultiGroupEnv`; it is ``None`` (and ignored) for
+        standalone single-env use, so existing callers are unaffected — mirrors
+        :meth:`~rl_matdesign.env.CompositionEnv.allowed_actions`.
+        """
         if self.counter >= self.n_components:
             return []
 
@@ -201,7 +220,7 @@ class IntegerRatioEnv:
                 actions.append((elem_oh, comp_oh))
 
         if self.phase_filter is not None and self.constraints_enabled:
-            actions = self.phase_filter.filter_actions(
+            kw = dict(
                 actions=actions,
                 units_map=self._digits_map,
                 steps_left=self.n_components - self.counter - 1,
@@ -210,6 +229,9 @@ class IntegerRatioEnv:
                 species_set=self.species_set,
                 fraction_set=self.ratio_set,
             )
+            if prior_groups is not None:
+                kw["prior_groups"] = prior_groups
+            actions = self.phase_filter.filter_actions(**kw)
         return actions
 
     def sample_random_action(self) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:

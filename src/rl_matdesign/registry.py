@@ -2,8 +2,8 @@
 
 Two extension paths:
 
-1. **Short name** — `predictor: ooh` or `constraint_filter: smact_charge` in
-   YAML resolves to a built-in factory registered in :data:`PREDICTORS` /
+1. **Short name** — `predictor: ooh` or a `filters:` entry `type: smact_charge`
+   in YAML resolves to a built-in factory registered in :data:`PREDICTORS` /
    :data:`CONSTRAINTS`.
 
 2. **Fully-qualified name** — `predictor: "my_pkg.my_mod:MyClass"` loads
@@ -202,22 +202,22 @@ def _make_pauling_en(cfg: dict, **_):
 
 
 def _cfg_names_constraint(cfg: dict, name: str) -> bool:
-    """True if *cfg* itself (flat or chained) configures constraint ``name``."""
-    if cfg.get("constraint_filter") == name:
-        return True
-    return any(
-        isinstance(f, dict) and f.get("constraint_filter") == name
-        for f in cfg.get("filters") or []
-    )
+    """True if *cfg*'s ``filters:`` list configures constraint ``name``."""
+    for f in cfg.get("filters") or []:
+        if isinstance(f, str) and f == name:
+            return True
+        if isinstance(f, dict) and f.get("type") == name:
+            return True
+    return False
 
 
 def _has_constraint(cfg: dict, name: str) -> bool:
     if _cfg_names_constraint(cfg, name):
         return True
     # multi_group configs attach constraints per-group (cfg["groups"][i]), not
-    # top-level — build_env resolves each group's own constraint_filter/filters
-    # independently (see build_env's multi_group branch). Scan those too, so
-    # e.g. a smact_charge attached only to a perovskite's B_site group is still
+    # top-level — build_env resolves each group's own filters independently
+    # (see build_env's multi_group branch). Scan those too, so e.g. a
+    # smact_charge attached only to a perovskite's B_site group is still
     # detected by the post-episode generate_candidates drop below.
     for g in cfg.get("groups") or []:
         if isinstance(g, dict) and _cfg_names_constraint(g, name):
@@ -265,7 +265,7 @@ def _make_phase_pattern(cfg: dict, **_):
 def _make_ooh_phase(cfg: dict, *, env=None, **_):
     if env is None:
         raise ValueError(
-            "constraint_filter 'ooh_phase' requires env (needs _allowed_units "
+            "filter type 'ooh_phase' requires env (needs _allowed_units "
             "and _possible_sums_by_k). Build the env without a filter first, "
             "then call resolve_constraint(..., env=env)."
         )
@@ -288,16 +288,6 @@ def _make_sse_doping(cfg: dict, *, env=None, **_):
     return SSEDopingFilter(cfg, env=env)
 
 
-def _make_host_complement(cfg: dict, *, env=None, **_):
-    from .constraints.host_complement import HostComplementFilter
-    return HostComplementFilter(cfg, env=env)
-
-
-def _make_sum_bound(cfg: dict, *, env=None, **_):
-    from .constraints.sum_bound import IndependentSumBoundFilter
-    return IndependentSumBoundFilter(cfg, env=env)
-
-
 CONSTRAINTS: Dict[str, Factory] = {
     "smact_charge":      _make_smact_charge,
     "pauling_en":        _make_pauling_en,
@@ -306,8 +296,6 @@ CONSTRAINTS: Dict[str, Factory] = {
     "phase_pattern":     _make_phase_pattern,
     "chain":             _make_chain,
     "sse_doping":        _make_sse_doping,
-    "host_complement":   _make_host_complement,
-    "sum_bound":         _make_sum_bound,
 }
 
 
@@ -388,7 +376,7 @@ def resolve_constraint(kind: Optional[str], cfg: dict, *, env=None):
     factory = CONSTRAINTS.get(kind)
     if factory is None:
         raise ValueError(
-            f"Unknown constraint_filter {kind!r}. "
+            f"Unknown filter type {kind!r}. "
             f"Built-ins: {sorted(CONSTRAINTS)}. "
             f"For a custom filter, use the FQN form: 'pkg.module:ClassName'."
         )
@@ -396,19 +384,16 @@ def resolve_constraint(kind: Optional[str], cfg: dict, *, env=None):
 
 
 def build_constraints(cfg: dict, *, env=None):
-    """Build the constraint filter for a config, auto-detecting chaining.
+    """Build the constraint filter for a config from its ``filters:`` list.
 
-    Mirrors :func:`build_reward`: routing is by the *shape* of the config, so a
-    user with several constraints never has to name ``chain`` explicitly.
-
-    * ``filters:`` is a non-empty list -> wrap them in a
-      :class:`ChainConstraintFilter`, applied in list order. A single-entry list
-      is fine too (it just runs that one filter, with the chain's safety
-      fallback). You do **not** write ``constraint_filter: chain``.
-    * otherwise -> the flat ``constraint_filter:`` (short name or FQN), or
-      ``None`` when neither key is present.
+    Mirrors :func:`build_reward`: a non-empty ``filters:`` list is wrapped in a
+    :class:`ChainConstraintFilter`, applied in list order — a single-entry list
+    is fine too (it just runs that one filter, with the chain's safety
+    fallback), so ``filters:`` is the only public spelling; you never write
+    ``type: chain`` yourself. Returns ``None`` when ``filters:`` is absent or
+    empty.
     """
     filters = cfg.get("filters")
     if isinstance(filters, list) and filters:
         return _make_chain(cfg, env=env)
-    return resolve_constraint(cfg.get("constraint_filter"), cfg, env=env)
+    return None

@@ -1,31 +1,38 @@
 """DefectSiteBuilder — A/B-site substitution doping plus a signed A-site defect axis.
 
 Pure structure construction, no physics: turns the structured ``MultiGroupEnv``
-candidate produced by an ``independent``-kind A/B dopant group plus one
-``categorical`` defect group into a doped, optionally defected ``ase.Atoms``.
+candidate produced by a ``composition``-kind A/B dopant group (host species
+included explicitly in ``species_set``) plus one ``categorical`` defect group
+into a doped, optionally defected ``ase.Atoms``.
 
 Candidate shape expected (group names are configurable, defaults match the
 perovskite Level-2 scenario)::
 
     {
-      "A_dopant": {"Ca": 0.09375, "Ba": 0.03125},   # 0-2 keys (repeats merge)
-      "A_defect": {"defect": "Sr_-0.09375"},          # "<species>_<signed amount>"
-      "B_dopant": {"Mn": 0.0625, "Co": 0.03125},
+      "A_dopant": {"Sr": 0.21875, "Ca": 0.5, "Ba": 0.28125},   # sums to 1.0; Sr is the host
+      "A_defect": {"defect": "Sr_-0.09375"},                    # "<species>_<signed amount>"
+      "B_dopant": {"Fe": 0.5, "Mn": 0.34375, "Co": 0.15625},
     }
 
 The defect pick is a SINGLE step: one categorical slot whose values are
 flattened ``"<species>_<signed amount>"`` labels (e.g. ``Ca_0.03125``), so
 choosing which species AND how much/which sign happens in one action — the
 same "one pick, one step" shape ``A_dopant``/``B_dopant`` have, just via a
-different group kind (see "Why categorical, not independent" below).
+different group kind (see "Why categorical, not composition" below).
 
 Decoding
 --------
 1. A/B dopant fractions -> integer atom counts on the A-/B-site sublattice
-   (``round(fraction * n_sites)``, clamped so the combined dopant count never
-   exceeds the sublattice size — two independent picks can in principle land
-   above 100% between them; this is a rare edge case, so the clamp just scales
-   counts down proportionally and prints a warning rather than raising).
+   (``round(fraction * n_sites)``). The host species (``a_site_symbol`` /
+   ``b_site_symbol``) is excluded from the ``put`` counts even though it is
+   now an explicit key in the candidate dict — the template's sublattice
+   atoms already ARE that element, so "putting" it back is a no-op that would
+   otherwise double-count against the vacancy math below. Because the group
+   is a single sum-to-1 ``composition`` pick, the non-host counts can never
+   exceed ``n_sites`` combined (a structural guarantee, not a runtime check),
+   unlike the old ``independent``-kind group which needed a defensive
+   proportional-scale-down clamp for a combined pick that overshot 100%; that
+   clamp is kept as a harmless safety net but should no longer trigger.
 2. The defect pick is *signed*: negative -> vacancy of ``defect_species``,
    positive -> interstitial of ``defect_species`` (new atoms, not tied to any
    existing site — see :func:`rl_matdesign.utils.structure.build_substituted_structure`'s
@@ -39,27 +46,27 @@ Decoding
    warning) so an infeasible pick never crashes a training episode.
 3. ``build_substituted_structure`` is called once with the combined ops.
 
-Why categorical, not independent
----------------------------------
-``A_dopant``/``B_dopant`` use ``kind: independent`` (``IndependentDopantsGroup``),
-which *also* has a built-in joint element+amount pick (its action space is the
-full ``species_set x fraction_set`` cross product). The defect axis does NOT
-reuse that mechanism, because ``IndependentDopantsGroup.terminal_comp_key()``
-computes ``units = round(fraction * total_units)`` and keeps the entry only if
-``units > 0`` — a NEGATIVE fraction (a vacancy pick) would be silently dropped
-from the dedup key used by ``generated.csv``, letting two structurally
-different vacancy candidates collapse into the same key. ``CategoricalGroup``'s
-own ``terminal_comp_key()`` has no such filter (it just stores ``str(value)``),
-so encoding the signed pick as an opaque compound label in a categorical slot
-sidesteps that bug entirely.
+Why categorical, not composition
+----------------------------------
+``A_dopant``/``B_dopant`` use ``kind: composition``, which *also* has a
+built-in joint element+amount pick (its action space is the
+``species_set x fraction_set`` cross product, one distinct species per step).
+The defect axis does NOT reuse that mechanism, because a composition group
+enforces fractions that sum to 1.0 and drops zero-fraction entries from its
+dedup key — a NEGATIVE fraction (a vacancy pick) doesn't fit that "amounts of
+a whole" model at all. ``CategoricalGroup``'s ``terminal_comp_key()`` has no
+such assumption (it just stores ``str(value)``), so encoding the signed pick
+as an opaque compound label in a categorical slot sidesteps that mismatch
+entirely.
 
 Config keys
 -----------
     base_poscar (or legacy ``poscar`` / ``poscar_template``): template path.
     a_site_symbol / b_site_symbol (default ``Sr`` / ``Fe``): placeholder element
-        for the A-/B-site sublattice in the template.
+        for the A-/B-site sublattice in the template. Must also be the host
+        entry in the corresponding group's ``species_set``.
     a_dopant_group / b_dopant_group (default ``A_dopant`` / ``B_dopant``): the
-        candidate keys holding the ``independent``-kind dopant picks.
+        candidate keys holding the ``composition``-kind dopant+host picks.
     a_defect_group (default ``A_defect``): the candidate key holding the single
         combined ``"<species>_<signed amount>"`` categorical pick.
     interstitial_min_dist (default 1.5 Å): passed through to the new atoms'
@@ -139,13 +146,20 @@ class DefectSiteBuilder:
 
     def composition_formula(self, candidate: Dict[str, Dict[str, Any]]) -> str:
         """Display-only label reflecting what was ACTUALLY built, not the raw
-        candidate picks. Two independent dopant picks landing on the same element
-        can sum past 1.0 (e.g. Ca=0.65625 + Ca=0.65625 = 1.3125) -- physically
-        impossible as a site fraction, so `_resolve_ops` (the same call `build()`
-        makes) clamps it before this ever gets here. Showing the raw candidate
-        value instead would print e.g. "Ca1.31" while the structure that was
-        actually built, MD'd and scored was fully-substituted (Ca1.00) -- a real
-        bug this repo hit in practice, not a hypothetical.
+        candidate picks -- routes through the same ``_resolve_ops`` decoding
+        ``build()`` uses (host excluded from dopant counts, vacancy/interstitial
+        folded in), so the label can never drift from the real structure. With
+        the old ``independent``-kind dopant group, two picks landing on the same
+        element could sum past 1.0 (e.g. Ca=0.65625 + Ca=0.65625 = 1.3125) --
+        physically impossible as a site fraction, silently clamped by
+        `_resolve_ops` -- so the raw candidate value could print e.g. "Ca1.31"
+        while the structure that was actually built, MD'd and scored was
+        fully-substituted (Ca1.00), a real bug this repo hit in practice. The
+        current ``composition``-kind dopant group makes that overshoot
+        structurally impossible (one sum-to-1 pick), but this still routes
+        through ``_resolve_ops`` rather than the raw candidate for the same
+        reason: the displayed label must reflect what was built, not what was
+        requested.
         """
         from ase.io import read as ase_read
 
@@ -178,8 +192,12 @@ class DefectSiteBuilder:
         the real structure (see ``composition_formula``'s docstring for why that
         matters: it already happened once).
         """
-        a_counts = self._dopant_counts(candidate.get(self.a_group) or {}, n_a, "A-site")
-        b_counts = self._dopant_counts(candidate.get(self.b_group) or {}, n_b, "B-site")
+        a_counts = self._dopant_counts(
+            candidate.get(self.a_group) or {}, n_a, "A-site", host=self.a_site_symbol
+        )
+        b_counts = self._dopant_counts(
+            candidate.get(self.b_group) or {}, n_b, "B-site", host=self.b_site_symbol
+        )
 
         defect_species, defect_amount = self._decode_defect(candidate)
         a_remove = 0
@@ -217,17 +235,22 @@ class DefectSiteBuilder:
         return species, float(amount_str)
 
     @staticmethod
-    def _dopant_counts(fractions: Dict[str, Any], n_sites: int, label: str) -> Dict[str, int]:
-        """``{element: fraction}`` (need not sum to 1 — unpicked remainder is host)
-        -> ``{element: integer atom count}``, clamped so the total never exceeds
-        ``n_sites``. Two independent dopant picks can in principle land above 100%
-        combined; that's scaled down proportionally (with a warning) rather than
-        raising, so an unlucky pick never crashes a training episode.
+    def _dopant_counts(
+        fractions: Dict[str, Any], n_sites: int, label: str, *, host: str
+    ) -> Dict[str, int]:
+        """``{element: fraction}`` (sums to 1 including ``host``'s own fraction)
+        -> ``{dopant_element: integer atom count}``, excluding ``host`` -- the
+        template's sublattice atoms already ARE the host element, so there is
+        nothing to "put" for it; only non-host entries become substitution
+        counts. Clamped so the total never exceeds ``n_sites``: this is now a
+        structural guarantee for a single sum-to-1 ``composition`` pick (dopant
+        fractions alone can never exceed ``1 - host_fraction <= 1``), kept as a
+        defensive no-op fallback for any other caller shape.
         """
         counts = {
             str(el): int(round(float(f) * n_sites))
             for el, f in fractions.items()
-            if float(f) > 0
+            if el != host and float(f) > 0
         }
         total = sum(counts.values())
         if total > n_sites:
