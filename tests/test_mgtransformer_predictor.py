@@ -76,12 +76,27 @@ def _fake_mgt_repo(tmp_path, src=_FAKE_SERVE_SRC):
     return str(tmp_path)
 
 
+def _touch_ckpt(repo, rel_path):
+    """Create a stand-in checkpoint inside *repo* so the path check passes.
+
+    A relative `model` is resolved against mgt_repo (that is the cwd serve.py runs
+    in), so the file has to exist there rather than next to the config.
+    """
+    path = os.path.join(repo, rel_path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(b"")
+    return path
+
+
 def _base_cfg(tmp_path, **over):
-    cfg = {
-        "mgt_repo": _fake_mgt_repo(tmp_path),
-        "mgt_python": sys.executable,
-        "model": "ckpt/finetuned/formation_energy_peratom/formation_energy_peratom_checkpoint_best.pt",
-    }
+    repo = _fake_mgt_repo(tmp_path)
+    model = over.pop(
+        "model",
+        "ckpt/finetuned/formation_energy_peratom/formation_energy_peratom_checkpoint_best.pt",
+    )
+    _touch_ckpt(repo, model)
+    cfg = {"mgt_repo": repo, "mgt_python": sys.executable, "model": model}
     cfg.update(over)
     return cfg
 
@@ -129,11 +144,10 @@ def test_crashed_subprocess_reports_real_returncode_not_none(tmp_path):
     # (e.g. a missing dependency in mgt_python's env, ModuleNotFoundError)
     # used to report "returncode=None" because poll() raced the child's
     # teardown -- wait() must be used so the real exit code is reported.
-    cfg = {
-        "mgt_repo": _fake_mgt_repo(tmp_path, src=_FAKE_SERVE_CRASH_SRC),
-        "mgt_python": sys.executable,
-        "model": "ckpt/finetuned/formation_energy_peratom/formation_energy_peratom_checkpoint_best.pt",
-    }
+    repo = _fake_mgt_repo(tmp_path, src=_FAKE_SERVE_CRASH_SRC)
+    model = "ckpt/finetuned/formation_energy_peratom/formation_energy_peratom_checkpoint_best.pt"
+    _touch_ckpt(repo, model)
+    cfg = {"mgt_repo": repo, "mgt_python": sys.executable, "model": model}
     with pytest.raises(RuntimeError) as info:
         MGTransformerPredictor(cfg)
     msg = str(info.value)
@@ -208,12 +222,37 @@ def test_forwards_graph_kwargs_to_serve_subprocess(tmp_path):
 def test_model_path_is_forwarded_as_ckpt(tmp_path):
     # The bridge points serve.py at a checkpoint PATH rather than naming a target;
     # MGTransformer derives the target (and its calibration entry) from that path.
-    predictor = MGTransformerPredictor(_base_cfg(tmp_path, model="some/dir/thing.pt"))
+    cfg = _base_cfg(tmp_path, model="some/dir/thing.pt")
+    predictor = MGTransformerPredictor(cfg)
     try:
-        assert predictor.model_path == "some/dir/thing.pt"
+        # Relative model paths are anchored to mgt_repo (serve.py's cwd) and made
+        # absolute, so the file the config names is the file that gets opened.
+        expected = os.path.join(cfg["mgt_repo"], "some/dir/thing.pt")
+        assert predictor.model_path == expected
         cmd = predictor._proc.args
         assert "--ckpt" in cmd
-        assert cmd[cmd.index("--ckpt") + 1] == "some/dir/thing.pt"
+        assert cmd[cmd.index("--ckpt") + 1] == expected
         assert "--target" not in cmd
     finally:
         predictor.close()
+
+
+def test_missing_model_file_names_the_resolved_path(tmp_path):
+    # The failure mode this guards: a relative model path silently resolving
+    # against mgt_repo rather than the cwd, so the error must show both.
+    repo = _fake_mgt_repo(tmp_path)
+    with pytest.raises(FileNotFoundError) as info:
+        MGTransformerPredictor({"mgt_repo": repo, "mgt_python": sys.executable,
+                                "model": "ckpt/nope.pt"})
+    msg = str(info.value)
+    assert os.path.join(repo, "ckpt/nope.pt") in msg
+    assert "mgt_repo" in msg
+
+
+def test_missing_mgt_repo_dir_is_reported_clearly(tmp_path):
+    with pytest.raises(FileNotFoundError) as info:
+        MGTransformerPredictor({"mgt_repo": str(tmp_path / "nope"),
+                                "mgt_python": sys.executable, "model": "m.pt"})
+    msg = str(info.value)
+    assert "does not exist" in msg
+    assert "working directory" in msg.lower()

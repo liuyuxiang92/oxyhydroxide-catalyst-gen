@@ -1,127 +1,167 @@
 #!/usr/bin/env bash
 #
-# Submit one budget's worth of perovskite-level-1 runs: 5 arms x N seeds.
+# Seed sweep for ONE scenario config: pick an arm (or all), run N seeds.
 #
-# Mirrors scripts/submit_sweep.sh's design (decorrelated seeds, skip-if-done,
-# concurrency limiter, DRYRUN) for the single perovskite_level1.yaml scenario,
-# extended with the two non-rl-matdesign-CLI baselines (BO, GA).
+# Generalised from the old submit_perovskite_sweep.sh — the scenario is now a
+# --config argument rather than baked into the filename, so a new scenario needs
+# a new YAML, not a new launcher. Its sibling scripts/submit_sweep.sh is the
+# other shape: MANY scenarios (oxides_<scen>.yaml) at ONE budget label.
 #
-# Every episode/trial of every arm calls the REAL DPA4-relax -> MGTransformer
-# pipeline (via configs/perovskite_level1.yaml's MGTransformerPredictor) — there
-# is no lookup-table shortcut here. Run it from your working directory — the one
-# where `rl-matdesign --config configs/perovskite_level1.yaml ...` already works
-# and configs/perovskite.vasp / configs/perovskite_dpa4.ckpt.pt resolve.
+#     scripts/submit_seed_sweep.sh --config configs/cs2agbicl6_level1.yaml
+#     scripts/submit_seed_sweep.sh --config configs/cs2agbicl6_level1.yaml --arm a2c
+#     scripts/submit_seed_sweep.sh --config configs/perovskite_level1.yaml --budget 250 --arm bo
 #
-#     ./submit_perovskite_sweep.sh 100
-#     ./submit_perovskite_sweep.sh 250
-#     ./submit_perovskite_sweep.sh 500
-#     ./submit_perovskite_sweep.sh 1000
+# Run it from the directory where `rl-matdesign --config <CONFIG> ...` already
+# works: config-relative paths inside the YAML (base_poscar, mgt_repo, model,
+# geo_opt.model) are resolved from the CWD, and this script does not chdir.
 #
-# An optional second positional argument restricts the sweep to ONE arm
-# (default: all 5). Combine with -seed to pin both the method and the seed:
+# Arms — the default set is the three RL arms, which is the benchmark you almost
+# always want (same env, same budget, three learners):
 #
-#     ./submit_perovskite_sweep.sh 100 bo             # bo, all seeds
-#     ./submit_perovskite_sweep.sh 100 bo -seed 7      # bo, seed 7 only
+#     dqn_bootstrap   --method dqn --dqn-target-mode bootstrap
+#     dqn_mc          --method dqn --dqn-target-mode mc      (ablation, not a 4th method)
+#     a2c             --method a2c
+#     bo / ga         scripts/baselines/run_bo.py / run_ga.py   -- REQUIRE --budget
 #
-# Valid arms: dqn_bootstrap dqn_mc a2c bo ga (or 'all', the default).
+#   --arm a2c        one arm
+#   --arm rl         the three RL arms (default)
+#   --arm all        the three RL arms plus bo and ga
 #
-# Unlike submit_sweep.sh's free-text <label>, BUDGET here is a REQUIRED number:
-# it is passed straight through as --budget to the BO/GA baselines (their own
-# CLI reads it directly, no YAML edit needed for those two arms). It is NOT
-# read back out of the YAML for the DQN/A2C arms — this repo's own established
-# convention (see submit_sweep.sh's header) is that RL episode budgets are set
-# by hand in the YAML before each call, not auto-generated, because a generator
-# hides exactly the footguns below. So BEFORE each call, edit
-# configs/perovskite_level1.yaml's dqn_num_train_eps / pg_num_iters to match
-# BUDGET, and check:
+# DQN(bootstrap) and DQN(mc) are the SAME method with different regression
+# targets; label them that way in plots, not as two independent methods.
 #
-#   dqn_eps_anneal_eps   ~60% of dqn_num_train_eps (dqn_num_train_eps = BUDGET -
-#                        dqn_warmup_eps). Too high relative to the budget and
-#                        the "DQN" arm is mostly random search the whole run.
-#   pg_batch_eps         Keep FIXED across budgets; vary only pg_num_iters
-#                        (= BUDGET / pg_batch_eps). Varying both confounds
-#                        budget with A2C's entropy-collapse rate.
+# ---------------------------------------------------------------------------
+# CONCURRENCY: one run is not one process. A structure_score config spawns one
+# predictor subprocess PER MODEL PATH (e.g. cs2agbicl6_level3.yaml has three
+# MGTransformer heads => three serve.py processes, each holding GPU memory). Ten
+# seeds x three arms x three heads is 90 resident models if you let it all run at
+# once. MAX_JOBS defaults to 4 for that reason — raise it only after checking
+# `nvidia-smi` headroom for YOUR config's model count.
 #
-# Note budget means PREDICTOR CALLS, not episodes/trials:
-#   DQN: dqn_warmup_eps + dqn_num_train_eps  (warmup pays a real call per episode)
-#   PG:  pg_num_iters * pg_batch_eps         (PG warmup is free)
-#   BO/GA: --budget directly (one predictor call per trial/individual eval)
+# BUDGET: predictor calls, not episodes.
+#     DQN: dqn_warmup_eps + dqn_num_train_eps   (warmup pays a real call/episode)
+#     PG:  pg_num_iters * pg_batch_eps          (PG warmup is free)
+#     BO/GA: --budget directly
+# The RL budgets live in the YAML by this repo's convention (a generator would
+# hide the two traps below); --budget is passed through to BO/GA only, and is
+# used as the default run-name label. Before changing budget, check:
+#     dqn_eps_anneal_eps  ~60% of dqn_num_train_eps, or epsilon never anneals and
+#                         the "DQN" arm is random search for the whole run.
+#     pg_batch_eps        hold FIXED across budgets; vary only pg_num_iters, or
+#                         budget is confounded with A2C's entropy-collapse rate.
+# Both configs' budget tables sit next to those keys in the YAML.
 #
-# DRYRUN=1 prints the commands instead of running them.
-# Runs whose generated.csv already exists are skipped, so a crashed sweep resumes.
+# Env overrides:
+#   OUT=runs/<config-stem>   output root (seeded run dirs are created inside)
+#   SEEDS="1 2 3"            seed list (ignored when --seed is passed)
+#   MAX_JOBS=4               concurrent runs
+#   RL_BIN=rl-matdesign      launcher for the RL arms
+#   FORCE=1                  redo runs that already finished
+#   DRYRUN=1                 print the commands instead of running them
 #
-#   CONFIG=configs/perovskite_level1.yaml   scenario config
-#   OUT=runs/perovskite_l1                  output root
-#   MAX_JOBS=5                              concurrent runs
-#   SEEDS="1 2 3"                           override the seed list (ignored if -seed passed)
-#   FORCE=1                                 redo completed runs
+# Runs whose generated.csv exists are skipped, so a crashed sweep resumes.
 
 set -euo pipefail
 
-_VALID_ARMS="dqn_bootstrap dqn_mc a2c bo ga"
+_RL_ARMS="dqn_bootstrap dqn_mc a2c"
+_BASELINE_ARMS="bo ga"
+_VALID_ARMS="$_RL_ARMS $_BASELINE_ARMS"
 
-BUDGET="${1:-}"
-if [[ -z "$BUDGET" || ! "$BUDGET" =~ ^[0-9]+$ ]]; then
-    echo "usage: $0 <budget:int> [arm] [-seed N]    e.g. $0 250 bo -seed 7" >&2
-    echo "       arm: one of {$_VALID_ARMS} or 'all' (default)" >&2
+usage() {
+    cat >&2 <<EOF
+usage: $0 --config CONFIG [--arm ARM] [--seed N] [--budget B] [--label L]
+
+  --config CONFIG   scenario YAML (required; env CONFIG also works)
+  --arm ARM         one of {$_VALID_ARMS}, or 'rl' (default: the three RL arms),
+                    or 'all' (RL arms + bo + ga)
+  --seed N          pin to a single seed instead of the full SEEDS list
+  --budget B        integer; REQUIRED for the bo/ga arms, otherwise only used to
+                    label run directories
+  --label L         run-name tag (default: eps<budget>, or 'run' with no budget)
+
+e.g.  $0 --config configs/cs2agbicl6_level1.yaml --arm a2c
+      $0 --config configs/perovskite_level1.yaml --budget 250 --arm bo --seed 7
+EOF
     exit 1
-fi
-shift
+}
 
-ARM="all"
-if [[ $# -gt 0 && "$1" != "-seed" && "$1" != "--seed" ]]; then
-    ARM="$1"
-    shift
-    case " $_VALID_ARMS " in
-        *" $ARM "*) ;;
-        *) echo "error: unknown arm '$ARM'. Expected one of: $_VALID_ARMS (or 'all')" >&2
-           exit 1 ;;
-    esac
-fi
-
+CONFIG="${CONFIG:-}"
+ARM="rl"
 SEED_ONE=""
+BUDGET=""
+LABEL=""
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -seed|--seed)
-            SEED_ONE="${2:-}"
-            if [[ -z "$SEED_ONE" ]]; then
-                echo "error: -seed needs a value" >&2
-                exit 1
-            fi
-            shift 2
-            ;;
-        *)
-            echo "error: unrecognised argument '$1'" >&2
-            exit 1
-            ;;
+        --config)          CONFIG="${2:-}";   [[ -n "$CONFIG" ]]   || usage; shift 2 ;;
+        --arm)             ARM="${2:-}";      [[ -n "$ARM" ]]      || usage; shift 2 ;;
+        -seed|--seed)      SEED_ONE="${2:-}"; [[ -n "$SEED_ONE" ]] || usage; shift 2 ;;
+        --budget)          BUDGET="${2:-}";   [[ -n "$BUDGET" ]]   || usage; shift 2 ;;
+        --label)           LABEL="${2:-}";    [[ -n "$LABEL" ]]    || usage; shift 2 ;;
+        -h|--help)         usage ;;
+        *) echo "error: unrecognised argument '$1'" >&2; usage ;;
     esac
 done
 
-RL_BIN="${RL_BIN:-rl-matdesign}"
-CONFIG="${CONFIG:-configs/perovskite_level1.yaml}"
-OUT="${OUT:-runs/perovskite_l1}"
-SEEDS="${SEEDS:-7 19 23 42 58}"
-[[ -n "$SEED_ONE" ]] && SEEDS="$SEED_ONE"
-MAX_JOBS="${MAX_JOBS:-5}"
-FORCE="${FORCE:-0}"
-DRYRUN="${DRYRUN:-0}"
-
-if [[ ! -f "$CONFIG" ]]; then
-    echo "error: $CONFIG not found in $PWD" >&2
+[[ -n "$CONFIG" ]] || { echo "error: --config is required" >&2; usage; }
+[[ -f "$CONFIG" ]] || { echo "error: config '$CONFIG' not found (cwd: $PWD)" >&2; exit 1; }
+if [[ -n "$BUDGET" && ! "$BUDGET" =~ ^[0-9]+$ ]]; then
+    echo "error: --budget must be an integer, got '$BUDGET'" >&2
     exit 1
 fi
 
-ARMS_TO_RUN="$_VALID_ARMS"
-[[ "$ARM" != "all" ]] && ARMS_TO_RUN="$ARM"
+case "$ARM" in
+    rl)  ARMS_TO_RUN="$_RL_ARMS" ;;
+    all) ARMS_TO_RUN="$_VALID_ARMS" ;;
+    *)   case " $_VALID_ARMS " in
+             *" $ARM "*) ARMS_TO_RUN="$ARM" ;;
+             *) echo "error: unknown arm '$ARM'. Expected one of:" \
+                     "$_VALID_ARMS, 'rl', or 'all'" >&2; exit 1 ;;
+         esac ;;
+esac
 
-if [[ "$ARMS_TO_RUN" == *dqn* || "$ARMS_TO_RUN" == *a2c* ]]; then
-    echo "Reminder: dqn_num_train_eps/pg_num_iters in $CONFIG should reflect budget" \
-         "$BUDGET before this call — see the header comment in this script." >&2
+# bo/ga read the budget from their own CLI, so without it they would silently run
+# at their built-in default and be incomparable to the RL arms at this budget.
+if [[ -z "$BUDGET" ]]; then
+    for a in $ARMS_TO_RUN; do
+        case "$a" in
+            bo|ga) echo "error: arm '$a' needs --budget (its trial count comes from" \
+                        "the CLI, not the YAML)" >&2; exit 1 ;;
+        esac
+    done
 fi
-echo "Arm(s): $ARMS_TO_RUN" >&2
+
+CONFIG_STEM="$(basename "$CONFIG")"; CONFIG_STEM="${CONFIG_STEM%.*}"
+# With no --label and no --budget the name carries no tag at all: `a2c_seed7`
+# rather than a filler word. LABEL is still used to scope the final FAIL scan,
+# so an empty one there means "every log in this OUT".
+[[ -n "$LABEL" ]] || LABEL="${BUDGET:+eps$BUDGET}"
+NAME_TAG="${LABEL:+${LABEL}_}"
+
+RL_BIN="${RL_BIN:-rl-matdesign}"
+OUT="${OUT:-runs/$CONFIG_STEM}"
+SEEDS="${SEEDS:-7 19 23 42 58 61 77 84 96 103}"
+[[ -n "$SEED_ONE" ]] && SEEDS="$SEED_ONE"
+MAX_JOBS="${MAX_JOBS:-4}"
+FORCE="${FORCE:-0}"
+DRYRUN="${DRYRUN:-0}"
+
+n_seeds=$(printf '%s\n' $SEEDS | wc -l | tr -d ' ')
+n_arms=$(printf '%s\n' $ARMS_TO_RUN | wc -l | tr -d ' ')
+echo "config : $CONFIG" >&2
+echo "arms   : $ARMS_TO_RUN" >&2
+echo "seeds  : $SEEDS  (${n_seeds} x ${n_arms} arms = $((n_seeds * n_arms)) runs," \
+     "$MAX_JOBS at a time)" >&2
+echo "out    : $OUT" >&2
+case "$ARMS_TO_RUN" in
+    *dqn*|*a2c*)
+        echo "Reminder: the RL episode budgets come from $CONFIG" \
+             "(dqn_warmup_eps + dqn_num_train_eps, pg_num_iters * pg_batch_eps)," \
+             "not from --budget — see this script's header." >&2 ;;
+esac
 
 LOG_DIR="$OUT/logs"
-mkdir -p "$LOG_DIR"
+[[ "$DRYRUN" == "1" ]] || mkdir -p "$LOG_DIR"
 
 launched=0
 skipped=0
@@ -154,13 +194,17 @@ arm_cmd() {
 }
 
 for seed in $SEEDS; do
+    # Decorrelated seeds: the training RNG, the predictor's random-decoration
+    # sampling and the generation sampling get independent streams, so seed-to-seed
+    # spread is real variance rather than one shared stream reused three times.
     dp_seed=$((seed + 10000))
     gen_seed=$((seed + 20000))
 
     for arm in $ARMS_TO_RUN; do
-        name="${arm}_eps${BUDGET}_seed${seed}"
+        name="${arm}_${NAME_TAG}seed${seed}"
         run_out="$OUT/$name"
 
+        # generated.csv is written last, so its presence means the run finished.
         if [[ "$FORCE" != "1" && -f "$run_out/generated.csv" ]]; then
             skipped=$((skipped + 1))
             continue
@@ -189,10 +233,10 @@ fi
 
 wait
 echo
-echo "=== budget $BUDGET: $launched launched, $skipped already complete"
+echo "=== ${LABEL:-all}: $launched launched, $skipped already complete"
 echo "    logs: $LOG_DIR/"
 failed=0
-for f in "$LOG_DIR"/*"eps${BUDGET}"*.log; do
+for f in "$LOG_DIR"/*"${LABEL}"*.log; do
     [[ -f "$f" ]] || continue
     d="$OUT/$(basename "$f" .log)"
     [[ -f "$d/generated.csv" ]] || { echo "    [FAIL] $(basename "$f")"; failed=$((failed + 1)); }

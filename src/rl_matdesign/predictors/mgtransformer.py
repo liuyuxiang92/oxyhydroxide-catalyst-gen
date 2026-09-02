@@ -34,7 +34,10 @@ Config keys
         Python interpreter of MGTransformer's own conda env (its dependency set
         is incompatible with this repo's — see module docstring).
     model (required):
-        Path to a finetuned checkpoint, forwarded as ``serve.py --ckpt``. The
+        Path to a finetuned checkpoint, forwarded as ``serve.py --ckpt``. A
+        RELATIVE path is resolved against ``mgt_repo`` (not the cwd), because
+        that is the directory ``serve.py`` runs in; absolute paths are used
+        verbatim. The
         target name — and hence which calibration constants apply — is derived
         from the path by MGTransformer itself, so it is never named twice.
     config:
@@ -105,15 +108,38 @@ class MGTransformerPredictor:
                 "checkpoint, e.g. "
                 "'../MGTransformer/ckpt/finetuned/mbj_bandgap/mbj_bandgap_checkpoint_best.pt'."
             )
-        self.model_path = str(model)
-
         self.mgt_repo = os.path.abspath(str(mgt_repo))
+        if not os.path.isdir(self.mgt_repo):
+            raise FileNotFoundError(
+                f"mgt_repo={mgt_repo!r} resolves to {self.mgt_repo!r}, which does not "
+                "exist. Relative paths are taken from the CURRENT WORKING DIRECTORY, "
+                "so a config that works from one directory can fail from another -- "
+                "prefer an absolute path to the MGTransformer checkout."
+            )
         serve_script = os.path.join(self.mgt_repo, "serve.py")
         if not os.path.exists(serve_script):
             raise FileNotFoundError(
                 f"{serve_script!r} not found. Add MGTransformer's graph_builder.py / "
                 "predict.py / serve.py (this repo does not ship them) before using "
                 "MGTransformerPredictor."
+            )
+
+        # A relative `model` is anchored to mgt_repo, NOT to the cwd: serve.py runs
+        # with cwd=mgt_repo (see Popen below), so an un-anchored relative path would
+        # silently resolve against the checkout and land somewhere unintended. Making
+        # it absolute here means the path a user reads in the config and the file that
+        # is actually opened are the same thing, from any working directory.
+        self.model_path = (
+            str(model) if os.path.isabs(str(model))
+            else os.path.join(self.mgt_repo, str(model))
+        )
+        if not os.path.exists(self.model_path):
+            raise FileNotFoundError(
+                f"model={model!r} resolves to {self.model_path!r}, which does not "
+                "exist. A relative 'model' is taken from mgt_repo "
+                f"({self.mgt_repo!r}), so write it as e.g. "
+                "'ckpt/finetuned/mbj_bandgap/mbj_bandgap_checkpoint_best.pt' -- or "
+                "give an absolute path."
             )
 
         # serve.py reads the target name (and hence its calibration entry) off the

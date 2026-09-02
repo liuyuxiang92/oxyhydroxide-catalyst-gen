@@ -9,7 +9,7 @@ bootstrap/mc, A2C, BO, GA) get to the TRUE global optimum, and did it find it
 exactly?
 
 Each (arm, budget, seed) is an INDEPENDENT run (this repo's established
-convention — see ``submit_perovskite_sweep.sh`` / ``submit_sweep.sh`` headers:
+convention — see ``submit_seed_sweep.sh`` / ``submit_sweep.sh`` headers:
 episode budgets are set by hand per launch, not resumed across budgets), so
 this reads the single best candidate each run's ``generated.csv`` found — not
 a within-run "best so far" trajectory (that column, ``best_reward_so_far`` in
