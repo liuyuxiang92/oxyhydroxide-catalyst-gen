@@ -69,8 +69,16 @@ Config keys
         candidate keys holding the ``composition``-kind dopant+host picks.
     a_defect_group (default ``A_defect``): the candidate key holding the single
         combined ``"<species>_<signed amount>"`` categorical pick.
-    interstitial_min_dist (default 1.5 Å): passed through to the new atoms'
-        minimum allowed distance from any existing atom.
+    interstitial_min_dist (default 1.5 Å): the new atom's minimum allowed
+        (minimum-image PBC) distance from any existing atom. This is the
+        SOLE accept/reject rule for interstitial placement -- placement itself
+        is a deterministic periodic-Voronoi void search ranked by normalized
+        species-size clearance (see ``utils.structure._voronoi_void_candidates``
+        / ``_species_clearance_score``), not random rejection sampling, so
+        ``interstitial_max_attempts`` (below) no longer bounds anything.
+    interstitial_max_attempts (default 2000): accepted for backward
+        compatibility only -- unused by the current (deterministic, no
+        per-point resampling) placement algorithm.
 """
 from __future__ import annotations
 
@@ -94,11 +102,11 @@ class DefectSiteBuilder:
         self.b_group: str = str(cfg.get("b_dopant_group", "B_dopant"))
         self.a_defect_group: str = str(cfg.get("a_defect_group", "A_defect"))
         self.min_dist: float = float(cfg.get("interstitial_min_dist", 1.5))
-        # Random-placement success drops sharply with distance (measured on
-        # perovskite.vasp: 0.7% of random points valid at 1.7 A vs 6.1% at
-        # 1.5 A), and up to 4 interstitials can be requested in one pick, each
-        # shrinking the remaining free volume for the next -- the SublatticeOp
-        # default of 200 attempts is NOT enough at realistic min_dist values.
+        # Vestigial: placement is now a deterministic periodic-Voronoi void
+        # search (utils/structure.py's _insert_interstitials), not random
+        # rejection sampling -- there is no more per-point resampling loop for
+        # this to bound. Kept only so an existing config that sets it doesn't
+        # error; the value is read and threaded through but has no effect.
         self.max_attempts: int = int(cfg.get("interstitial_max_attempts", 2000))
         self._seed = seed
 

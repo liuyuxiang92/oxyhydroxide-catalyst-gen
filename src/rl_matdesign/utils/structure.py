@@ -26,6 +26,12 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 import numpy as np
+# Module-level (not lazy like the ASE imports elsewhere in this file): scipy is
+# already a guaranteed transitive dependency (pymatgen requires it), and tests
+# need to monkeypatch `rl_matdesign.utils.structure.Voronoi` directly to
+# exercise the QhullError failure path -- a function-local `from scipy.spatial
+# import ...` would not create a patchable module attribute.
+from scipy.spatial import QhullError, Voronoi, cKDTree
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +230,216 @@ def build_substituted_structure(
     return configs
 
 
+def _atomic_radius(symbol: str) -> Optional[float]:
+    """ASE/Cordero covalent radius (Å) for *symbol*, or ``None`` if unavailable.
+
+    A cheap geometric size descriptor -- not an ionic radius, not a thermodynamic
+    stability model -- used only to RANK interstitial void candidates that have
+    already passed the hard ``interstitial_min_dist`` distance check (see
+    :func:`_insert_interstitials`); atomic size never rejects a candidate on its
+    own. Works automatically for any element ASE knows about via
+    ``ase.data.atomic_numbers``/``covalent_radii`` -- there is no per-pair table
+    to maintain, and this never raises for an exotic/unknown symbol: it returns
+    ``None`` so callers can fall back to a species-agnostic ranking cleanly.
+    """
+    from ase.data import atomic_numbers, covalent_radii
+
+    z = atomic_numbers.get(symbol)
+    if z is None or z >= len(covalent_radii):
+        return None
+    r = float(covalent_radii[z])
+    if not np.isfinite(r) or r <= 0:
+        return None
+    return r
+
+
+def _candidate_free_radius(candidate: np.ndarray, atoms: "ase.Atoms") -> float:
+    """``min_j`` of the PBC (minimum-image) distance from *candidate* to every
+    atom currently in *atoms*. Species-agnostic; used as the tie-breaker under
+    :func:`_species_clearance_score`, and as the sole ranking metric when no
+    species radius data is available at all.
+    """
+    from ase.geometry import get_distances
+
+    _, dists = get_distances(
+        [candidate], atoms.get_positions(), cell=atoms.get_cell(), pbc=True
+    )
+    return float(dists.min())
+
+
+def _species_clearance_score(
+    insert_species: str, candidate: np.ndarray, atoms: "ase.Atoms",
+) -> Optional[float]:
+    """Normalized void-clearance score for inserting *insert_species* at
+    *candidate*: ``min_j [ d_PBC(candidate, atom_j) / (r_insert + r_j) ]`` over
+    neighbors ``j`` with a known radius. Larger is better -- more room relative
+    to how big the inserted atom and its neighbor actually are, so e.g. a large
+    species like Ba automatically needs proportionally more space than a small
+    one, with zero species-pair-specific code.
+
+    RANKING ONLY -- see :func:`_insert_interstitials`: the hard accept/reject
+    rule is ``interstitial_min_dist`` alone, this score never rejects a
+    candidate, only orders the ones that already passed that check.
+
+    Returns ``None`` (signalling "no species-aware signal available", not "this
+    candidate is invalid") in two cases: the inserted species' own radius is
+    unknown (this disables species-aware ranking for every candidate in this
+    insertion request, since ``r_insert`` is the same for all of them), or this
+    specific candidate has no neighbor at all with a known radius. Callers fall
+    back to :func:`_candidate_free_radius` in both cases.
+    """
+    from ase.geometry import get_distances
+
+    r_insert = _atomic_radius(insert_species)
+    if r_insert is None:
+        return None
+
+    positions = atoms.get_positions()
+    symbols = atoms.get_chemical_symbols()
+    _, dists = get_distances([candidate], positions, cell=atoms.get_cell(), pbc=True)
+
+    ratios = []
+    for d, sym in zip(dists[0], symbols):
+        r_j = _atomic_radius(sym)
+        if r_j is None:
+            continue
+        ratios.append(float(d) / (r_insert + r_j))
+    if not ratios:
+        return None
+    return min(ratios)
+
+
+def _voronoi_void_candidates(atoms: "ase.Atoms") -> List[np.ndarray]:
+    """Candidate interstitial positions: local void centers of the periodic
+    structure, as Cartesian coordinates wrapped into the central cell.
+
+    Approach -- a "reasonable periodic-image construction", not a rigorous
+    infinite-periodic Voronoi tessellation. Adequate for a roughly-cubic cell
+    like ``perovskite.vasp``'s; not a universal guarantee for arbitrarily
+    skewed cells (the ±1 image shell is not made configurable):
+
+    1. Replicate the current atoms across the ±1 periodic-image shell (27
+       images including the identity).
+    2. Tessellate the expanded point cloud with ``scipy.spatial.Voronoi`` and
+       take its vertices -- points locally equidistant from ≥4 neighbors, i.e.
+       local void centers.
+    3. Discard vertices near the outer hull of this *finite* replica: convert
+       to fractional coordinates of the central cell and drop anything outside
+       roughly ``[-0.5, 1.5)`` on any axis. A true infinite tessellation would
+       push these into the next shell; keeping them would fold in spurious
+       candidates once wrapped.
+    4. Wrap the survivors into ``[0, 1)`` and back to Cartesian.
+    5. Deduplicate, **periodically**: plain Euclidean distance on the wrapped
+       positions alone is not enough, since two genuinely-close candidates can
+       land near opposite cell faces (fractional 0.01 vs. 0.99) and read as far
+       apart in ordinary Cartesian distance. Any candidate within a small
+       margin of a cell face gets temporary "ghost" copies (shifted ±1 along
+       the near axes) added before building a ``scipy.spatial.cKDTree``, so
+       cross-boundary duplicates collide in the same search neighborhood;
+       cluster on the padded set and keep one representative per cluster.
+    6. Exclude any candidate numerically coincident with an existing atom.
+    """
+    from ase.geometry import get_distances
+
+    positions = atoms.get_positions()
+    if len(positions) < 4:
+        raise ValueError(
+            f"Cannot construct Voronoi void candidates: only {len(positions)} "
+            "atom(s) present, need >= 4 non-coplanar points for a 3D tessellation."
+        )
+    cell = atoms.get_cell()
+
+    shifts = [
+        np.array([i, j, k], dtype=float)
+        for i in (-1, 0, 1) for j in (-1, 0, 1) for k in (-1, 0, 1)
+    ]
+    expanded = np.concatenate(
+        [positions + shift @ cell for shift in shifts], axis=0
+    )
+
+    try:
+        vor = Voronoi(expanded)
+    except QhullError as exc:
+        raise ValueError(
+            f"Could not construct Voronoi void candidates: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+    verts = vor.vertices
+    if len(verts) == 0:
+        return []
+
+    frac = cell.scaled_positions(verts)
+    inside = np.all((frac >= -0.5) & (frac < 1.5), axis=1)
+    frac = frac[inside]
+    if len(frac) == 0:
+        return []
+
+    wrapped_frac = frac % 1.0
+    wrapped_cart = cell.cartesian_positions(wrapped_frac)
+
+    margin = 0.05
+    ghost_cart: List[np.ndarray] = []
+    ghost_owner: List[int] = []
+    for idx, f in enumerate(wrapped_frac):
+        axis_options = []
+        for a in range(3):
+            opts = [0]
+            if f[a] < margin:
+                opts.append(-1)
+            elif f[a] > 1 - margin:
+                opts.append(1)
+            axis_options.append(opts)
+        for dx in axis_options[0]:
+            for dy in axis_options[1]:
+                for dz in axis_options[2]:
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue
+                    ghost_frac = f + np.array([dx, dy, dz], dtype=float)
+                    ghost_cart.append(cell.cartesian_positions(ghost_frac))
+                    ghost_owner.append(idx)
+
+    if ghost_cart:
+        pool_cart = np.concatenate([wrapped_cart, np.array(ghost_cart)], axis=0)
+        pool_owner = list(range(len(wrapped_cart))) + ghost_owner
+    else:
+        pool_cart = wrapped_cart
+        pool_owner = list(range(len(wrapped_cart)))
+
+    tol = 0.05  # Å -- "numerically identical" for both dedup and atom-coincidence checks
+    tree = cKDTree(pool_cart)
+    pairs = tree.query_pairs(r=tol)
+
+    parent = list(range(len(wrapped_cart)))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    for i, j in pairs:
+        union(pool_owner[i], pool_owner[j])
+
+    clusters: Dict[int, List[int]] = {}
+    for idx in range(len(wrapped_cart)):
+        clusters.setdefault(find(idx), []).append(idx)
+    deduped = [wrapped_cart[members[0]] for members in clusters.values()]
+
+    if deduped:
+        cand_arr = np.array(deduped)
+        _, dists_to_atoms = get_distances(cand_arr, positions, cell=cell, pbc=True)
+        keep = dists_to_atoms.min(axis=1) > tol
+        deduped = [c for c, k in zip(deduped, keep) if k]
+
+    return deduped
+
+
 def _insert_interstitials(
     atoms: "ase.Atoms",
     specs: Sequence[Any],
@@ -232,39 +448,100 @@ def _insert_interstitials(
     min_dist: float = 1.5,
     max_attempts: int = 200,
 ) -> "ase.Atoms":
-    """Add new atoms at random positions, not tied to any existing site.
+    """Add new atoms at deterministically-chosen void positions, not tied to any
+    existing site.
 
     Applied *after* any ``put``/``remove`` in the same :func:`build_substituted_structure`
     call, so an inserted atom never collides with a substitution/deletion from the same
-    op list. Each candidate position is rejected and resampled if it lands within
-    ``min_dist`` (minimum-image convention, so a candidate near a cell boundary is checked
-    against periodic images too) of any existing atom or of an interstitial already placed
-    in this call.
+    op list.
+
+    Placement pipeline, per requested species (in the order given by *specs*;
+    multiple atoms of the same species share one Voronoi candidate pool,
+    generated once and consumed as atoms are placed):
+
+    1. Generate periodic Voronoi void candidates (:func:`_voronoi_void_candidates`).
+    2. HARD reject any candidate within ``min_dist`` (minimum-image PBC) of an
+       existing atom -- this is the ONLY rejection rule. There is deliberately
+       no second, species-aware distance threshold: atomic radii RANK the
+       survivors (see :func:`_species_clearance_score`), they never reject one.
+    3. Rank survivors by normalized species clearance, falling back to
+       species-agnostic :func:`_candidate_free_radius` when radius data isn't
+       available, then a deterministic rounded-fractional-coordinate tie-break
+       -- so placement is fully reproducible for a given structure. No RNG is
+       involved in the choice; ``rng``/``max_attempts`` are accepted for
+       call-signature compatibility with :func:`build_substituted_structure`
+       but unused here -- there is no more per-point resampling loop to bound.
+    4. Place the single best (rank #1) candidate, remove it from the pool, and
+       repeat for the next atom of this species against the *updated*
+       structure -- so a second interstitial of the same species is screened
+       and ranked against the first (its radius participates automatically,
+       via its real chemical symbol, with no species-pair-specific code).
     """
     from ase import Atom
+
+    for species, count in specs:
+        pool = _voronoi_void_candidates(atoms)
+        for _ in range(count):
+            n_candidates = len(pool)
+            if not pool:
+                raise ValueError(
+                    f"Could not place {species} interstitial: no Voronoi void "
+                    "candidates remain for the current structure."
+                )
+
+            cell = atoms.get_cell()
+            positions = atoms.get_positions()
+            valid = []
+            for cand in pool:
+                free_r = _candidate_free_radius_from(cand, positions, cell)
+                if free_r >= min_dist:
+                    valid.append(cand)
+
+            if not valid:
+                raise ValueError(
+                    f"Could not place {species} interstitial: {n_candidates} "
+                    f"Voronoi candidates generated, 0 satisfy "
+                    f"interstitial_min_dist={min_dist} Å."
+                )
+
+            scored = []
+            for cand in valid:
+                score = _species_clearance_score(species, cand, atoms)
+                free_r = _candidate_free_radius(cand, atoms)
+                tiebreak = tuple(np.round(cell.scaled_positions(cand), 6))
+                scored.append((score is not None, score, free_r, tiebreak, cand))
+            scored.sort(
+                key=lambda t: (
+                    t[0], t[1] if t[1] is not None else float("-inf"), t[2], t[3],
+                ),
+                reverse=True,
+            )
+
+            has_score, best_score, best_free_r, _tb, best_cand = scored[0]
+            score_str = f"{best_score:.3f}" if has_score else "n/a"
+            print(
+                f"[interstitial] species={species} candidates={n_candidates} "
+                f"valid={len(valid)} selected_rank=1 "
+                f"free_radius={best_free_r:.2f} Å species_score={score_str}"
+            )
+
+            atoms.append(Atom(species, position=best_cand))
+            pool = [c for c in pool if not np.allclose(c, best_cand)]
+    return atoms
+
+
+def _candidate_free_radius_from(
+    candidate: np.ndarray, positions: np.ndarray, cell: "ase.cell.Cell",
+) -> float:
+    """Same computation as :func:`_candidate_free_radius`, taking already-fetched
+    ``positions``/``cell`` -- used by :func:`_insert_interstitials`'s hard-filter
+    pass, which evaluates every pool candidate once per placed atom and would
+    otherwise re-fetch ``atoms.get_positions()`` from scratch each time.
+    """
     from ase.geometry import get_distances
 
-    cell = atoms.get_cell()
-    for species, count in specs:
-        for _ in range(count):
-            for attempt in range(max_attempts):
-                frac = rng.random(3)
-                cart = frac @ cell
-                existing = atoms.get_positions()
-                if len(existing):
-                    _, dists = get_distances([cart], existing, cell=cell, pbc=True)
-                    if dists.min() < min_dist:
-                        continue
-                atoms.append(Atom(species, position=cart))
-                break
-            else:
-                raise ValueError(
-                    f"build_substituted_structure: could not place an interstitial "
-                    f"{species!r} atom after {max_attempts} attempts (min_dist="
-                    f"{min_dist} Å) — the cell may be too crowded, or min_dist too "
-                    "large for this cell size."
-                )
-    return atoms
+    _, dists = get_distances([candidate], positions, cell=cell, pbc=True)
+    return float(dists.min())
 
 
 # ---------------------------------------------------------------------------

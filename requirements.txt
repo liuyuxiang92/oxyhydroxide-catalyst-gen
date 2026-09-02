@@ -6,6 +6,10 @@ joblib
 pymatgen
 matminer
 pandas
+# Already an installed transitive dependency of pymatgen (>=1.13.0); listed
+# explicitly because utils/structure.py now imports it directly (periodic
+# Voronoi interstitial-void search).
+scipy
 
 # Charge-neutrality / electronegativity backend (smact_charge / pauling_en filters).
 # Imported lazily — only needed when a config enables those constraints.

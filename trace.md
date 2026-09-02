@@ -2563,3 +2563,27 @@ failure -> raises loudly after 11 consecutive attempts rather than hanging;
 its exact target count, failures just inflate the attempts counter. Full
 test suite green except the 2 known pre-existing test_site_pick_builder.py
 failures. All 23 configs still build via build_env.
+
+### EARS — Progress (2026-09-02 12:41)
+<!-- concepts: interstitial-placement, voronoi-geometry, periodic-boundary-conditions -->
+Started implementing the Voronoi-void interstitial placement plan (v3,
+approved after 3 rounds of user revision -- see
+.claude/plans/abstract-roaming-sedgewick.md). Replaced
+utils/structure.py's _insert_interstitials (was: uniform random rejection
+sampling against one flat interstitial_min_dist) with a deterministic
+pipeline: periodic Voronoi void candidates (+-1 image shell,
+scipy.spatial.Voronoi) -> hard filter on interstitial_min_dist ALONE (no
+species-aware term in the accept/reject gate, per the user's explicit
+correction) -> rank survivors by a dimensionless normalized-clearance score
+min_j[d_ij/(r_insert+r_j)] using ASE's generic covalent-radius table (no
+hardcoded Ba/Fe/O pair table) -> pick rank #1 deterministically (no RNG,
+no top-K). Added 4 new helpers: _atomic_radius, _candidate_free_radius,
+_species_clearance_score, _voronoi_void_candidates (+ a small
+_candidate_free_radius_from taking pre-fetched positions/cell to avoid
+redundant atoms.get_positions() calls in the hard-filter pass). No new
+YAML config keys -- interstitial_min_dist unchanged, interstitial_max_attempts
+kept for backward compat but now vestigial. PBC-aware dedup uses a
+ghost-padded cKDTree (plain Euclidean dedup on wrapped positions alone
+would miss cross-boundary duplicates near opposite cell faces). Next:
+smoke-test this against a real structure, add scipy to requirements.txt,
+update defect_site.py's docstring, then write the new test file.
